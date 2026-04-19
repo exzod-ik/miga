@@ -1,0 +1,22 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="nlohmann">
+      <UniqueIdentifier>{58541efb-1e59-46e9-b744-38933fcfd9d0}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="$(MSBuildThisFileDirectory)Encryption.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)Logger.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)nlohmann\json.hpp">
+      <Filter>nlohmann</Filter>
+    </ClInclude>
+    <ClInclude Include="$(MSBuildThisFileDirectory)UdpPacketAssembler.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)NetworkStructures.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="$(MSBuildThisFileDirectory)Logger.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)Encryption.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)UdpPacketAssembler.cpp" />
+  </ItemGroup>
+</Project>

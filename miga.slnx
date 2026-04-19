@@ -1,0 +1,25 @@
+<Solution>
+  <Configurations>
+    <Platform Name="Any CPU" />
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Folder Name="/Элементы решения/">
+    <File Path="Directory.Build.props" />
+  </Folder>
+  <Project Path="InstallerCustomActions/InstallerCustomActions.csproj" Id="7ccebff3-eab1-4773-be1f-d8dcc300816f" />
+  <Project Path="MIGA Agent/MIGA Agent.csproj" Id="c17736e1-124b-464d-ac88-d3753ac8e655" />
+  <Project Path="MigaInstaller/MigaInstaller.vdproj" Type="Installer">
+    <BuildDependency Project="InstallerCustomActions/InstallerCustomActions.csproj" />
+    <BuildDependency Project="MIGA Agent/MIGA Agent.csproj" />
+    <BuildDependency Project="miga_client/miga_client.vcxproj" />
+    <BuildDependency Project="miga_server/miga_server.vcxproj" />
+    <Build />
+  </Project>
+  <Project Path="miga_client/miga_client.vcxproj" Id="f112fd91-618c-4eed-8469-02e559413aca" />
+  <Project Path="miga_server/miga_server.vcxproj" Id="e5f82f2d-0300-4a8c-b420-6e1c8135439a">
+    <Platform Solution="*|x86" Project="x86" />
+    <Deploy />
+  </Project>
+  <Project Path="Shared/Shared.vcxitems" Id="56bde380-a370-4edb-91bf-2cd0f6c5f640" />
+</Solution>
