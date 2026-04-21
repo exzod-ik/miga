@@ -13,16 +13,16 @@ private:
     static const size_t SWAP_KEY_SIZE = 8;
 
     void XorTransform(uint8_t* data, size_t length);
-    void SwapTransform(uint8_t* data, size_t length);
-    void ReverseSwapTransform(uint8_t* data, size_t length);
+    void SwapTransform(uint8_t* data, size_t length, uint16_t nonce);
+    void ReverseSwapTransform(uint8_t* data, size_t length, uint16_t nonce);
 
 public:
     Encryption();
     ~Encryption();
 
     bool Initialize(const std::string& xorKeyBase64, const std::string& swapKeyBase64);
-    void Encrypt(uint8_t* data, size_t length);
-    void Decrypt(uint8_t* data, size_t length);
+    void Encrypt(uint8_t* data, size_t length, uint16_t nonce);
+    void Decrypt(uint8_t* data, size_t length, uint16_t nonce);
     bool IsInitialized() const { return !m_xorKey.empty() && !m_swapKey.empty(); }
 
     static std::string GenerateXorKeyBase64();

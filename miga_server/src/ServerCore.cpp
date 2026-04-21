@@ -275,7 +275,7 @@ void ServerCore::ProcessClientUdpPacket(UdpPacketInfo* pkt) {
     size_t payloadLen = pkt->payloadSize;
 
     vector<uint8_t> decrypted(udpPayload, udpPayload + payloadLen);
-    m_encryption.Decrypt(decrypted.data(), decrypted.size());
+    m_encryption.Decrypt(decrypted.data(), decrypted.size(), htons(pkt->dstPort));
 
     const uint8_t* origIpPacket = decrypted.data();
     size_t origIpLen = decrypted.size();
@@ -598,7 +598,7 @@ void ServerCore::HandleInternetPacket(const uint8_t* ipPacket, size_t ipLen, uin
     vector<uint8_t> responsePacket(outPacket.size());
     memcpy(responsePacket.data(), outPacket.data(), outPacket.size());
 
-    m_encryption.Encrypt(responsePacket.data(), responsePacket.size());
+    m_encryption.Encrypt(responsePacket.data(), responsePacket.size(), info.local_udp_port);
 
     struct iphdr udpIp;
     memset(&udpIp, 0, sizeof(udpIp));

@@ -99,7 +99,7 @@ void Encryption::XorTransform(uint8_t* data, size_t length) {
 }
 
 // apply swap key to encrypt data
-void Encryption::SwapTransform(uint8_t* data, size_t length) {
+void Encryption::SwapTransform(uint8_t* data, size_t length, uint16_t nonce) {
     if (m_swapKey.empty()) {
         throw runtime_error("SwapTransform: swap key empty");
     }
@@ -113,7 +113,12 @@ void Encryption::SwapTransform(uint8_t* data, size_t length) {
         key |= (static_cast<uint64_t>(m_swapKey[i]) << (i * 8));
     }
 
-    uint64_t keyBits = key;
+    uint64_t nonce_64 = 0;
+    for (size_t i = 0; i < 4; i++) {
+        nonce_64 |= (static_cast<uint64_t>(nonce) << (i * 16));
+    }
+
+    uint64_t keyBits = key ^ nonce_64;
     size_t keyBitPos = 0;
 
     for (size_t i = 0; i < length - 1; i++) {
@@ -126,11 +131,18 @@ void Encryption::SwapTransform(uint8_t* data, size_t length) {
 }
 
 // apply swap key to decrypt data
-void Encryption::ReverseSwapTransform(uint8_t* data, size_t length) {
+void Encryption::ReverseSwapTransform(uint8_t* data, size_t length, uint16_t nonce) {
     uint64_t key = 0;
     for (size_t i = 0; i < SWAP_KEY_SIZE; i++) {
         key |= (static_cast<uint64_t>(m_swapKey[i]) << (i * 8));
     }
+
+    uint64_t nonce_64 = 0;
+    for (size_t i = 0; i < 4; i++) {
+        nonce_64 |= (static_cast<uint64_t>(nonce) << (i * 16));
+    }
+
+    key ^= nonce_64;
 
     // go from the end to the beginning, using the same key bits
     for (size_t i = length - 1; i > 0; i--) {
@@ -142,7 +154,7 @@ void Encryption::ReverseSwapTransform(uint8_t* data, size_t length) {
     }
 }
 
-void Encryption::Encrypt(uint8_t* data, size_t length) {
+void Encryption::Encrypt(uint8_t* data, size_t length, uint16_t nonce) {
     if (!data) {
         throw runtime_error("Encrypt: null data pointer");
     }
@@ -157,11 +169,11 @@ void Encryption::Encrypt(uint8_t* data, size_t length) {
     }
 
     XorTransform(data, length);
-    SwapTransform(data, length);
+    SwapTransform(data, length, nonce);
 }
 
-void Encryption::Decrypt(uint8_t* data, size_t length) {
-    ReverseSwapTransform(data, length);
+void Encryption::Decrypt(uint8_t* data, size_t length, uint16_t nonce) {
+    ReverseSwapTransform(data, length, nonce);
     XorTransform(data, length);
 }
 

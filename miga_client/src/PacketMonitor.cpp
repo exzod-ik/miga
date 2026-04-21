@@ -371,7 +371,7 @@ bool PacketMonitor::SendUdpPacketToMstcp(const UdpPacketInfo* pkt, WINDIVERT_ADD
     m_Logger->log(LOGGER_LEVEL_DEBUG, "Processing a full udp packet...");
 
     // decrypt payload - original tranmitted packet
-    m_Encryption.Decrypt(pkt->payload, pkt->payloadSize);
+    m_Encryption.Decrypt(pkt->payload, pkt->payloadSize, htons(pkt->srcPort));
 
     // recalc checksums (server don't do it)
     IP_HEADER* ip = reinterpret_cast<IP_HEADER*>(pkt->payload);
@@ -507,6 +507,10 @@ bool PacketMonitor::Start() {
     }
 
     m_Running.store(true);
+
+    random_device rd;
+    m_rng.seed(rd());
+    m_portDist = uniform_int_distribution<uint16_t>(m_Config->GetPortStart(), m_Config->GetPortEnd());
 
     if (!m_Encryption.Initialize(m_Config->GetXorKeyBase64(), m_Config->GetSwapKeyBase64())) {
         m_Logger->log(LOGGER_LEVEL_ERROR, "Failed to initialize Encryption");
@@ -707,18 +711,13 @@ void PacketMonitor::RedirectPacket(const uint8_t* packet, UINT packetLen, const 
         m_Logger->log(LOGGER_LEVEL_DEBUG, "Redirect packet from " + IpToString(ipHeader->src_ip) + ":" + to_string(htons(originalSrcPort)) + " to " + IpToString(ipHeader->dst_ip) + ":" + to_string(htons(originalDstPort)));
     }
 
+    // select a random udp port based on the packet checksum
+    uint16_t serverPort = m_portDist(m_rng);
+
     // copy and encrypt packet
     vector<uint8_t> outgoingPacket(packetLen);
     memcpy(outgoingPacket.data(), packet, packetLen);
-    m_Encryption.Encrypt(outgoingPacket.data(), outgoingPacket.size());
-
-    // select a random udp port based on the packet checksum
-    uint32_t hash = 0;
-    for (size_t i = 0; i < outgoingPacket.size(); i++) {
-        hash = ((hash << 5) + hash) + outgoingPacket[i];
-    }
-    uint16_t portRange = m_Config->GetPortEnd() - m_Config->GetPortStart() + 1;
-    uint16_t serverPort = m_Config->GetPortStart() + (hash % portRange);
+    m_Encryption.Encrypt(outgoingPacket.data(), outgoingPacket.size(), serverPort);
 
     m_serverAddr.sin_port = htons(serverPort);
     int sent = sendto(m_udpSocket,

@@ -2,6 +2,7 @@
 
 #include <windivert.h>
 #include <shared_mutex>
+#include <random>
 #include "ConfigManager.h"
 #include "Logger.h"
 #include "Encryption.h"
@@ -37,6 +38,9 @@ private:
     std::unordered_map<uint16_t, std::vector<PendingPacket>> pendingTCP;
     std::unordered_map<uint16_t, std::vector<PendingPacket>> pendingUDP;
     std::shared_mutex pendingMutex;
+
+    std::mt19937 m_rng;
+    std::uniform_int_distribution<uint16_t> m_portDist;
 
     SOCKET m_udpSocket;
     sockaddr_in m_serverAddr;
