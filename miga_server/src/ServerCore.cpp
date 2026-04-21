@@ -900,6 +900,7 @@ bool ServerCore::Initialize(const string& configPath) {
 void ServerCore::Start() {
     if (m_running) return;
     m_running = true;
+    system("iptables -I OUTPUT -p icmp --icmp-type destination-unreachable -j DROP"); // drop icmp "Port unreachable"
     m_processPacketsThread = thread(&ServerCore::ProcessPackets, this);
     m_processTunThread = thread(&ServerCore::ProcessTUN, this);
     m_cleanupThread = thread(&ServerCore::CleanupLoop, this);
@@ -909,6 +910,7 @@ void ServerCore::Start() {
 void ServerCore::Stop() {
     if (m_running) {
         m_running = false;
+        system("iptables -D OUTPUT -p icmp --icmp-type destination-unreachable -j DROP");
         if (m_processPacketsThread.joinable()) m_processPacketsThread.join();
         if (m_processTunThread.joinable()) m_processTunThread.join();
         if (m_cleanupThread.joinable()) m_cleanupThread.join();
