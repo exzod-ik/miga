@@ -47,8 +47,16 @@
     <ClInclude Include="include\PacketMonitor.h">
       <Filter>Файлы заголовков</Filter>
     </ClInclude>
+    <ClInclude Include="resource.h">
+      <Filter>Файлы заголовков</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <None Include="config.json" />
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="miga_client.rc">
+      <Filter>Файлы ресурсов</Filter>
+    </ResourceCompile>
   </ItemGroup>
 </Project>

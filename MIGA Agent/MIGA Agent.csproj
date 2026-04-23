@@ -11,6 +11,8 @@
 	<BaseIntermediateOutputPath>$(SolutionDir)Build\MIGA Agent</BaseIntermediateOutputPath>
     <BaseOutputPath>$(SolutionDir)Build\MIGA Agent</BaseOutputPath>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <AssemblyVersion>1.1.0.0</AssemblyVersion>
+    <FileVersion>1.1.0.0</FileVersion>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|AnyCPU'">

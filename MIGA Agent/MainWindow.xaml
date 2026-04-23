@@ -18,8 +18,8 @@
             <StackPanel Margin="0,0,10,0">
 
                 <!-- Настройки сервера (основные) -->
-                <GroupBox Header="Настройки сервера" Margin="0,0,0,10">
-                    <StackPanel Margin="10">
+                <GroupBox Header="Настройки сервера" Margin="0,0,0,0">
+                    <StackPanel Margin="5">
 
                         <!-- Server IP -->
                         <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
@@ -54,8 +54,8 @@
                 </GroupBox>
 
                 <!-- Состояние клиента (локальная служба) -->
-                <GroupBox Header="Состояние клиента" Margin="0,0,0,10">
-                    <StackPanel Margin="10">
+                <GroupBox Header="Состояние клиента" Margin="0,0,0,0">
+                    <StackPanel Margin="5">
                         <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
                             <TextBlock Text="Статус:" Width="60" FontWeight="Bold"/>
                             <TextBlock Text="{Binding ServiceStatus}" FontWeight="Bold"/>
@@ -81,6 +81,12 @@
                             </StackPanel>
                         </GroupBox>
 
+                        <!-- DNS сервер для перенаправления -->
+                        <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
+                            <TextBlock Text="DNS Server:" Width="81" VerticalAlignment="Center"/>
+                            <TextBox Text="{Binding DnsServer}" IsEnabled="{Binding IsSshConnected}" Width="250"/>
+                        </StackPanel>
+
                         <!-- Диапазоны портов -->
                         <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
                             <TextBlock Text="Client ports (start - end):" Width="155" VerticalAlignment="Center"/>
@@ -103,38 +109,54 @@
             <GroupBox Header="Перенаправление трафика" Margin="10,0,0,0">
                 <StackPanel Margin="10">
                     <TextBlock Text="Процессы (имена исполняемых файлов)" FontWeight="Bold" Margin="0,0,0,5"/>
-                    <ListBox x:Name="RedirectProcessesListBox" ItemsSource="{Binding RedirectProcesses}" Height="230" Margin="0,0,0,5">
+                    <ListBox x:Name="RedirectProcessesListBox" ItemsSource="{Binding RedirectProcesses}" Height="140" Margin="0,0,0,5">
                         <ListBox.ContextMenu>
                             <ContextMenu>
                                 <MenuItem Header="Добавить" Command="{Binding AddProcessCommand}"/>
-                                <MenuItem Header="Изменить" Command="{Binding EditProcessCommand}" CommandParameter="{Binding SelectedItem, RelativeSource={RelativeSource AncestorType=ListBox}}"/>
+                                <MenuItem Header="Изменить" Command="{Binding EditProcessCommand}"/>
                                 <MenuItem Header="Удалить" Command="{Binding RemoveProcessCommand}" CommandParameter="{Binding SelectedItem, RelativeSource={RelativeSource AncestorType=ListBox}}"/>
                             </ContextMenu>
                         </ListBox.ContextMenu>
                     </ListBox>
-                    <WrapPanel Margin="0,0,0,15">
+                    <WrapPanel Margin="0,0,0,5">
                         <Button Content="Добавить" Command="{Binding AddProcessCommand}" Width="85" Margin="0,0,5,0"/>
-                        <Button Content="Изменить" Command="{Binding EditProcessCommand}" CommandParameter="{Binding SelectedItem, ElementName=RedirectProcessesListBox}" Width="85" Margin="0,0,5,0"/>
+                        <Button Content="Изменить" Command="{Binding EditProcessCommand}" Width="85" Margin="0,0,5,0"/>
                         <Button Content="Удалить" Command="{Binding RemoveProcessCommand}" CommandParameter="{Binding SelectedItem, ElementName=RedirectProcessesListBox}" Width="85"/>
                     </WrapPanel>
 
-                    <TextBlock Text="IP адреса (IP или диапазоны)" FontWeight="Bold" Margin="0,0,0,5"/>
-                    <ListBox x:Name="RedirectIpsListBox" ItemsSource="{Binding RedirectIps}" Height="230" Margin="0,0,0,5">
+                    <TextBlock Text="Доменные имена" FontWeight="Bold" Margin="0,5,0,5"/>
+                    <ListBox x:Name="RedirectDomainsListBox" ItemsSource="{Binding RedirectDomains}" Height="140" Margin="0,0,0,5">
+                        <ListBox.ContextMenu>
+                            <ContextMenu>
+                                <MenuItem Header="Добавить" Command="{Binding AddDomainCommand}"/>
+                                <MenuItem Header="Изменить" Command="{Binding EditDomainCommand}"/>
+                                <MenuItem Header="Удалить" Command="{Binding RemoveDomainCommand}" CommandParameter="{Binding SelectedItem, RelativeSource={RelativeSource AncestorType=ListBox}}"/>
+                            </ContextMenu>
+                        </ListBox.ContextMenu>
+                    </ListBox>
+                    <WrapPanel Margin="0,0,0,5">
+                        <Button Content="Добавить" Command="{Binding AddDomainCommand}" Width="85" Margin="0,0,5,0"/>
+                        <Button Content="Изменить" Command="{Binding EditDomainCommand}" Width="85" Margin="0,0,5,0"/>
+                        <Button Content="Удалить" Command="{Binding RemoveDomainCommand}" CommandParameter="{Binding SelectedItem, ElementName=RedirectDomainsListBox}" Width="85"/>
+                    </WrapPanel>
+
+                    <TextBlock Text="IP адреса (IP или диапазоны)" FontWeight="Bold" Margin="0,5,0,5"/>
+                    <ListBox x:Name="RedirectIpsListBox" ItemsSource="{Binding RedirectIps}" Height="140" Margin="0,0,0,5">
                         <ListBox.ContextMenu>
                             <ContextMenu>
                                 <MenuItem Header="Добавить" Command="{Binding AddIpCommand}"/>
-                                <MenuItem Header="Изменить" Command="{Binding EditIpCommand}" CommandParameter="{Binding SelectedItem, RelativeSource={RelativeSource AncestorType=ListBox}}"/>
+                                <MenuItem Header="Изменить" Command="{Binding EditIpCommand}"/>
                                 <MenuItem Header="Удалить" Command="{Binding RemoveIpCommand}" CommandParameter="{Binding SelectedItem, RelativeSource={RelativeSource AncestorType=ListBox}}"/>
                             </ContextMenu>
                         </ListBox.ContextMenu>
                     </ListBox>
-                    <WrapPanel Margin="0,0,0,15">
+                    <WrapPanel Margin="0,0,0,5">
                         <Button Content="Добавить" Command="{Binding AddIpCommand}" Width="85" Margin="0,0,5,0"/>
-                        <Button Content="Изменить" Command="{Binding EditIpCommand}" CommandParameter="{Binding SelectedItem, ElementName=RedirectIpsListBox}" Width="85" Margin="0,0,5,0"/>
+                        <Button Content="Изменить" Command="{Binding EditIpCommand}" Width="85" Margin="0,0,5,0"/>
                         <Button Content="Удалить" Command="{Binding RemoveIpCommand}" CommandParameter="{Binding SelectedItem, ElementName=RedirectIpsListBox}" Width="85"/>
                     </WrapPanel>
 
-                    <Button Content="Сохранить" Command="{Binding SaveRedirectsOnlyCommand}" Width="200" Padding="5" Margin="0,10,0,0"/>
+                    <Button Content="Сохранить" Command="{Binding SaveRedirectsOnlyCommand}" Width="200" Padding="5" Margin="0,5,0,0"/>
                 </StackPanel>
             </GroupBox>
         </ScrollViewer>

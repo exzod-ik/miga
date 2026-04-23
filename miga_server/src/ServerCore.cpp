@@ -308,16 +308,31 @@ void ServerCore::ProcessClientUdpPacket(UdpPacketInfo* pkt) {
         proto = "UDP";
     }
 
+    bool dnsRedirect = false;
+    uint32_t saved_dst_ip = original_dst_ip;
+
+    if (m_config.dns_server && origIp->protocol == IPPROTO_UDP && original_dst_port == 53) {
+        dnsRedirect = true;
+        original_dst_ip = m_config.dns_server;
+        if (m_logger.isEnabled()) {
+            m_logger.log(LOGGER_LEVEL_INFO, "DNS redirect: " + IpToString(saved_dst_ip) + " -> " + IpToString(m_config.dns_server));
+        }
+    }
+
     uint32_t client_ip = pkt->srcIp;
     uint16_t client_udp_port = ntohs(pkt->srcPort);
     uint16_t local_udp_port = ntohs(pkt->dstPort);
     auto connKey = make_tuple(original_src_ip, original_src_port, original_dst_ip, original_dst_port, origIp->protocol);
 
     uint16_t chosen_src_port = 0;
-    bool isSyn = false;
+    bool isNewConnection = false;
+
     if (origIp->protocol == IPPROTO_TCP) {
         struct tcphdr* tcp = (struct tcphdr*)(origIpPacket + origIpHeaderLen);
-        isSyn = (tcp->syn && !tcp->ack);
+        isNewConnection = (tcp->syn && !tcp->ack);
+    }
+    else if (origIp->protocol == IPPROTO_UDP) {
+        isNewConnection = true;
     }
 
     {
@@ -329,12 +344,12 @@ void ServerCore::ProcessClientUdpPacket(UdpPacketInfo* pkt) {
             if (m_logger.isEnabled())
                 m_logger.log(LOGGER_LEVEL_DEBUG, "  Using existing port=" + to_string(chosen_src_port));
         }
-        else if (isSyn) {
+        else if (isNewConnection) {
             bool port_found = false;
             for (int attempt = 0; attempt < 10; ++attempt) {
                 chosen_src_port = m_portDist(m_rng);
                 auto key = make_tuple(chosen_src_port, origIp->protocol);
-                lock_guard<mutex> lock(m_tableMutex);
+                lock_guard<mutex> lock_table(m_tableMutex);
                 if (m_forwardTable.find(key) == m_forwardTable.end()) {
                     port_found = true;
                     break;
@@ -352,7 +367,12 @@ void ServerCore::ProcessClientUdpPacket(UdpPacketInfo* pkt) {
                 m_logger.log(LOGGER_LEVEL_DEBUG, "  Generated new port=" + to_string(chosen_src_port));
         }
         else {
-            m_logger.log(LOGGER_LEVEL_INFO, "  Ignoring non-SYN packet for unknown connection");
+            if (origIp->protocol == IPPROTO_TCP) {
+                m_logger.log(LOGGER_LEVEL_INFO, "  Ignoring non-SYN TCP packet for unknown connection");
+            }
+            else {
+                m_logger.log(LOGGER_LEVEL_INFO, "  Ignoring UDP packet for unknown connection (should not happen)");
+            }
             return;
         }
     }
@@ -365,6 +385,8 @@ void ServerCore::ProcessClientUdpPacket(UdpPacketInfo* pkt) {
     vector<uint8_t> outPacket(origIpLen);
     memcpy(outPacket.data(), origIpPacket, origIpLen);
     struct iphdr* outIp = (struct iphdr*)outPacket.data();
+
+    outIp->daddr = original_dst_ip;
 
     uint32_t server_ip = inet_addr("10.0.0.2");
     outIp->saddr = server_ip;
@@ -392,6 +414,7 @@ void ServerCore::ProcessClientUdpPacket(UdpPacketInfo* pkt) {
     info.client_udp_port = client_udp_port;
     info.original_src_ip = original_src_ip;
     info.original_src_port = original_src_port;
+    info.original_dst_ip = saved_dst_ip;
     info.last_used = chrono::steady_clock::now();
 
     auto key = make_tuple(chosen_src_port, origIp->protocol);
@@ -564,6 +587,7 @@ void ServerCore::HandleInternetPacket(const uint8_t* ipPacket, size_t ipLen, uin
     memcpy(outPacket.data(), ipPacket, ipLen);
     struct iphdr* outIp = (struct iphdr*)outPacket.data();
     outIp->daddr = info.original_src_ip;
+    outIp->saddr = info.original_dst_ip;
 
     if (outIp->protocol == IPPROTO_TCP) {
         struct tcphdr* tcp = (struct tcphdr*)(outPacket.data() + outIp->ihl * 4);
@@ -880,6 +904,15 @@ bool ServerCore::Initialize(const string& configPath) {
             m_config.interface = "";
         }
 
+        if (config.contains("dns_server")) {
+            string dns = config["dns_server"];
+            m_config.dns_server = inet_addr(dns.c_str());
+            m_logger.log(LOGGER_LEVEL_INFO, "DNS redirect enabled: " + dns);
+        }
+        else {
+            m_config.dns_server = 0;
+            m_logger.log(LOGGER_LEVEL_INFO, "DNS redirect disabled (no dns_server in config)");
+        }
     }
     catch (const exception& e) {
         m_logger.log(LOGGER_LEVEL_ERROR, "Config parse error: " + string(e.what()));

@@ -4,6 +4,7 @@ using MIGA_Agent.Models;
 using MIGA_Agent.Services;
 using Notification.Wpf;
 using Notification.Wpf.Controls;
+using Org.BouncyCastle.Tls;
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
@@ -22,6 +23,8 @@ namespace MIGA_Agent.ViewModels
         private readonly IClientConfigService _configService;
         private readonly ISshManager _sshManager;
         private readonly IDialogService _dialogService;
+
+        private const string RequiredServerVersion = "1.1.0";
 
         private static readonly JsonSerializerOptions JsonOptions = new()
         {
@@ -70,6 +73,12 @@ namespace MIGA_Agent.ViewModels
         [ObservableProperty]
         private string _serviceStatus = "Неизвестно";
 
+        [ObservableProperty]
+        private string _dnsServer = "8.8.8.8";
+
+        [ObservableProperty]
+        private bool _serverNeedsUpdate = false;
+
         // SSH
         [ObservableProperty]
         private string _serverSshUser = "root";
@@ -106,6 +115,7 @@ namespace MIGA_Agent.ViewModels
         // Коллекции
         public ObservableCollection<string> RedirectProcesses { get; }
         public ObservableCollection<string> RedirectIps { get; }
+        public ObservableCollection<string> RedirectDomains { get; } = new ObservableCollection<string>();
         public List<string> LogLevels { get; }
 
         // ========== Команды ==========
@@ -144,7 +154,7 @@ namespace MIGA_Agent.ViewModels
         private void AddProcess() => AddItem(RedirectProcesses, "Введите имя процесса (например, chrome.exe):", "Добавление процесса");
 
         [RelayCommand]
-        private void EditProcess(object? processName) => EditItem(RedirectProcesses, processName as string, "Редактирование процесса", "Введите новое имя процесса:");
+        private void EditProcess(object? _) => EditItem(RedirectProcesses, "Редактирование процессов", "Введите список процессов (каждый с новой строки):");
 
         [RelayCommand]
         private void RemoveProcess(object? processName) => RemoveItem(RedirectProcesses, processName as string, "Удалить процесс");
@@ -153,11 +163,20 @@ namespace MIGA_Agent.ViewModels
         private void AddIp() => AddItem(RedirectIps, "Введите IP-адрес или диапазон (например, 192.168.1.1 или 192.168.1.1-192.168.3.255):", "Добавление IP");
 
         [RelayCommand]
-        private void EditIp(object? ip) => EditItem(RedirectIps, ip as string, "Редактирование IP", "Введите новый IP-адрес или диапазон:");
+        private void EditIp(object? _) => EditItem(RedirectIps, "Редактирование IP", "Введите список IP-адресов или диапазонов (каждый с новой строки):");
 
         [RelayCommand]
         private void RemoveIp(object? ip) => RemoveItem(RedirectIps, ip as string, "Удалить IP");
 
+        [RelayCommand]
+        private void AddDomain() => AddItem(RedirectDomains, "Введите доменное имя (например, example.com):", "Добавление домена");
+
+        [RelayCommand]
+        private void EditDomain(object? _) => EditItem(RedirectDomains, "Редактирование доменов", "Введите список доменных имён (каждый с новой строки):");
+
+        [RelayCommand]
+        private void RemoveDomain(object? domain) => RemoveItem(RedirectDomains, domain as string, "Удалить домен");
+        
         // ========== Приватные методы ==========
 
         private async Task LoadInitialDataAsync()
@@ -198,6 +217,10 @@ namespace MIGA_Agent.ViewModels
             RedirectIps.Clear();
             foreach (var ip in config.RedirectIps)
                 RedirectIps.Add(ip);
+
+            RedirectDomains.Clear();
+            foreach (var domain in config.RedirectDomains)
+                RedirectDomains.Add(domain);
         }
 
         private async Task SaveClientConfigAsync()
@@ -209,7 +232,8 @@ namespace MIGA_Agent.ViewModels
                 LogLevel = LogLevel,
                 Encryption = new EncryptionKeys { XorKey = XorKey, SwapKey = SwapKey },
                 RedirectProcesses = RedirectProcesses.ToList(),
-                RedirectIps = RedirectIps.ToList()
+                RedirectIps = RedirectIps.ToList(),
+                RedirectDomains = RedirectDomains.ToList()
             };
             string json = JsonSerializer.Serialize(config, JsonOptions);
             await File.WriteAllTextAsync(_configService.ConfigFilePath, json);
@@ -220,6 +244,7 @@ namespace MIGA_Agent.ViewModels
             var config = await _configService.LoadAsync();
             config.RedirectProcesses = RedirectProcesses.ToList();
             config.RedirectIps = RedirectIps.ToList();
+            config.RedirectDomains = RedirectDomains.ToList();
             await _configService.SaveAsync(config);
 
             _localService.ReloadConfig();
@@ -370,6 +395,7 @@ namespace MIGA_Agent.ViewModels
             {
                 ServerDemoStatus = "Нет подключения";
                 ServerDemoInstalled = false;
+                ServerNeedsUpdate = false;
                 DynamicDemoButtonText = "Загрузить и установить";
                 return;
             }
@@ -380,12 +406,28 @@ namespace MIGA_Agent.ViewModels
                 if (statusOutput.Contains("not found") || statusOutput.Contains("No such file") || statusOutput.Contains("could not be found"))
                 {
                     ServerDemoInstalled = false;
+                    ServerNeedsUpdate = false;
                     ServerDemoStatus = "Не установлен";
                     DynamicDemoButtonText = "Загрузить и установить";
                     return;
                 }
 
+                string versionOutput = await _sshManager.ExecuteCommandAsync("/usr/local/miga_server --version 2>&1 || true");
+                string actualVersion = versionOutput.Trim().Split('\n', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault() ?? "";
+                var versionMatch = System.Text.RegularExpressions.Regex.Match(actualVersion, @"(\d+\.\d+\.\d+)");
+                string versionNumber = versionMatch.Success ? versionMatch.Groups[1].Value : actualVersion;
+
+                if (versionNumber != RequiredServerVersion)
+                {
+                    ServerDemoInstalled = true;
+                    ServerNeedsUpdate = true;
+                    ServerDemoStatus = "Устаревшая версия";
+                    DynamicDemoButtonText = "Обновить сервер";
+                    return;
+                }
+
                 ServerDemoInstalled = true;
+                ServerNeedsUpdate = false;
                 string result = await _sshManager.ExecuteCommandAsync("systemctl is-active miga_server");
                 bool isActive = result.Trim() == "active";
                 ServerDemoStatus = isActive ? "Работает" : "Остановлен";
@@ -395,6 +437,7 @@ namespace MIGA_Agent.ViewModels
             {
                 ServerDemoStatus = "Ошибка";
                 ServerDemoInstalled = false;
+                ServerNeedsUpdate = false;
                 DynamicDemoButtonText = "Загрузить и установить";
             }
         }
@@ -411,6 +454,10 @@ namespace MIGA_Agent.ViewModels
             {
                 await UploadAndInstallInternalAsync();
             }
+            else if (ServerNeedsUpdate)
+            {
+                await UpdateServerInternalAsync();
+            }
             else if (ServerDemoStatus == "Остановлен")
             {
                 await StartServerDemoInternalAsync();
@@ -418,6 +465,73 @@ namespace MIGA_Agent.ViewModels
             else if (ServerDemoStatus == "Работает")
             {
                 await StopServerDemoInternalAsync();
+            }
+        }
+
+        private async Task UpdateServerInternalAsync()
+        {
+            IsBusy = true;
+            OnPropertyChanged(nameof(IsNotBusy));
+
+            var notification = _dialogService.ShowPersistent("Обновление сервера");
+
+            try
+            {
+                bool wasRunning = ServerDemoStatus == "Работает";
+
+                if (wasRunning)
+                {
+                    _dialogService.UpdatePersistent(notification, "Обновление сервера", "Остановка демона...");
+                    await _sshManager.ExecuteCommandAsync("systemctl stop miga_server");
+                    await Task.Delay(2000);
+                }
+
+                string pgrep = await _sshManager.ExecuteCommandAsync("pgrep -f miga_server || true");
+                if (!string.IsNullOrWhiteSpace(pgrep))
+                {
+                    _dialogService.UpdatePersistent(notification, "Обновление сервера", "Принудительное завершение процесса...");
+                    await _sshManager.ExecuteCommandAsync("pkill -f miga_server || true");
+                    await Task.Delay(1000);
+                }
+
+                string appDirectory = AppDomain.CurrentDomain.BaseDirectory;
+                string localMigraServer = Path.Combine(appDirectory, "miga_server");
+
+                if (!File.Exists(localMigraServer))
+                    throw new FileNotFoundException($"miga_server не найден в {appDirectory}");
+
+                _dialogService.UpdatePersistent(notification, "Обновление сервера", "Копирование нового файла...");
+
+                string tempRemotePath = "/usr/local/miga_server.new";
+                await _sshManager.UploadFileAsync(localMigraServer, tempRemotePath);
+                await _sshManager.ExecuteCommandAsync($"chmod +x {tempRemotePath}");
+
+                _dialogService.UpdatePersistent(notification, "Обновление сервера", "Замена исполняемого файла...");
+                await _sshManager.ExecuteCommandAsync($"mv {tempRemotePath} /usr/local/miga_server");
+
+                _dialogService.UpdatePersistent(notification, "Обновление сервера", "Обновляем конфигурацию...");
+                await _sshManager.ExecuteCommandAsync("/usr/local/miga_server --update");
+
+                if (wasRunning)
+                {
+                    _dialogService.UpdatePersistent(notification, "Обновление сервера", "Запуск демона...");
+                    await _sshManager.ExecuteCommandAsync("systemctl start miga_server");
+                    await Task.Delay(1000);
+                }
+
+                await UpdateServerDemoStatusAsync();
+
+                _dialogService.ClosePersistent(notification, "Обновление сервера", "Сервер успешно обновлён");
+            }
+            catch (Exception ex)
+            {
+                _dialogService.ClosePersistent(notification, "Ошибка обновления", $"Ошибка: {ex.Message}");
+                _dialogService.ShowError($"Ошибка обновления сервера: {ex.Message}");
+            }
+            finally
+            {
+                IsBusy = false;
+                OnPropertyChanged(nameof(IsNotBusy));
             }
         }
 
@@ -533,15 +647,16 @@ namespace MIGA_Agent.ViewModels
                     return;
                 }
 
+                ServerLogLevel = serverConfig.LogLevel;
+                DnsServer = serverConfig.DnsServer;
+
                 // Обновляем локальные свойства
                 if (false
-                    || ServerLogLevel != serverConfig.LogLevel
                     || ServerPortsStart != serverConfig.ClientPorts.Start
                     || ServerPortsEnd != serverConfig.ClientPorts.End
                     || XorKey != serverConfig.Encryption.XorKey
                     || SwapKey != serverConfig.Encryption.SwapKey)
                 {
-                    ServerLogLevel = serverConfig.LogLevel;
                     ServerPortsStart = serverConfig.ClientPorts.Start;
                     ServerPortsEnd = serverConfig.ClientPorts.End;
                     XorKey = serverConfig.Encryption.XorKey;
@@ -567,7 +682,8 @@ namespace MIGA_Agent.ViewModels
                 {
                     LogLevel = ServerLogLevel,
                     ClientPorts = new PortRange { Start = ServerPortsStart, End = ServerPortsEnd },
-                    Encryption = new EncryptionKeys { XorKey = XorKey, SwapKey = SwapKey }
+                    Encryption = new EncryptionKeys { XorKey = XorKey, SwapKey = SwapKey },
+                    DnsServer = DnsServer
                 };
 
                 string json = JsonSerializer.Serialize(serverConfig, JsonOptions);
@@ -582,23 +698,42 @@ namespace MIGA_Agent.ViewModels
                 _dialogService.ShowError($"Ошибка применения серверной конфигурации: {ex.Message}");
             }
         }
+
         private void AddItem(ObservableCollection<string> collection, string prompt, string title)
         {
-            string? newItem = _dialogService.ShowInputDialog(prompt, title);
-            if (!string.IsNullOrWhiteSpace(newItem) && !collection.Contains(newItem))
-                collection.Add(newItem);
+            string? input = _dialogService.ShowMultiLineInputDialog(prompt, title, "");
+            if (string.IsNullOrWhiteSpace(input))
+                return;
+
+            var newItems = input.Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries)
+                                 .Select(s => s.Trim())
+                                 .Where(s => !string.IsNullOrEmpty(s))
+                                 .Distinct()
+                                 .ToList();
+
+            foreach (var item in newItems)
+            {
+                if (!collection.Contains(item))
+                    collection.Add(item);
+            }
         }
 
-        private void EditItem(ObservableCollection<string> collection, string? oldValue, string title, string prompt)
+        private void EditItem(ObservableCollection<string> collection, string title, string prompt)
         {
-            if (oldValue == null) return;
-            string? newValue = _dialogService.ShowInputDialog(prompt, title, oldValue);
-            if (!string.IsNullOrWhiteSpace(newValue) && newValue != oldValue)
-            {
-                int index = collection.IndexOf(oldValue);
-                if (index != -1)
-                    collection[index] = newValue;
-            }
+            string currentText = string.Join(Environment.NewLine, collection);
+            string? input = _dialogService.ShowMultiLineInputDialog(prompt, title, currentText);
+            if (string.IsNullOrWhiteSpace(input))
+                return;
+
+            var newItems = input.Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries)
+                                 .Select(s => s.Trim())
+                                 .Where(s => !string.IsNullOrEmpty(s))
+                                 .Distinct()
+                                 .ToList();
+
+            collection.Clear();
+            foreach (var item in newItems)
+                collection.Add(item);
         }
 
         private void RemoveItem(ObservableCollection<string> collection, string? item, string title)

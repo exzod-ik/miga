@@ -431,11 +431,6 @@
             "AssemblyAsmDisplayName" = "8:System.Net.Http, Version=4.2.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a"
                 "ScatterAssemblies"
                 {
-                    "_72A5833DD055FA02C2F445245862E745"
-                    {
-                    "Name" = "8:System.Net.Http.dll"
-                    "Attributes" = "3:512"
-                    }
                 }
             "SourcePath" = "8:System.Net.Http.dll"
             "TargetName" = "8:"
@@ -691,15 +686,15 @@
         {
         "Name" = "8:Microsoft Visual Studio"
         "ProductName" = "8:M.I.G.A."
-        "ProductCode" = "8:{F8792FF5-1B9F-4646-B936-040498646455}"
-        "PackageCode" = "8:{DB0B8F40-C6F1-4E22-BCF6-E67886251620}"
+        "ProductCode" = "8:{7728B432-B21C-43C2-8F7D-C74F91E6F7CA}"
+        "PackageCode" = "8:{6C01DFFB-FE04-4D33-ADE8-552125DD6243}"
         "UpgradeCode" = "8:{2654C1FC-1389-4A26-8E91-7BC1FEF638DC}"
         "AspNetVersion" = "8:2.0.50727.0"
         "RestartWWWService" = "11:FALSE"
-        "RemovePreviousVersions" = "11:FALSE"
+        "RemovePreviousVersions" = "11:TRUE"
         "DetectNewerInstalledVersion" = "11:TRUE"
         "InstallAllUsers" = "11:TRUE"
-        "ProductVersion" = "8:1.0.0"
+        "ProductVersion" = "8:1.1.0"
         "Manufacturer" = "8:Exzod"
         "ARPHELPTELEPHONE" = "8:"
         "ARPHELPLINK" = "8:"
@@ -1297,7 +1292,7 @@
             }
             "{5259A561-127C-4D43-A0A1-72F10C7B3BF8}:_D2B09116CE1B40F593197E685BDA4EE4"
             {
-            "SourcePath" = "8:..\\InstallerCustomActions\\obj\\Release\\InstallerCustomActions.dll"
+            "SourcePath" = "8:..\\Build\\InstallerCustomActions\\obj\\Release\\InstallerCustomActions.dll"
             "TargetName" = "8:"
             "Tag" = "8:"
             "Folder" = "8:_A8A3F72A1BAE440798161CD19C2359F5"
@@ -1325,7 +1320,7 @@
             }
             "{5259A561-127C-4D43-A0A1-72F10C7B3BF8}:_EC56619787D94F2D9F5649C4FF7BCBC7"
             {
-            "SourcePath" = "8:..\\MIGA Agent\\obj\\Release\\net10.0-windows\\apphost.exe"
+            "SourcePath" = "8:..\\Build\\MIGA Agent\\obj\\Release\\net10.0-windows\\apphost.exe"
             "TargetName" = "8:"
             "Tag" = "8:"
             "Folder" = "8:_A8A3F72A1BAE440798161CD19C2359F5"

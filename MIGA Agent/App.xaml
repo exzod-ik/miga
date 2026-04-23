@@ -7,6 +7,22 @@
             <ResourceDictionary.MergedDictionaries>
                 <ResourceDictionary Source="pack://application:,,,/PresentationFramework.Fluent;component/Themes/Fluent.xaml" />
             </ResourceDictionary.MergedDictionaries>
+            
+            <!-- Компактный стиль для всех ListBox -->
+            <Style TargetType="ListBox">
+                <Setter Property="Background" Value="Transparent" />
+                <Setter Property="FontSize" Value="11"/>
+                <Setter Property="MaxHeight" Value="200"/>
+                <Setter Property="ScrollViewer.VerticalScrollBarVisibility" Value="Auto"/>
+            </Style>
+
+            <!-- Стиль для элементов ListBox – уменьшенные отступы -->
+            <Style TargetType="ListBoxItem">
+                <Setter Property="Foreground" Value="{DynamicResource TextFillColorPrimaryBrush}"/>
+                <Setter Property="Padding" Value="2,0"/>
+                <Setter Property="MinHeight" Value="20"/>
+                <Setter Property="Margin" Value="0"/>
+            </Style>
         </ResourceDictionary>
     </Application.Resources>
 </Application>

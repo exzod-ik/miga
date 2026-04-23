@@ -24,5 +24,17 @@
     "193.242.135.130",
     "64.233.160.1-64.233.167.254",
     "173.194.0.1-173.194.255.254"
+  ],
+  "redirect_domains": [
+    "*.youtube.com",
+    "*.googleapis.com",
+    "*.ggpht.com",
+    "*.googlevideo.com",
+    "youtu.be",
+    "*.ytimg.com",
+    "ytimg.l.google.com",
+    "youtubekids.com",
+    "*.gstatic.com",
+    "*.doubleclick.net"
   ]
 }

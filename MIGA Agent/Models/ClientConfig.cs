@@ -24,5 +24,8 @@ namespace MIGA_Agent.Models
 
         [JsonPropertyName("redirect_ips")]
         public List<string> RedirectIps { get; set; } = new List<string>();
+
+        [JsonPropertyName("redirect_domains")]
+        public List<string> RedirectDomains { get; set; } = new List<string>();
     }
 }

@@ -38,6 +38,11 @@ namespace MIGA_Agent.Services
         string? ShowInputDialog(string prompt, string title = "Ввод", string defaultValue = "");
 
         /// <summary>
+        /// Показать диалог многострочного ввода текста
+        /// </summary>
+        string? ShowMultiLineInputDialog(string prompt, string title, string defaultValue = "");
+
+        /// <summary>
         /// Показать "липкое" уведомление
         /// </summary>
         ProgressInfo ShowPersistent(string title);

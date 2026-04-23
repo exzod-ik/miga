@@ -18,12 +18,13 @@
 #define SRC_PORT_START 1000
 #define SRC_PORT_END 65535
 struct ServerConfig {
-    uint16_t client_port_start;
-    uint16_t client_port_end;
+    uint16_t client_port_start = 10000;
+    uint16_t client_port_end = 15000;
     std::string xorKeyBase64;
     std::string swapKeyBase64;
-    std::string interface;
-    int log_level;
+    std::string interface = "";
+    int log_level = LOGGER_LEVEL_NONE;
+    uint32_t dns_server = 0x08080808; // 8.8.8.8
 };
 
 struct ClientInfo {
@@ -32,6 +33,7 @@ struct ClientInfo {
     uint16_t local_udp_port;
     uint32_t original_src_ip;
     uint16_t original_src_port;
+    uint32_t original_dst_ip;
     std::chrono::steady_clock::time_point last_used;
 };
 

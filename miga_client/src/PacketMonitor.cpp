@@ -111,6 +111,54 @@ bool IsLocalIPv4(uint32_t ipHost) {
     return false;
 }
 
+// read name from DNS (RFC 1035)
+static size_t ReadDNSName(const uint8_t* data, size_t dataLen, size_t offset, std::string& outName) {
+    outName.clear();
+    bool jumped = false;
+    size_t originalOffset = offset;
+    size_t maxJumps = 10;
+
+    while (maxJumps-- > 0) {
+        if (offset >= dataLen) return 0;
+        uint8_t len = data[offset];
+        if (len == 0) {
+            offset++;
+            break;
+        }
+        if ((len & 0xC0) == 0xC0) {
+            if (offset + 1 >= dataLen) return 0;
+            uint16_t ptr = ((len & 0x3F) << 8) | data[offset + 1];
+            if (!jumped) {
+                originalOffset = offset + 2;
+                jumped = true;
+            }
+            offset = ptr;
+            continue;
+        }
+        offset++;
+        if (offset + len > dataLen) return 0;
+        if (!outName.empty()) outName += '.';
+        outName.append(reinterpret_cast<const char*>(data + offset), len);
+        offset += len;
+    }
+    if (jumped) {
+        return originalOffset;
+    }
+    else {
+        return offset;
+    }
+}
+
+// extract QNAME from dns query
+static bool ExtractQName(const uint8_t* dnsHeader, size_t len, std::string& qname) {
+    if (len < 12) return false;
+    uint16_t qdcount = ntohs(*(uint16_t*)(dnsHeader + 4));
+    if (qdcount == 0) return false;
+    size_t offset = 12;
+    if (!ReadDNSName(dnsHeader, len, offset, qname)) return false;
+    return true;
+}
+
 // open windivert socket layer to get process of packets
 bool PacketMonitor::OpenSocketHandle() {
     m_Socket = WinDivertOpen("protocol == 6 or protocol == 17", WINDIVERT_LAYER_SOCKET, 0, WINDIVERT_FLAG_SNIFF | WINDIVERT_FLAG_RECV_ONLY);
@@ -305,7 +353,7 @@ void PacketMonitor::NetworkThread() {
             uint32_t destIpHost = ntohl(ipHdr->DstAddr);
             if (IsLocalIPv4(destIpHost)) { // ignoring local and intranet packets
                 if (m_Logger->isEnabled()) {
-                    m_Logger->log(LOGGER_LEVEL_DEBUG, "Skipping local destination: " + IpToString(destIpHost));
+                    m_Logger->log(LOGGER_LEVEL_DEBUG, "Skipping local destination: " + IpToString(ntohl(destIpHost)));
                 }
                 WinDivertSend(m_Network, buffer.data(), packetLen, nullptr, &addr);
                 continue;
@@ -377,9 +425,22 @@ bool PacketMonitor::SendUdpPacketToMstcp(const UdpPacketInfo* pkt, WINDIVERT_ADD
     IP_HEADER* ip = reinterpret_cast<IP_HEADER*>(pkt->payload);
     WinDivertHelperCalcChecksums(pkt->payload, pkt->payloadSize, pAddr, 0);
 
-    uint8_t* ipPayload = reinterpret_cast<uint8_t*>(ip + 1);
+    // check for dns response
+    if (ip->protocol == IPPROTO_UDP) {
+        const UDP_HEADER* udp = reinterpret_cast<const UDP_HEADER*>(ip + 1);
+        uint16_t srcPort = ntohs(udp->src_port);
+        if (srcPort == 53) {
+            const uint8_t* dnsPayload = reinterpret_cast<const uint8_t*>(udp + 1);
+            size_t dnsLen = pkt->payloadSize - (sizeof(IP_HEADER) + sizeof(UDP_HEADER));
+            if (dnsLen > 0) {
+                ProcessDNSResponse(dnsPayload, dnsLen);
+            }
+        }
+    }
 
     if (m_Logger->isEnabled()) {
+        uint8_t* ipPayload = reinterpret_cast<uint8_t*>(ip + 1);
+
         string proto, flags;
         uint16_t srcPort = 0;
         uint16_t dstPort = 0;
@@ -649,6 +710,30 @@ void PacketMonitor::ProcessPacket(const uint8_t* packet, UINT packetLen, const W
     }
 
     const IP_HEADER* iph = reinterpret_cast<const IP_HEADER*>(packet);
+
+    if (iph->protocol == IPPROTO_UDP) {
+        const UDP_HEADER* udph = reinterpret_cast<const UDP_HEADER*>(packet + sizeof(IP_HEADER));
+        uint16_t dstPort = ntohs(udph->dst_port);
+        if (addr.Outbound && dstPort == 53) { // outbound DNS query
+            const uint8_t* udpPayload = packet + sizeof(IP_HEADER) + sizeof(UDP_HEADER);
+            size_t udpPayloadLen = packetLen - (sizeof(IP_HEADER) + sizeof(UDP_HEADER));
+            if (udpPayloadLen > 0) {
+                string domain;
+                if (ExtractDomainFromDNSQuery(udpPayload, udpPayloadLen, domain) && !domain.empty()) {
+                    if (m_Config->IsDomainRedirect(domain)) {
+                        m_Logger->log(LOGGER_LEVEL_INFO, "Redirecting DNS query for domain: " + domain);
+                        RedirectPacket(packet, packetLen, addr);
+                    }
+                    else {
+                        m_Logger->log(LOGGER_LEVEL_DEBUG, "DNS query not redirected (domain not in list): " + domain);
+                        WinDivertSend(m_Network, packet, packetLen, NULL, &addr);
+                    }
+                    return;
+                }
+            }
+        }
+    }
+
     string processName = GetProcessNameByPid(pid);
     uint32_t destIpHost = ntohl(iph->dst_ip);
     bool shouldRedirect = CheckRules(processName, destIpHost);
@@ -763,9 +848,76 @@ bool PacketMonitor::CheckRules(const string& processName, UINT32 destIp) {
         }
     }
 
-    if (m_Config->GetIPRule().matches(destIp)) {
+    if (m_Config->GetStaticIPRule().matches(destIp)) {
+        return true;
+    }
+
+    if (m_Config->GetDynamicIPRule().matches(destIp)) {
         return true;
     }
 
     return false;
+}
+
+bool PacketMonitor::ExtractDomainFromDNSQuery(const uint8_t* payload, size_t len, std::string& domain) {
+    if (len < 12) return false;
+    // is it query (QR=0)
+    uint16_t flags = ntohs(*(uint16_t*)(payload + 2));
+    if ((flags & 0x8000) != 0) return false;
+    return ExtractQName(payload, len, domain);
+}
+
+bool PacketMonitor::IsDNSQuery(const uint8_t* payload, size_t len) {
+    if (len < 12) return false;
+    uint16_t flags = ntohs(*(uint16_t*)(payload + 2));
+    return (flags & 0x8000) == 0; // QR=0
+}
+
+bool PacketMonitor::IsDNSResponse(const uint8_t* payload, size_t len) {
+    if (len < 12) return false;
+    uint16_t flags = ntohs(*(uint16_t*)(payload + 2));
+    return (flags & 0x8000) != 0; // QR=1
+}
+
+void PacketMonitor::ProcessDNSResponse(const uint8_t* payload, size_t len) {
+    if (!IsDNSResponse(payload, len)) return;
+    if (len < 12) return;
+
+    uint16_t ancount = ntohs(*(uint16_t*)(payload + 6));
+    if (ancount == 0) return;
+
+    size_t offset = 12;
+    // pass query section
+    uint16_t qdcount = ntohs(*(uint16_t*)(payload + 4));
+    for (int i = 0; i < qdcount; ++i) {
+        std::string dummy;
+        size_t bytes = ReadDNSName(payload, len, offset, dummy);
+        if (bytes == 0) return;
+        offset = bytes;
+        if (offset + 4 > len) return;
+        offset += 4;
+    }
+
+    for (int i = 0; i < ancount; ++i) {
+        std::string name;
+        size_t bytes = ReadDNSName(payload, len, offset, name);
+        if (bytes == 0) return;
+        offset = bytes;
+        if (offset + 10 > len) return;
+        uint16_t type = ntohs(*(uint16_t*)(payload + offset));
+        uint16_t class_ = ntohs(*(uint16_t*)(payload + offset + 2));
+        uint32_t ttl = ntohl(*(uint32_t*)(payload + offset + 4));
+        uint16_t rdlength = ntohs(*(uint16_t*)(payload + offset + 8));
+        offset += 10;
+        if (offset + rdlength > len) return;
+        if (type == 1 && rdlength == 4) { // A record
+            uint32_t ip = 0;
+            memcpy(&ip, payload + offset, 4);
+            uint32_t ipHost = ntohl(ip);
+            m_Config->AddDynamicIP(ipHost);
+            if (m_Logger->isEnabled())
+                m_Logger->log(LOGGER_LEVEL_DEBUG, "DNS response added dynamic IP: " + IpToString(ipHost) + " TTL=" + std::to_string(ttl));
+        }
+        offset += rdlength;
+    }
 }

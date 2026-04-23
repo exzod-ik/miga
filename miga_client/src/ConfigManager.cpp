@@ -62,13 +62,33 @@ bool ConfigManager::ParseIPRules(const json& config) {
                 m_Logger->log(LOGGER_LEVEL_INFO, "IP rule: " + ipStr);
             }
 
-            m_IPRule.ipRanges.push_back(range);
+            m_StaticIPRule.ipRanges.push_back(range);
         }
     }
     return true;
 }
 
-bool ConfigManager::Load(const string& configPath) {
+bool ConfigManager::ParseDomainRules(const json& config) {
+    if (config.contains("redirect_domains") && config["redirect_domains"].is_array()) {
+        for (const auto& domainJson : config["redirect_domains"]) {
+            string domain = domainJson.get<std::string>();
+            transform(domain.begin(), domain.end(), domain.begin(), ::tolower);
+
+            if (domain.size() > 2 && domain[0] == '*' && domain[1] == '.') {
+                string suffix = domain.substr(2); // remove "*."
+                m_WildcardDomainSuffixes.push_back(suffix);
+                m_Logger->log(LOGGER_LEVEL_INFO, "Wildcard domain rule: *." + suffix);
+            }
+            else {
+                m_DomainRules.push_back(domain);
+                m_Logger->log(LOGGER_LEVEL_INFO, "Domain rule: " + domain);
+            }
+        }
+    }
+    return true;
+}
+
+bool ConfigManager::Load(const string& configPath, bool hotLoad) {
     m_Logger->log(LOGGER_LEVEL_INFO, "Loading configuration from: " + configPath);
 
     try {
@@ -119,14 +139,18 @@ bool ConfigManager::Load(const string& configPath) {
         }
 
         m_ProcessRules.clear();
-        m_IPRule = IPRule();
+        m_StaticIPRule = IPRule();
+        if (!hotLoad)
+            m_DynamicIPRule = IPRule();
 
         ParseProcessRules(config);
         ParseIPRules(config);
+        ParseDomainRules(config);
 
         m_Logger->log(LOGGER_LEVEL_INFO, "Configuration loaded: " +
             to_string(m_ProcessRules.size()) + " processes, " +
-            to_string(m_IPRule.ipRanges.size()) + " IP ranges");
+            to_string(m_StaticIPRule.ipRanges.size()) + " static IP ranges, " +
+            to_string(m_DomainRules.size()) + " domains");
 
         return true;
 
@@ -135,4 +159,38 @@ bool ConfigManager::Load(const string& configPath) {
         m_Logger->log(LOGGER_LEVEL_ERROR, "Config parse error: " + string(e.what()));
         return false;
     }
+}
+
+
+bool ConfigManager::IsDomainRedirect(const std::string& domain) const {
+    string lowerDomain = domain;
+    transform(lowerDomain.begin(), lowerDomain.end(), lowerDomain.begin(), ::tolower);
+
+    for (const auto& rule : m_DomainRules) {
+        if (rule == lowerDomain) {
+            return true;
+        }
+    }
+
+    for (const auto& suffix : m_WildcardDomainSuffixes) {
+        if (lowerDomain.size() > suffix.size() &&
+            lowerDomain[lowerDomain.size() - suffix.size() - 1] == '.' &&
+            lowerDomain.compare(lowerDomain.size() - suffix.size(), suffix.size(), suffix) == 0) {
+            return true;
+        }
+        if (lowerDomain == suffix) return true;
+    }
+    return false;
+}
+
+void ConfigManager::AddDynamicIP(uint32_t ip) {
+    for (const auto& range : m_DynamicIPRule.ipRanges) {
+        if (range.startIP == ip && range.endIP == ip) {
+            return;
+        }
+    }
+    IPRange newRange;
+    newRange.startIP = ip;
+    newRange.endIP = ip;
+    m_DynamicIPRule.ipRanges.push_back(newRange);
 }

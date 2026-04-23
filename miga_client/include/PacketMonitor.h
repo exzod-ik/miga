@@ -80,6 +80,13 @@ private:
     void ProcessPacket(const uint8_t* packet, UINT packetLen, const WINDIVERT_ADDRESS& addr, uint32_t pid);
     void RedirectPacket(const uint8_t* packet, UINT packetLen, const WINDIVERT_ADDRESS& addr);
 
+    // DNS parsing helpers
+    bool ExtractDomainFromDNSQuery(const uint8_t* payload, size_t len, std::string& domain);
+    void ProcessDNSResponse(const uint8_t* payload, size_t len);
+    bool IsDNSQuery(const uint8_t* payload, size_t len);
+    bool IsDNSResponse(const uint8_t* payload, size_t len);
+    void AddIPsFromDNSResponse(const uint8_t* payload, size_t len);
+
     std::string GetProcessNameByPid(DWORD pid);
     bool CheckRules(const std::string& processName, UINT32 destIp);
 };

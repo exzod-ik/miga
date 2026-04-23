@@ -109,6 +109,8 @@
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalDependencies>ws2_32.lib</AdditionalDependencies>
       <AdditionalLibraryDirectories>$(ProjectDir)windivert\$(Platform);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <Version>
+      </Version>
     </Link>
     <PostBuildEvent>
       <Command>
@@ -132,6 +134,8 @@
       <AdditionalLibraryDirectories>$(ProjectDir)windivert\$(Platform);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <AdditionalDependencies>ws2_32.lib</AdditionalDependencies>
       <ProgramDatabaseFile>$(OutDir)$(TargetName).pdb</ProgramDatabaseFile>
+      <Version>
+      </Version>
     </Link>
     <PostBuildEvent>
       <Command>xcopy $(ProjectDir)windivert\$(Platform) $(OutDir) /y</Command>
@@ -156,6 +160,8 @@
       <OptimizeReferences>false</OptimizeReferences>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <AdditionalLibraryDirectories>$(ProjectDir)windivert\$(Platform);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <Version>
+      </Version>
     </Link>
     <PostBuildEvent>
       <Command>
@@ -179,6 +185,8 @@
       <AdditionalLibraryDirectories>$(ProjectDir)windivert\$(Platform);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <AdditionalDependencies>ws2_32.lib</AdditionalDependencies>
       <ProgramDatabaseFile>$(OutDir)$(TargetName).pdb</ProgramDatabaseFile>
+      <Version>
+      </Version>
     </Link>
     <PostBuildEvent>
       <Command>xcopy $(ProjectDir)windivert\$(Platform) $(OutDir) /y</Command>
@@ -202,6 +210,10 @@
     <ClInclude Include="include\MigaClient.h" />
     <ClInclude Include="include\ServiceManager.h" />
     <ClInclude Include="include\windivert.h" />
+    <ClInclude Include="resource.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="miga_client.rc" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

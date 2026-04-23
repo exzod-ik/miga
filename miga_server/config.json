@@ -1,5 +1,6 @@
 {
   "log_level": "debug",
+  "dns_server": "8.8.8.8",
   "client_ports": {
     "start": 10000,
     "end": 15000

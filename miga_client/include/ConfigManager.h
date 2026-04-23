@@ -33,7 +33,10 @@ struct IPRule {
 class ConfigManager {
 private:
     std::vector<std::string> m_ProcessRules;
-    IPRule m_IPRule;
+    IPRule m_StaticIPRule;
+    IPRule m_DynamicIPRule;
+    std::vector<std::string> m_DomainRules;
+    std::vector<std::string> m_WildcardDomainSuffixes; // *.domain
 
     Logger* m_Logger;
     int m_LogLevel;
@@ -47,14 +50,21 @@ private:
 
     bool ParseProcessRules(const json& config);
     bool ParseIPRules(const json& config);
+    bool ParseDomainRules(const json& config);
 
 public:
     ConfigManager(Logger* logger);
 
-    bool Load(const std::string& configPath);
+    bool Load(const std::string& configPath, bool hotLoad = false);
 
     const std::vector<std::string>& GetProcessRules() const { return m_ProcessRules; }
-    const IPRule& GetIPRule() const { return m_IPRule; }
+    const IPRule& GetStaticIPRule() const { return m_StaticIPRule; }
+    const IPRule& GetDynamicIPRule() const { return m_DynamicIPRule; }
+    const std::vector<std::string>& GetDomainRules() const { return m_DomainRules; }
+    const std::vector<std::string>& GetWildcardSuffixes() const { return m_WildcardDomainSuffixes; }
+
+    bool IsDomainRedirect(const std::string& domain) const;
+    void AddDynamicIP(uint32_t ip);
 
     const std::string& GetServerIP() const { return m_ServerIP; }
     uint16_t GetPortStart() const { return m_PortStart; }

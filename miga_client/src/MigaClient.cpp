@@ -83,7 +83,7 @@ void CMigaClient::ReloadConfig() {
     m_Logger.log(LOGGER_LEVEL_INFO, "Reloading configuration...");
     m_PacketMonitor.Stop();
 
-    if (!m_Config.Load(CONFIG_FILE_NAME)) {
+    if (!m_Config.Load(CONFIG_FILE_NAME, true)) {
         m_Logger.log(LOGGER_LEVEL_ERROR, "Failed to reload configuration, keeping old settings");
         if (!m_PacketMonitor.Start()) {
             m_Logger.log(LOGGER_LEVEL_ERROR, "Failed to restart PacketMonitor after config reload failure");

@@ -22,7 +22,7 @@ private:
     std::ofstream m_LogFile;
     std::mutex m_Mutex;
     std::string m_LogPath;
-    int m_level = LOGGER_LEVEL_NONE;
+    int m_level = LOGGER_LEVEL_INFO;
     bool m_useSyslog = false;
     bool m_consoleOutput = true;
 

@@ -152,5 +152,69 @@ namespace MIGA_Agent.Services
             dialog.ShowDialog();
             return result;
         }
+
+        public string? ShowMultiLineInputDialog(string prompt, string title, string defaultValue = "")
+        {
+            var dialog = new Window
+            {
+                Title = title,
+                Width = 500,
+                Height = 400,
+                WindowStartupLocation = WindowStartupLocation.CenterOwner,
+                Owner = Application.Current.MainWindow,
+                ResizeMode = ResizeMode.CanResize
+            };
+
+            var grid = new System.Windows.Controls.Grid();
+            grid.Margin = new Thickness(10);
+            grid.RowDefinitions.Add(new System.Windows.Controls.RowDefinition { Height = System.Windows.GridLength.Auto });
+            grid.RowDefinitions.Add(new System.Windows.Controls.RowDefinition { Height = new System.Windows.GridLength(1, System.Windows.GridUnitType.Star) });
+            grid.RowDefinitions.Add(new System.Windows.Controls.RowDefinition { Height = System.Windows.GridLength.Auto });
+
+            var promptText = new System.Windows.Controls.TextBlock
+            {
+                Text = prompt,
+                Margin = new Thickness(0, 0, 0, 10),
+                TextWrapping = System.Windows.TextWrapping.Wrap
+            };
+            System.Windows.Controls.Grid.SetRow(promptText, 0);
+
+            var inputBox = new System.Windows.Controls.TextBox
+            {
+                Text = defaultValue,
+                AcceptsReturn = true,
+                AcceptsTab = false,
+                TextWrapping = System.Windows.TextWrapping.Wrap,
+                VerticalScrollBarVisibility = System.Windows.Controls.ScrollBarVisibility.Auto,
+                Margin = new Thickness(0, 0, 0, 10)
+            };
+            System.Windows.Controls.Grid.SetRow(inputBox, 1);
+
+            var buttonPanel = new System.Windows.Controls.StackPanel
+            {
+                Orientation = System.Windows.Controls.Orientation.Horizontal,
+                HorizontalAlignment = System.Windows.HorizontalAlignment.Right
+            };
+            var okButton = new System.Windows.Controls.Button { Content = "OK", Width = 75, Margin = new Thickness(0, 0, 10, 0), IsDefault = true };
+            var cancelButton = new System.Windows.Controls.Button { Content = "Отмена", Width = 75, IsCancel = true };
+            buttonPanel.Children.Add(okButton);
+            buttonPanel.Children.Add(cancelButton);
+            System.Windows.Controls.Grid.SetRow(buttonPanel, 2);
+
+            grid.Children.Add(promptText);
+            grid.Children.Add(inputBox);
+            grid.Children.Add(buttonPanel);
+
+            dialog.Content = grid;
+
+            string? result = null;
+            inputBox.Focus();
+
+            okButton.Click += (s, e) => { result = inputBox.Text; dialog.Close(); };
+            cancelButton.Click += (s, e) => dialog.Close();
+
+            dialog.ShowDialog();
+            return result;
+        }
     }
 }

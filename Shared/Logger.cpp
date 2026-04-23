@@ -12,7 +12,7 @@
 
 using namespace std;
 
-Logger::Logger() : m_level(LOGGER_LEVEL_NONE) {
+Logger::Logger() : m_level(LOGGER_LEVEL_INFO) {
 }
 
 Logger::~Logger() {
