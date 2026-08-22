@@ -2,14 +2,13 @@
 using MIGA_Agent.Views.Dialogs;
 using Notification.Wpf;
 using Notification.Wpf.Classes;
+using Notification.Core;
 using Ookii.Dialogs.Wpf;
 using System.Windows;
 using System.Windows.Input;
 
 namespace MIGA_Agent.Services
 {
-    using ProgressInfo = NotifierProgress<(double? value, string message, string title, bool? showCancel)>;
-
     public class DialogService : IDialogService
     {
         private readonly NotificationManager _notificationManager;
@@ -53,19 +52,20 @@ namespace MIGA_Agent.Services
             return dialog.Result == true;
         }
 
-        public ProgressInfo ShowPersistent(string title)
+        public NotifierProgress<Notification.Core.NotificationProgressReport> ShowPersistent(string title)
         {
-            return _notificationManager.ShowProgressBar(Title: title, ShowCancelButton: false, ShowProgress: false, areaName: AreaName);
+            _notificationManager.ShowProgressBar(new ProgressBarOptions { Title = title, ShowCancelButton = false, ShowProgress = false, AreaName = AreaName });
+            return _notificationManager.ShowProgressBar(new ProgressBarOptions { Title = title, ShowCancelButton = false, ShowProgress = false, AreaName = AreaName });
         }
 
-        public void UpdatePersistent(ProgressInfo notification, string title, string message)
+        public void UpdatePersistent(NotifierProgress<Notification.Core.NotificationProgressReport> notification, string title, string message)
         {
-            notification.Report((0, message, title, false));
+            notification.Report(0, message, title, false);
         }
 
-        public void ClosePersistent(ProgressInfo notification, string title, string message)
+        public void ClosePersistent(NotifierProgress<Notification.Core.NotificationProgressReport> notification, string title, string message)
         {
-            notification.Report((100, message, title, false));
+            notification.Report(100, message, title, false);
         }
 
         public string? ShowFolderDialog(string description = "Выберите папку", string? selectedPath = null)

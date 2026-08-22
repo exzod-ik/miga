@@ -3,8 +3,6 @@ using System.Threading.Tasks;
 
 namespace MIGA_Agent.Services
 {
-    using ProgressInfo = NotifierProgress<(double? value, string message, string title, bool? showCancel)>;
-
     public interface IDialogService
     {
         /// <summary>
@@ -45,16 +43,16 @@ namespace MIGA_Agent.Services
         /// <summary>
         /// Показать "липкое" уведомление
         /// </summary>
-        ProgressInfo ShowPersistent(string title);
+        NotifierProgress<Notification.Core.NotificationProgressReport> ShowPersistent(string title);
 
         /// <summary>
         /// Обновить "липкое" уведомление
         /// </summary>
-        void UpdatePersistent(ProgressInfo notification, string title, string message);
+        void UpdatePersistent(NotifierProgress<Notification.Core.NotificationProgressReport> notification, string title, string message);
 
         /// <summary>
         /// Закрыть "липкое" уведомление
         /// </summary>
-        void ClosePersistent(ProgressInfo notification, string title, string message);
+        void ClosePersistent(NotifierProgress<Notification.Core.NotificationProgressReport> notification, string title, string message);
     }
 }
