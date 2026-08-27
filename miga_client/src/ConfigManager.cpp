@@ -3,26 +3,44 @@
 
 using namespace std;
 
+bool ServerConfig::IsDomainRedirect(std::string domain) const {
+    transform(domain.begin(), domain.end(), domain.begin(), ::tolower);
+
+    for (const auto& rule : domainRules) {
+        if (rule == domain) {
+            return true;
+        }
+    }
+
+    for (const auto& suffix : wildcardDomainSuffixes) {
+        if (domain.size() > suffix.size() &&
+            domain[domain.size() - suffix.size() - 1] == '.' &&
+            domain.compare(domain.size() - suffix.size(), suffix.size(), suffix) == 0) {
+            return true;
+        }
+        if (domain == suffix) return true;
+    }
+    return false;
+}
+
 ConfigManager::ConfigManager(Logger* logger)
     : m_Logger(logger)
-    , m_PortStart(10000)
-    , m_PortEnd(15000)
     , m_LogLevel(LOGGER_LEVEL_NONE) {
 }
 
-bool ConfigManager::ParseProcessRules(const json& config) {
+bool ConfigManager::ParseProcessRules(const json& config, ServerConfig& server) {
     if (config.contains("redirect_processes") && config["redirect_processes"].is_array()) {
         for (const auto& procJson : config["redirect_processes"]) {
             string procName = procJson.get<string>();
             transform(procName.begin(), procName.end(), procName.begin(), ::tolower);
-            m_ProcessRules.push_back(procName);
+            server.processRules.push_back(procName);
             m_Logger->log(LOGGER_LEVEL_INFO, "Process rule: " + procName);
         }
     }
     return true;
 }
 
-bool ConfigManager::ParseIPRules(const json& config) {
+bool ConfigManager::ParseIPRules(const json& config, ServerConfig& server) {
     if (config.contains("redirect_ips") && config["redirect_ips"].is_array()) {
         for (const auto& ipJson : config["redirect_ips"]) {
             string ipStr = ipJson.get<string>();
@@ -62,13 +80,13 @@ bool ConfigManager::ParseIPRules(const json& config) {
                 m_Logger->log(LOGGER_LEVEL_INFO, "IP rule: " + ipStr);
             }
 
-            m_StaticIPRule.ipRanges.push_back(range);
+            server.staticIPRule.ipRanges.push_back(range);
         }
     }
     return true;
 }
 
-bool ConfigManager::ParseDomainRules(const json& config) {
+bool ConfigManager::ParseDomainRules(const json& config, ServerConfig& server) {
     if (config.contains("redirect_domains") && config["redirect_domains"].is_array()) {
         for (const auto& domainJson : config["redirect_domains"]) {
             string domain = domainJson.get<std::string>();
@@ -76,15 +94,43 @@ bool ConfigManager::ParseDomainRules(const json& config) {
 
             if (domain.size() > 2 && domain[0] == '*' && domain[1] == '.') {
                 string suffix = domain.substr(2); // remove "*."
-                m_WildcardDomainSuffixes.push_back(suffix);
+                server.wildcardDomainSuffixes.push_back(suffix);
                 m_Logger->log(LOGGER_LEVEL_INFO, "Wildcard domain rule: *." + suffix);
             }
             else {
-                m_DomainRules.push_back(domain);
+                server.domainRules.push_back(domain);
                 m_Logger->log(LOGGER_LEVEL_INFO, "Domain rule: " + domain);
             }
         }
     }
+    return true;
+}
+
+bool ConfigManager::ParseServer(const json& serverJson, ServerConfig& server) {
+    if (!serverJson.contains("server_ip")) {
+        m_Logger->log(LOGGER_LEVEL_ERROR, "\"server_ip\" is missing for one of the servers");
+        return false;
+    }
+
+    server.serverIP = serverJson["server_ip"];
+    m_Logger->log(LOGGER_LEVEL_INFO, "Server IP: " + server.serverIP);
+
+    if (serverJson.contains("server_ports")) {
+        server.portStart = serverJson["server_ports"]["start"];
+        server.portEnd = serverJson["server_ports"]["end"];
+        m_Logger->log(LOGGER_LEVEL_INFO, "Server ports: " + to_string(server.portStart) + "-" + to_string(server.portEnd));
+    }
+
+    if (serverJson.contains("encryption")) {
+        server.xorKeyBase64 = serverJson["encryption"]["xor_key"];
+        server.swapKeyBase64 = serverJson["encryption"]["swap_key"];
+        m_Logger->log(LOGGER_LEVEL_INFO, "Encryption keys loaded");
+    }
+
+    if (!ParseProcessRules(serverJson, server)) return false;
+    if (!ParseIPRules(serverJson, server)) return false;
+    if (!ParseDomainRules(serverJson, server)) return false;
+
     return true;
 }
 
@@ -100,23 +146,6 @@ bool ConfigManager::Load(const string& configPath, bool hotLoad) {
 
         json config;
         configFile >> config;
-
-        if (config.contains("server_ip")) {
-            m_ServerIP = config["server_ip"];
-            m_Logger->log(LOGGER_LEVEL_INFO, "Server IP: " + m_ServerIP);
-        }
-
-        if (config.contains("server_ports")) {
-            m_PortStart = config["server_ports"]["start"];
-            m_PortEnd = config["server_ports"]["end"];
-            m_Logger->log(LOGGER_LEVEL_INFO, "Server ports: " + to_string(m_PortStart) + "-" + to_string(m_PortEnd));
-        }
-
-        if (config.contains("encryption")) {
-            m_XorKeyBase64 = config["encryption"]["xor_key"];
-            m_SwapKeyBase64 = config["encryption"]["swap_key"];
-            m_Logger->log(LOGGER_LEVEL_INFO, "Encryption keys loaded");
-        }
 
         if (config.contains("log_level")) {
             string levelStr = config["log_level"];
@@ -138,19 +167,36 @@ bool ConfigManager::Load(const string& configPath, bool hotLoad) {
             m_LogLevel = LOGGER_LEVEL_NONE;
         }
 
-        m_ProcessRules.clear();
-        m_StaticIPRule = IPRule();
-        if (!hotLoad)
-            m_DynamicIPRule = IPRule();
+        if (!config.contains("servers") || !config["servers"].is_array()) {
+            m_Logger->log(LOGGER_LEVEL_ERROR, "\"servers\" array is missing in config");
+            return false;
+        }
 
-        ParseProcessRules(config);
-        ParseIPRules(config);
-        ParseDomainRules(config);
+        vector<ServerConfig> newServers;
+        newServers.reserve(config["servers"].size());
+
+        for (const auto& serverJson : config["servers"]) {
+            ServerConfig server;
+            if (!ParseServer(serverJson, server))
+                return false;
+            newServers.push_back(move(server));
+        }
+
+        if (newServers.empty()) {
+            m_Logger->log(LOGGER_LEVEL_ERROR, "No servers configured");
+            return false;
+        }
+
+        if (hotLoad && newServers.size() == m_Servers.size()) {
+            for (size_t i = 0; i < newServers.size(); ++i) {
+                newServers[i].dynamicIPRule = m_Servers[i].dynamicIPRule;
+            }
+        }
+
+        m_Servers = move(newServers);
 
         m_Logger->log(LOGGER_LEVEL_INFO, "Configuration loaded: " +
-            to_string(m_ProcessRules.size()) + " processes, " +
-            to_string(m_StaticIPRule.ipRanges.size()) + " static IP ranges, " +
-            to_string(m_DomainRules.size()) + " domains");
+            to_string(m_Servers.size()) + " server(s)");
 
         return true;
 
@@ -161,30 +207,20 @@ bool ConfigManager::Load(const string& configPath, bool hotLoad) {
     }
 }
 
-
-bool ConfigManager::IsDomainRedirect(const std::string& domain) const {
-    string lowerDomain = domain;
-    transform(lowerDomain.begin(), lowerDomain.end(), lowerDomain.begin(), ::tolower);
-
-    for (const auto& rule : m_DomainRules) {
-        if (rule == lowerDomain) {
-            return true;
-        }
+const ServerConfig* ConfigManager::FindServerByDomain(const string& domain) const {
+    for (const auto& server : m_Servers) {
+        if (server.IsDomainRedirect(domain))
+            return &server;
     }
-
-    for (const auto& suffix : m_WildcardDomainSuffixes) {
-        if (lowerDomain.size() > suffix.size() &&
-            lowerDomain[lowerDomain.size() - suffix.size() - 1] == '.' &&
-            lowerDomain.compare(lowerDomain.size() - suffix.size(), suffix.size(), suffix) == 0) {
-            return true;
-        }
-        if (lowerDomain == suffix) return true;
-    }
-    return false;
+    return nullptr;
 }
 
-void ConfigManager::AddDynamicIP(uint32_t ip) {
-    for (const auto& range : m_DynamicIPRule.ipRanges) {
+void ConfigManager::AddDynamicIP(size_t serverIndex, uint32_t ip) {
+    if (serverIndex >= m_Servers.size())
+        return;
+
+    IPRule& rule = m_Servers[serverIndex].dynamicIPRule;
+    for (const auto& range : rule.ipRanges) {
         if (range.startIP == ip && range.endIP == ip) {
             return;
         }
@@ -192,5 +228,5 @@ void ConfigManager::AddDynamicIP(uint32_t ip) {
     IPRange newRange;
     newRange.startIP = ip;
     newRange.endIP = ip;
-    m_DynamicIPRule.ipRanges.push_back(newRange);
+    rule.ipRanges.push_back(newRange);
 }

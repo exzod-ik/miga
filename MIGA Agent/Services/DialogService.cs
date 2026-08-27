@@ -4,6 +4,7 @@ using Notification.Wpf;
 using Notification.Wpf.Classes;
 using Notification.Core;
 using Ookii.Dialogs.Wpf;
+using System.Collections.Generic;
 using System.Windows;
 using System.Windows.Input;
 
@@ -50,6 +51,20 @@ namespace MIGA_Agent.Services
             var dialog = new YesNoDialog(message, title);
             dialog.ShowDialog();
             return dialog.Result == true;
+        }
+
+        public UnsavedChangesDecision ShowUnsavedChangesDialog(string message, string title = "Несохранённые изменения")
+        {
+            var dialog = new UnsavedChangesDialog(message, title);
+            dialog.ShowDialog();
+            return dialog.Decision;
+        }
+
+        public bool ShowIssuesConfirmation(string title, string message, IEnumerable<string> issues)
+        {
+            var dialog = new IssuesDialog(title, message, issues);
+            dialog.ShowDialog();
+            return dialog.DialogResult == true;
         }
 
         public NotifierProgress<Notification.Core.NotificationProgressReport> ShowPersistent(string title)

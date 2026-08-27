@@ -3,166 +3,228 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:helpers="clr-namespace:MIGA_Agent.Helpers"
         xmlns:notifications="clr-namespace:Notification.Wpf.Controls;assembly=Notification.Wpf"
-        Title="Make Internet Greate Again"
-        Height="800" Width="1200"
+        Title="{Binding WindowTitle}"
+        Height="880" Width="1200"
         Icon="/Icon.ico"
         WindowStartupLocation="CenterScreen">
+    <Window.Resources>
+        <!-- Стиль элемента списка перенаправления: красный шрифт и подсказка при пересечении -->
+        <Style x:Key="RedirectItemStyle" TargetType="ListBoxItem"
+               BasedOn="{StaticResource {x:Type ListBoxItem}}">
+            <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding IsConflicting}" Value="True">
+                    <Setter Property="Foreground" Value="Red"/>
+                    <Setter Property="ToolTip" Value="{Binding ConflictTooltip}"/>
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+    </Window.Resources>
+
     <Grid Margin="10">
-        <Grid.ColumnDefinitions>
-            <ColumnDefinition Width="385"/>
-            <ColumnDefinition Width="1*"/>
-        </Grid.ColumnDefinitions>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="1*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
 
-        <!-- ЛЕВАЯ ПАНЕЛЬ -->
-        <ScrollViewer Grid.Column="0" VerticalScrollBarVisibility="Auto">
-            <StackPanel Margin="0,0,10,0">
-
-                <!-- Настройки сервера (основные) -->
-                <GroupBox Header="Настройки сервера" Margin="0,0,0,0">
-                    <StackPanel Margin="5">
-
-                        <!-- Server IP -->
-                        <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
-                            <TextBlock Text="Server IP:" Width="80" VerticalAlignment="Center"/>
-                            <TextBox Text="{Binding ServerIp}" IsEnabled="{Binding IsNotBusy}" Width="263"/>
+        <!-- ВКЛАДКИ СЕРВЕРОВ (+ кнопка добавления в ряду заголовков) -->
+        <TabControl Grid.Row="0" Margin="0,0,0,10"
+                    ItemsSource="{Binding Servers}"
+                    SelectedItem="{Binding SelectedServer}">
+            <TabControl.Template>
+                <ControlTemplate TargetType="TabControl">
+                    <Grid KeyboardNavigation.TabNavigation="Local">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*"/>
+                        </Grid.RowDefinitions>
+                        <StackPanel Grid.Row="0" Orientation="Horizontal">
+                            <TabPanel IsItemsHost="True" Margin="0,0,8,0"/>
+                            <Button Content="+ Добавить сервер"
+                                    Command="{Binding AddServerCommand}"
+                                    VerticalAlignment="Center"
+                                    Padding="8,4" Margin="0,3,0,0"/>
                         </StackPanel>
+                        <Border Grid.Row="1">
+                            <ContentPresenter ContentSource="SelectedContent"/>
+                        </Border>
+                    </Grid>
+                </ControlTemplate>
+            </TabControl.Template>
 
-                        <!-- SSH + статус демона -->
-                        <StackPanel Margin="0,0,0,10">
-                            <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
-                                <TextBlock Text="Username:" Width="80" VerticalAlignment="Center"/>
-                                <TextBox Text="{Binding ServerSshUser}" IsEnabled="{Binding IsNotBusy}" Width="263"/>
+            <TabControl.ItemTemplate>
+                <DataTemplate>
+                    <TextBlock Text="{Binding DisplayName}" Margin="5,0"/>
+                </DataTemplate>
+            </TabControl.ItemTemplate>
+
+            <TabControl.ContentTemplate>
+                <DataTemplate>
+                    <!-- Рамка визуально отделяет содержимое сервера от остальных элементов -->
+                    <Border BorderBrush="#80808080" BorderThickness="1" CornerRadius="4" Margin="4">
+                        <ScrollViewer VerticalScrollBarVisibility="Auto">
+                        <Grid Margin="5">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="385"/>
+                                <ColumnDefinition Width="1*"/>
+                            </Grid.ColumnDefinitions>
+
+                            <!-- ЛЕВАЯ КОЛОНКА: настройки сервера -->
+                            <StackPanel Grid.Column="0" Margin="0,0,10,0">
+
+                                <GroupBox Header="Настройки сервера">
+                                    <StackPanel Margin="5">
+
+                                        <!-- Server IP -->
+                                        <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
+                                            <TextBlock Text="Server IP:" Width="80" VerticalAlignment="Center"/>
+                                            <TextBox Text="{Binding ServerIp, UpdateSourceTrigger=PropertyChanged}" IsEnabled="{Binding IsNotBusy}" Width="263"/>
+                                        </StackPanel>
+
+                                        <!-- SSH + статус демона -->
+                                        <StackPanel Margin="0,0,0,10">
+                                            <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
+                                                <TextBlock Text="Username:" Width="80" VerticalAlignment="Center"/>
+                                                <TextBox Text="{Binding ServerSshUser}" IsEnabled="{Binding IsNotBusy}" Width="263"/>
+                                            </StackPanel>
+                                            <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
+                                                <TextBlock Text="Password:" Width="80" VerticalAlignment="Center"/>
+                                                <PasswordBox IsEnabled="{Binding IsNotBusy}" Width="263"
+                                                             helpers:PasswordBoxAssistant.BindPassword="true"
+                                                             helpers:PasswordBoxAssistant.BoundPassword="{Binding ServerSshPassword, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"/>
+                                            </StackPanel>
+                                            <WrapPanel Margin="0,5,0,0">
+                                                <Button Content="{Binding SshButtonText}" Command="{Binding ToggleSshCommand}" IsEnabled="{Binding IsNotBusy}" Width="120" Margin="0,0,10,0" Padding="5"/>
+                                                <TextBlock Text="Статус:" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                                                <TextBlock Text="{Binding ServerDemoStatus}" VerticalAlignment="Center" Margin="0,0,10,0" Width="74"/>
+                                                <Button Content="Обновить" Command="{Binding RefreshServerDemoStatusCommand}" Width="80" Padding="5" IsEnabled="{Binding IsSshConnected}"/>
+                                            </WrapPanel>
+                                        </StackPanel>
+
+                                        <!-- Динамическая кнопка (загрузить/запустить/остановить) -->
+                                        <Button Content="{Binding DynamicDemoButtonText}" Command="{Binding DynamicDemoCommand}" Width="220" Padding="5" IsEnabled="{Binding IsSshConnected}" HorizontalAlignment="Left"/>
+
+                                    </StackPanel>
+                                </GroupBox>
+
+                                <!-- Экспертные настройки (сворачиваемые, по умолчанию скрыты) -->
+                                <Expander Header="Экспертные настройки" Margin="0,10,0,10" IsExpanded="False">
+                                    <StackPanel Margin="10">
+                                        <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
+                                            <TextBlock Text="Log level:" Width="155" VerticalAlignment="Center"/>
+                                            <ComboBox ItemsSource="{Binding LogLevels}" SelectedItem="{Binding ServerLogLevel}" IsEnabled="{Binding IsSshConnected}" Width="250" VerticalAlignment="Center"/>
+                                        </StackPanel>
+
+                                        <!-- DNS сервер для перенаправления -->
+                                        <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
+                                            <TextBlock Text="DNS Server:" Width="155" VerticalAlignment="Center"/>
+                                            <TextBox Text="{Binding DnsServer}" IsEnabled="{Binding IsSshConnected}" Width="250"/>
+                                        </StackPanel>
+
+                                        <!-- Диапазоны портов -->
+                                        <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
+                                            <TextBlock Text="Client ports (start - end):" Width="155" VerticalAlignment="Center"/>
+                                            <TextBox Text="{Binding ServerPortsStart}" IsEnabled="{Binding IsSshConnected}" Width="80" Margin="0,0,5,0"/>
+                                            <TextBlock Text="-" Margin="0,0,5,0" VerticalAlignment="Center"/>
+                                            <TextBox Text="{Binding ServerPortsEnd}" IsEnabled="{Binding IsSshConnected}" Width="80"/>
+                                        </StackPanel>
+
+                                        <!-- Генерация ключей -->
+                                        <Button Content="Сгенерировать новые ключи" Command="{Binding GenerateKeysCommand}" IsEnabled="{Binding IsSshConnected}" Width="200" Padding="5" HorizontalAlignment="Left" Margin="0,10,0,0"/>
+                                    </StackPanel>
+                                </Expander>
+
+                                <!-- Удаление вкладки сервера -->
+                                <Button Content="Удалить сервер" Command="{Binding RemoveServerCommand}" Width="200" Padding="5" HorizontalAlignment="Left"/>
+
                             </StackPanel>
-                            <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
-                                <TextBlock Text="Password:" Width="80" VerticalAlignment="Center"/>
-                                <PasswordBox IsEnabled="{Binding IsNotBusy}" Width="263" 
-                                             helpers:PasswordBoxAssistant.BindPassword="true"
-                                             helpers:PasswordBoxAssistant.BoundPassword="{Binding ServerSshPassword, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"/>
-                            </StackPanel>
-                            <WrapPanel Margin="0,5,0,0">
-                                <Button Content="{Binding SshButtonText}" Command="{Binding ToggleSshCommand}" IsEnabled="{Binding IsNotBusy}" Width="120" Margin="0,0,10,0" Padding="5"/>
-                                <TextBlock Text="Статус:" VerticalAlignment="Center" Margin="0,0,5,0"/>
-                                <TextBlock Text="{Binding ServerDemoStatus}" VerticalAlignment="Center" Margin="0,0,10,0" Width="74"/>
-                                <Button Content="Обновить" Command="{Binding RefreshServerDemoStatusCommand}" Width="80" Padding="5" IsEnabled="{Binding IsSshConnected}"/>
-                            </WrapPanel>
-                        </StackPanel>
 
-                        <!-- Динамическая кнопка (загрузить/запустить/остановить) -->
-                        <Button Content="{Binding DynamicDemoButtonText}" Command="{Binding DynamicDemoCommand}" Width="220" Padding="5" IsEnabled="{Binding IsSshConnected}" Margin="0,10,0,0"/>
+                            <!-- ПРАВАЯ КОЛОНКА: перенаправление трафика -->
+                            <GroupBox Grid.Column="1" Header="Перенаправление трафика" Margin="10,0,0,0">
+                                <ScrollViewer VerticalScrollBarVisibility="Auto">
+                                    <StackPanel Margin="10">
 
-                    </StackPanel>
-                </GroupBox>
+                                        <TextBlock Text="Процессы (имена исполняемых файлов)" FontWeight="Bold" Margin="0,0,0,5"/>
+                                        <ListBox x:Name="RedirectProcessesListBox" ItemsSource="{Binding RedirectProcesses}"
+                                                 ItemContainerStyle="{StaticResource RedirectItemStyle}"
+                                                 Height="140" Margin="0,0,0,5">
+                                            <ListBox.ContextMenu>
+                                                <ContextMenu>
+                                                    <MenuItem Header="Добавить" Command="{Binding AddProcessCommand}"/>
+                                                    <MenuItem Header="Изменить" Command="{Binding EditProcessCommand}"/>
+                                                    <MenuItem Header="Удалить" Command="{Binding RemoveProcessCommand}" CommandParameter="{Binding SelectedItem, RelativeSource={RelativeSource AncestorType=ListBox}}"/>
+                                                </ContextMenu>
+                                            </ListBox.ContextMenu>
+                                        </ListBox>
+                                        <WrapPanel Margin="0,0,0,5">
+                                            <Button Content="Добавить" Command="{Binding AddProcessCommand}" Width="85" Margin="0,0,5,0"/>
+                                            <Button Content="Изменить" Command="{Binding EditProcessCommand}" Width="85" Margin="0,0,5,0"/>
+                                            <Button Content="Удалить" Command="{Binding RemoveProcessCommand}" CommandParameter="{Binding SelectedItem, ElementName=RedirectProcessesListBox}" Width="85"/>
+                                        </WrapPanel>
 
-                <!-- Состояние клиента (локальная служба) -->
-                <GroupBox Header="Состояние клиента" Margin="0,0,0,0">
-                    <StackPanel Margin="5">
-                        <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
-                            <TextBlock Text="Статус:" Width="60" FontWeight="Bold"/>
-                            <TextBlock Text="{Binding ServiceStatus}" FontWeight="Bold"/>
-                        </StackPanel>
-                        <WrapPanel>
-                            <Button Content="Запустить" Command="{Binding StartLocalServiceCommand}" Width="100" Margin="0,0,10,0" Padding="5"/>
-                            <Button Content="Остановить" Command="{Binding StopLocalServiceCommand}" Width="100" Padding="5"/>
-                            <Button Content="Обновить статус" Command="{Binding RefreshServiceStatusCommand}" Width="120" Margin="10,0,0,0" Padding="5"/>
-                        </WrapPanel>
-                    </StackPanel>
-                </GroupBox>
+                                        <TextBlock Text="Доменные имена" FontWeight="Bold" Margin="0,5,0,5"/>
+                                        <ListBox x:Name="RedirectDomainsListBox" ItemsSource="{Binding RedirectDomains}"
+                                                 ItemContainerStyle="{StaticResource RedirectItemStyle}"
+                                                 Height="140" Margin="0,0,0,5">
+                                            <ListBox.ContextMenu>
+                                                <ContextMenu>
+                                                    <MenuItem Header="Добавить" Command="{Binding AddDomainCommand}"/>
+                                                    <MenuItem Header="Изменить" Command="{Binding EditDomainCommand}"/>
+                                                    <MenuItem Header="Удалить" Command="{Binding RemoveDomainCommand}" CommandParameter="{Binding SelectedItem, RelativeSource={RelativeSource AncestorType=ListBox}}"/>
+                                                </ContextMenu>
+                                            </ListBox.ContextMenu>
+                                        </ListBox>
+                                        <WrapPanel Margin="0,0,0,5">
+                                            <Button Content="Добавить" Command="{Binding AddDomainCommand}" Width="85" Margin="0,0,5,0"/>
+                                            <Button Content="Изменить" Command="{Binding EditDomainCommand}" Width="85" Margin="0,0,5,0"/>
+                                            <Button Content="Удалить" Command="{Binding RemoveDomainCommand}" CommandParameter="{Binding SelectedItem, ElementName=RedirectDomainsListBox}" Width="85"/>
+                                        </WrapPanel>
 
-                <!-- Экспертные настройки (сворачиваемые, по умолчанию скрыты) -->
-                <Expander Header="Экспертные настройки" Margin="0,0,0,10" IsExpanded="False">
-                    <StackPanel Margin="10">
-                        <!-- Log Level (клиент и сервер) -->
-                        <GroupBox Header="Log Level" Margin="0,0,0,5">
-                            <StackPanel Orientation="Horizontal" Margin="21,0,0,0">
-                                <TextBlock Text="клиент:" Width="60" VerticalAlignment="Center"/>
-                                <ComboBox ItemsSource="{Binding LogLevels}" SelectedItem="{Binding LogLevel}" Width="90" Margin="0,0,10,0"/>
-                                <TextBlock Text="сервер:" Width="60" VerticalAlignment="Center"/>
-                                <ComboBox ItemsSource="{Binding LogLevels}" SelectedItem="{Binding ServerLogLevel}" IsEnabled="{Binding IsSshConnected}" Width="90"/>
-                            </StackPanel>
-                        </GroupBox>
+                                        <TextBlock Text="IP адреса (IP или диапазоны)" FontWeight="Bold" Margin="0,5,0,5"/>
+                                        <ListBox x:Name="RedirectIpsListBox" ItemsSource="{Binding RedirectIps}"
+                                                 ItemContainerStyle="{StaticResource RedirectItemStyle}"
+                                                 Height="140" Margin="0,0,0,5">
+                                            <ListBox.ContextMenu>
+                                                <ContextMenu>
+                                                    <MenuItem Header="Добавить" Command="{Binding AddIpCommand}"/>
+                                                    <MenuItem Header="Изменить" Command="{Binding EditIpCommand}"/>
+                                                    <MenuItem Header="Удалить" Command="{Binding RemoveIpCommand}" CommandParameter="{Binding SelectedItem, RelativeSource={RelativeSource AncestorType=ListBox}}"/>
+                                                </ContextMenu>
+                                            </ListBox.ContextMenu>
+                                        </ListBox>
+                                        <WrapPanel Margin="0,0,0,5">
+                                            <Button Content="Добавить" Command="{Binding AddIpCommand}" Width="85" Margin="0,0,5,0"/>
+                                            <Button Content="Изменить" Command="{Binding EditIpCommand}" Width="85" Margin="0,0,5,0"/>
+                                            <Button Content="Удалить" Command="{Binding RemoveIpCommand}" CommandParameter="{Binding SelectedItem, ElementName=RedirectIpsListBox}" Width="85"/>
+                                        </WrapPanel>
+                                    </StackPanel>
+                                </ScrollViewer>
+                            </GroupBox>
 
-                        <!-- DNS сервер для перенаправления -->
-                        <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
-                            <TextBlock Text="DNS Server:" Width="81" VerticalAlignment="Center"/>
-                            <TextBox Text="{Binding DnsServer}" IsEnabled="{Binding IsSshConnected}" Width="250"/>
-                        </StackPanel>
+                        </Grid>
+                    </ScrollViewer>
+                    </Border>
+                </DataTemplate>
+            </TabControl.ContentTemplate>
+        </TabControl>
 
-                        <!-- Диапазоны портов -->
-                        <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
-                            <TextBlock Text="Client ports (start - end):" Width="155" VerticalAlignment="Center"/>
-                            <TextBox Text="{Binding ServerPortsStart}" IsEnabled="{Binding IsSshConnected}" Width="80" Margin="0,0,5,0"/>
-                            <TextBlock Text="-" Margin="0,0,5,0" VerticalAlignment="Center"/>
-                            <TextBox Text="{Binding ServerPortsEnd}" IsEnabled="{Binding IsSshConnected}" Width="80"/>
-                        </StackPanel>
+        <!-- НИЖНЯЯ ПАНЕЛЬ: применение конфигурации и управление службой -->
+        <WrapPanel Grid.Row="1" VerticalAlignment="Center">
+            <Button Content="Применить конфигурацию" Command="{Binding ApplyConfigurationCommand}" Width="230" Padding="5" Margin="0,0,15,0"/>
 
-                        <!-- Генерация ключей и применение конфигурации -->
-                        <Button Content="Сгенерировать новые ключи" Command="{Binding GenerateKeysCommand}" IsEnabled="{Binding IsSshConnected}" Width="200" Padding="5" HorizontalAlignment="Left" Margin="0,0,0,10"/>
-                        <Button Content="Применить конфигурацию" Command="{Binding ApplyConfigurationCommand}" Width="200" Padding="5" HorizontalAlignment="Left"/>
-                    </StackPanel>
-                </Expander>
+            <Separator Style="{StaticResource {x:Static ToolBar.SeparatorStyleKey}}" Margin="0,0,15,0"/>
 
-            </StackPanel>
-        </ScrollViewer>
+            <TextBlock Text="Служба MigaClient:" FontWeight="Bold" VerticalAlignment="Center" Margin="0,0,5,0"/>
+            <TextBlock Text="{Binding ServiceStatus}" FontWeight="Bold" VerticalAlignment="Center" Margin="0,0,15,0" MinWidth="150"/>
+            <Button Content="Запустить" Command="{Binding StartLocalServiceCommand}" Width="100" Margin="0,0,10,0" Padding="5"/>
+            <Button Content="Остановить" Command="{Binding StopLocalServiceCommand}" Width="100" Margin="0,0,10,0" Padding="5"/>
+            <Button Content="Обновить статус" Command="{Binding RefreshServiceStatusCommand}" Width="120" Padding="5"/>
+        </WrapPanel>
 
-        <!-- ПРАВАЯ ПАНЕЛЬ (перенаправление трафика) -->
-        <ScrollViewer Grid.Column="1" VerticalScrollBarVisibility="Auto">
-            <GroupBox Header="Перенаправление трафика" Margin="10,0,0,0">
-                <StackPanel Margin="10">
-                    <TextBlock Text="Процессы (имена исполняемых файлов)" FontWeight="Bold" Margin="0,0,0,5"/>
-                    <ListBox x:Name="RedirectProcessesListBox" ItemsSource="{Binding RedirectProcesses}" Height="140" Margin="0,0,0,5">
-                        <ListBox.ContextMenu>
-                            <ContextMenu>
-                                <MenuItem Header="Добавить" Command="{Binding AddProcessCommand}"/>
-                                <MenuItem Header="Изменить" Command="{Binding EditProcessCommand}"/>
-                                <MenuItem Header="Удалить" Command="{Binding RemoveProcessCommand}" CommandParameter="{Binding SelectedItem, RelativeSource={RelativeSource AncestorType=ListBox}}"/>
-                            </ContextMenu>
-                        </ListBox.ContextMenu>
-                    </ListBox>
-                    <WrapPanel Margin="0,0,0,5">
-                        <Button Content="Добавить" Command="{Binding AddProcessCommand}" Width="85" Margin="0,0,5,0"/>
-                        <Button Content="Изменить" Command="{Binding EditProcessCommand}" Width="85" Margin="0,0,5,0"/>
-                        <Button Content="Удалить" Command="{Binding RemoveProcessCommand}" CommandParameter="{Binding SelectedItem, ElementName=RedirectProcessesListBox}" Width="85"/>
-                    </WrapPanel>
-
-                    <TextBlock Text="Доменные имена" FontWeight="Bold" Margin="0,5,0,5"/>
-                    <ListBox x:Name="RedirectDomainsListBox" ItemsSource="{Binding RedirectDomains}" Height="140" Margin="0,0,0,5">
-                        <ListBox.ContextMenu>
-                            <ContextMenu>
-                                <MenuItem Header="Добавить" Command="{Binding AddDomainCommand}"/>
-                                <MenuItem Header="Изменить" Command="{Binding EditDomainCommand}"/>
-                                <MenuItem Header="Удалить" Command="{Binding RemoveDomainCommand}" CommandParameter="{Binding SelectedItem, RelativeSource={RelativeSource AncestorType=ListBox}}"/>
-                            </ContextMenu>
-                        </ListBox.ContextMenu>
-                    </ListBox>
-                    <WrapPanel Margin="0,0,0,5">
-                        <Button Content="Добавить" Command="{Binding AddDomainCommand}" Width="85" Margin="0,0,5,0"/>
-                        <Button Content="Изменить" Command="{Binding EditDomainCommand}" Width="85" Margin="0,0,5,0"/>
-                        <Button Content="Удалить" Command="{Binding RemoveDomainCommand}" CommandParameter="{Binding SelectedItem, ElementName=RedirectDomainsListBox}" Width="85"/>
-                    </WrapPanel>
-
-                    <TextBlock Text="IP адреса (IP или диапазоны)" FontWeight="Bold" Margin="0,5,0,5"/>
-                    <ListBox x:Name="RedirectIpsListBox" ItemsSource="{Binding RedirectIps}" Height="140" Margin="0,0,0,5">
-                        <ListBox.ContextMenu>
-                            <ContextMenu>
-                                <MenuItem Header="Добавить" Command="{Binding AddIpCommand}"/>
-                                <MenuItem Header="Изменить" Command="{Binding EditIpCommand}"/>
-                                <MenuItem Header="Удалить" Command="{Binding RemoveIpCommand}" CommandParameter="{Binding SelectedItem, RelativeSource={RelativeSource AncestorType=ListBox}}"/>
-                            </ContextMenu>
-                        </ListBox.ContextMenu>
-                    </ListBox>
-                    <WrapPanel Margin="0,0,0,5">
-                        <Button Content="Добавить" Command="{Binding AddIpCommand}" Width="85" Margin="0,0,5,0"/>
-                        <Button Content="Изменить" Command="{Binding EditIpCommand}" Width="85" Margin="0,0,5,0"/>
-                        <Button Content="Удалить" Command="{Binding RemoveIpCommand}" CommandParameter="{Binding SelectedItem, ElementName=RedirectIpsListBox}" Width="85"/>
-                    </WrapPanel>
-
-                    <Button Content="Сохранить" Command="{Binding SaveRedirectsOnlyCommand}" Width="200" Padding="5" Margin="0,5,0,0"/>
-                </StackPanel>
-            </GroupBox>
-        </ScrollViewer>
-        <notifications:NotificationArea Grid.Column="1"
+        <!-- Область уведомлений -->
+        <notifications:NotificationArea Grid.Row="0" Grid.RowSpan="2"
             x:Name="NotificationArea"
             Position="BottomRight"
-            MaxItems="5" />
+            MaxItems="5"/>
     </Grid>
 </Window>

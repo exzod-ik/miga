@@ -65,3 +65,11 @@ miga_client/include/windivert.h eol=lf
 miga_server/include/* eol=lf
 miga_server/install.sh eol=lf
 Shared/nlohmann/json.hpp eol=lf
+
+# Явно указать, что файлы с расширением .cs при выгрузке (checkout) должны иметь CRLF
+*.cs text eol=crlf
+
+# Добавьте аналогичные строки для других типов файлов, где нужен CRLF
+# Например:
+# *.csproj text eol=crlf
+# *.sln text eol=crlf

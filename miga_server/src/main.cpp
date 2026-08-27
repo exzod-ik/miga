@@ -1,5 +1,6 @@
 #include "ServerCore.h"
 #include <nlohmann/json.hpp>
+#include <unistd.h>
 #include <fstream>
 #include <iostream>
 #include <csignal>
@@ -8,7 +9,7 @@
 #include <errno.h>
 #include <cstring>
 
-#define VERSION "1.1.0"
+#define VERSION "1.2.0"
 
 using namespace std;
 using json = nlohmann::json;

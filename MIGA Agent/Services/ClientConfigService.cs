@@ -91,8 +91,70 @@ namespace MIGA_Agent.Services
             }
 
             string json = await File.ReadAllTextAsync(ConfigFilePath);
-            var config = JsonSerializer.Deserialize<ClientConfig>(json);
-            return config ?? new ClientConfig();
+            using var document = JsonDocument.Parse(json);
+            var root = document.RootElement;
+
+            // Новый формат: корень содержит массив servers
+            if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("servers", out _))
+            {
+                var config = JsonSerializer.Deserialize<ClientConfig>(json);
+                return config ?? new ClientConfig();
+            }
+
+            // Старый формат: настройки сервера лежат в корне — переносим их в единственный элемент servers
+            return MigrateLegacyConfig(root);
+        }
+
+        private static ClientConfig MigrateLegacyConfig(JsonElement root)
+        {
+            var entry = new ServerEntry();
+
+            if (root.TryGetProperty("server_ip", out var ip) && ip.ValueKind == JsonValueKind.String)
+                entry.ServerIp = ip.GetString() ?? entry.ServerIp;
+
+            if (root.TryGetProperty("server_ports", out var ports) && ports.ValueKind == JsonValueKind.Object)
+            {
+                if (ports.TryGetProperty("start", out var start) && start.TryGetInt32(out var s))
+                    entry.ServerPorts.Start = s;
+                if (ports.TryGetProperty("end", out var end) && end.TryGetInt32(out var e))
+                    entry.ServerPorts.End = e;
+            }
+
+            if (root.TryGetProperty("encryption", out var encryption) && encryption.ValueKind == JsonValueKind.Object)
+            {
+                if (encryption.TryGetProperty("xor_key", out var xor) && xor.ValueKind == JsonValueKind.String)
+                    entry.Encryption.XorKey = xor.GetString() ?? string.Empty;
+                if (encryption.TryGetProperty("swap_key", out var swap) && swap.ValueKind == JsonValueKind.String)
+                    entry.Encryption.SwapKey = swap.GetString() ?? string.Empty;
+            }
+
+            entry.RedirectProcesses = ReadStringList(root, "redirect_processes");
+            entry.RedirectIps = ReadStringList(root, "redirect_ips");
+            entry.RedirectDomains = ReadStringList(root, "redirect_domains");
+
+            string logLevel = "none";
+            if (root.TryGetProperty("log_level", out var ll) && ll.ValueKind == JsonValueKind.String)
+                logLevel = ll.GetString() ?? logLevel;
+
+            return new ClientConfig
+            {
+                LogLevel = logLevel,
+                Servers = { entry }
+            };
+        }
+
+        private static List<string> ReadStringList(JsonElement root, string propertyName)
+        {
+            var result = new List<string>();
+            if (root.TryGetProperty(propertyName, out var array) && array.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var item in array.EnumerateArray())
+                {
+                    if (item.ValueKind == JsonValueKind.String && item.GetString() is { } value)
+                        result.Add(value);
+                }
+            }
+            return result;
         }
 
         public async Task SaveAsync(ClientConfig config)
