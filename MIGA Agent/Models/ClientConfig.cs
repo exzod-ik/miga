@@ -5,27 +5,15 @@ using System.Text.Json.Serialization;
 
 namespace MIGA_Agent.Models
 {
+    /// <summary>
+    /// Корневая структура клиентского конфига: log_level + список серверов.
+    /// </summary>
     public class ClientConfig
     {
-        [JsonPropertyName("server_ip")]
-        public string ServerIp { get; set; } = "127.0.0.1";
-
-        [JsonPropertyName("server_ports")]
-        public PortRange ServerPorts { get; set; } = new PortRange();
-
         [JsonPropertyName("log_level")]
         public string LogLevel { get; set; } = "none";
 
-        [JsonPropertyName("encryption")]
-        public EncryptionKeys Encryption { get; set; } = new EncryptionKeys();
-
-        [JsonPropertyName("redirect_processes")]
-        public List<string> RedirectProcesses { get; set; } = new List<string>();
-
-        [JsonPropertyName("redirect_ips")]
-        public List<string> RedirectIps { get; set; } = new List<string>();
-
-        [JsonPropertyName("redirect_domains")]
-        public List<string> RedirectDomains { get; set; } = new List<string>();
+        [JsonPropertyName("servers")]
+        public List<ServerEntry> Servers { get; set; } = new List<ServerEntry>();
     }
 }

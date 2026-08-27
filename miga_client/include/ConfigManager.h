@@ -30,48 +30,44 @@ struct IPRule {
     }
 };
 
+struct ServerConfig {
+    std::string serverIP;
+    uint16_t portStart = 10000;
+    uint16_t portEnd = 15000;
+
+    std::string xorKeyBase64;
+    std::string swapKeyBase64;
+
+    std::vector<std::string> processRules;
+    IPRule staticIPRule;
+    IPRule dynamicIPRule;
+    std::vector<std::string> domainRules;
+    std::vector<std::string> wildcardDomainSuffixes;
+
+    bool IsDomainRedirect(std::string domain) const;
+};
+
 class ConfigManager {
 private:
-    std::vector<std::string> m_ProcessRules;
-    IPRule m_StaticIPRule;
-    IPRule m_DynamicIPRule;
-    std::vector<std::string> m_DomainRules;
-    std::vector<std::string> m_WildcardDomainSuffixes; // *.domain
+    std::vector<ServerConfig> m_Servers;
 
     Logger* m_Logger;
     int m_LogLevel;
 
-    std::string m_ServerIP;
-    uint16_t m_PortStart;
-    uint16_t m_PortEnd;
-
-    std::string m_XorKeyBase64;
-    std::string m_SwapKeyBase64;
-
-    bool ParseProcessRules(const json& config);
-    bool ParseIPRules(const json& config);
-    bool ParseDomainRules(const json& config);
+    bool ParseServer(const json& serverJson, ServerConfig& server);
+    bool ParseProcessRules(const json& config, ServerConfig& server);
+    bool ParseIPRules(const json& config, ServerConfig& server);
+    bool ParseDomainRules(const json& config, ServerConfig& server);
 
 public:
     ConfigManager(Logger* logger);
 
     bool Load(const std::string& configPath, bool hotLoad = false);
 
-    const std::vector<std::string>& GetProcessRules() const { return m_ProcessRules; }
-    const IPRule& GetStaticIPRule() const { return m_StaticIPRule; }
-    const IPRule& GetDynamicIPRule() const { return m_DynamicIPRule; }
-    const std::vector<std::string>& GetDomainRules() const { return m_DomainRules; }
-    const std::vector<std::string>& GetWildcardSuffixes() const { return m_WildcardDomainSuffixes; }
+    const std::vector<ServerConfig>& GetServers() const { return m_Servers; }
 
-    bool IsDomainRedirect(const std::string& domain) const;
-    void AddDynamicIP(uint32_t ip);
-
-    const std::string& GetServerIP() const { return m_ServerIP; }
-    uint16_t GetPortStart() const { return m_PortStart; }
-    uint16_t GetPortEnd() const { return m_PortEnd; }
-
-    const std::string& GetXorKeyBase64() const { return m_XorKeyBase64; }
-    const std::string& GetSwapKeyBase64() const { return m_SwapKeyBase64; }
+    const ServerConfig* FindServerByDomain(const std::string& domain) const;
+    void AddDynamicIP(size_t serverIndex, uint32_t ip);
 
     int GetLogLevel() const { return m_LogLevel; }
 };

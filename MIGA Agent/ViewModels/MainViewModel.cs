@@ -2,121 +2,68 @@
 using CommunityToolkit.Mvvm.Input;
 using MIGA_Agent.Models;
 using MIGA_Agent.Services;
-using Notification.Wpf;
-using Notification.Wpf.Controls;
-using Org.BouncyCastle.Tls;
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
-using System.IO;
+using System.Collections.Specialized;
 using System.Linq;
-using System.Text.Encodings.Web;
-using System.Text.Json;
 using System.Threading.Tasks;
 using System.Windows;
 
 namespace MIGA_Agent.ViewModels
 {
+    /// <summary>
+    /// Корневая модель главного окна: вкладки серверов, состояние локальной
+    /// службы и запись конфига.
+    /// </summary>
     public partial class MainViewModel : ObservableObject
     {
+        private const string BaseWindowTitle = "Make Internet Greate Again";
+
         private readonly ILocalServiceManager _localService;
         private readonly IClientConfigService _configService;
-        private readonly ISshManager _sshManager;
+        private readonly Func<ISshManager> _sshFactory;
         private readonly IDialogService _dialogService;
-
-        private const string RequiredServerVersion = "1.1.0";
-
-        private static readonly JsonSerializerOptions JsonOptions = new()
-        {
-            WriteIndented = true,
-            Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
-        };
 
         public MainViewModel(
             ILocalServiceManager localService,
             IClientConfigService configService,
-            ISshManager sshManager,
+            Func<ISshManager> sshFactory,
             IDialogService dialogService)
         {
             _localService = localService;
             _configService = configService;
-            _sshManager = sshManager;
+            _sshFactory = sshFactory;
             _dialogService = dialogService;
 
-            RedirectProcesses = new ObservableCollection<string>();
-            RedirectIps = new ObservableCollection<string>();
-            LogLevels = new List<string> { "none", "error", "info", "debug" };
+            Servers = new ObservableCollection<ServerTabViewModel>();
+
+            Servers.CollectionChanged += OnServersCollectionChanged;
 
             Application.Current.Dispatcher.InvokeAsync(async () => await LoadInitialDataAsync());
         }
 
         // ========== Публичные свойства ==========
 
-        [ObservableProperty]
-        private string _serverIp = "127.0.0.1";
+        /// <summary>Вкладки серверов (одна вкладка — один сервер).</summary>
+        public ObservableCollection<ServerTabViewModel> Servers { get; }
 
         [ObservableProperty]
-        private int _serverPortsStart = 10000;
+        private ServerTabViewModel? _selectedServer;
 
-        [ObservableProperty]
-        private int _serverPortsEnd = 15000;
-
+        /// <summary>Глобальный уровень логирования клиента (только чтение из конфига и запись при сохранении).</summary>
         [ObservableProperty]
         private string _logLevel = "none";
 
         [ObservableProperty]
-        private string _xorKey = string.Empty;
-
-        [ObservableProperty]
-        private string _swapKey = string.Empty;
-
-        [ObservableProperty]
         private string _serviceStatus = "Неизвестно";
 
-        [ObservableProperty]
-        private string _dnsServer = "8.8.8.8";
+        /// <summary>Есть несохранённые изменения хотя бы на одной вкладке.</summary>
+        public bool HasUnsavedChanges => Servers.Any(t => t.IsDirty);
 
-        [ObservableProperty]
-        private bool _serverNeedsUpdate = false;
-
-        // SSH
-        [ObservableProperty]
-        private string _serverSshUser = "root";
-
-        [ObservableProperty]
-        private string _serverSshPassword = string.Empty;
-
-        [ObservableProperty]
-        private bool _isSshConnected = false;
-
-        [ObservableProperty]
-        private string _sshButtonText = "Подключиться";
-
-        // Демон сервера
-        [ObservableProperty]
-        private string _serverDemoStatus = "Неизвестно";
-
-        [ObservableProperty]
-        private bool _serverDemoInstalled = false;
-
-        [ObservableProperty]
-        private string _dynamicDemoButtonText = "Загрузить и установить";
-
-        // Параметры конфигурации сервера
-        [ObservableProperty]
-        private string _serverLogLevel = "none";
-
-        [ObservableProperty]
-        private bool _isBusy = false;
-
-        // Вспомогательное свойство для привязки (можно использовать конвертер, но так проще)
-        public bool IsNotBusy => !IsBusy;
-
-        // Коллекции
-        public ObservableCollection<string> RedirectProcesses { get; }
-        public ObservableCollection<string> RedirectIps { get; }
-        public ObservableCollection<string> RedirectDomains { get; } = new ObservableCollection<string>();
-        public List<string> LogLevels { get; }
+        /// <summary>Заголовок окна с индикатором несохранённых изменений.</summary>
+        public string WindowTitle =>
+            HasUnsavedChanges ? BaseWindowTitle + " *" : BaseWindowTitle;
 
         // ========== Команды ==========
 
@@ -132,52 +79,20 @@ namespace MIGA_Agent.ViewModels
         private bool CanStopLocalService() => ServiceStatus == "Работает";
 
         [RelayCommand]
-        private async Task ToggleSsh() => await ToggleSshAsync();
-
-        [RelayCommand]
-        private async Task RefreshServerDemoStatus() => await UpdateServerDemoStatusAsync();
-
-        [RelayCommand]
-        private async Task DynamicDemo() => await DynamicDemoAsync();
-
-        [RelayCommand]
         private async Task ApplyConfiguration() => await ApplyConfigurationAsync();
 
         [RelayCommand]
-        private void GenerateKeys() => GenerateNewKeys();
+        private void AddServer()
+        {
+            var tab = CreateServerTab();
+            Servers.Add(tab);
+            SelectedServer = tab;
 
-        [RelayCommand]
-        private async Task SaveRedirectsOnly() => await SaveRedirectsOnlyAsync();
+            // Новый сервер ещё не записан в конфигурационный файл
+            tab.IsDirty = true;
+        }
 
-        // Работа со списками
-        [RelayCommand]
-        private void AddProcess() => AddItem(RedirectProcesses, "Введите имя процесса (например, chrome.exe):", "Добавление процесса");
-
-        [RelayCommand]
-        private void EditProcess(object? _) => EditItem(RedirectProcesses, "Редактирование процессов", "Введите список процессов (каждый с новой строки):");
-
-        [RelayCommand]
-        private void RemoveProcess(object? processName) => RemoveItem(RedirectProcesses, processName as string, "Удалить процесс");
-
-        [RelayCommand]
-        private void AddIp() => AddItem(RedirectIps, "Введите IP-адрес или диапазон (например, 192.168.1.1 или 192.168.1.1-192.168.3.255):", "Добавление IP");
-
-        [RelayCommand]
-        private void EditIp(object? _) => EditItem(RedirectIps, "Редактирование IP", "Введите список IP-адресов или диапазонов (каждый с новой строки):");
-
-        [RelayCommand]
-        private void RemoveIp(object? ip) => RemoveItem(RedirectIps, ip as string, "Удалить IP");
-
-        [RelayCommand]
-        private void AddDomain() => AddItem(RedirectDomains, "Введите доменное имя (например, example.com):", "Добавление домена");
-
-        [RelayCommand]
-        private void EditDomain(object? _) => EditItem(RedirectDomains, "Редактирование доменов", "Введите список доменных имён (каждый с новой строки):");
-
-        [RelayCommand]
-        private void RemoveDomain(object? domain) => RemoveItem(RedirectDomains, domain as string, "Удалить домен");
-        
-        // ========== Приватные методы ==========
+        // ========== Инициализация ==========
 
         private async Task LoadInitialDataAsync()
         {
@@ -203,88 +118,297 @@ namespace MIGA_Agent.ViewModels
         private async Task LoadClientConfigAsync()
         {
             var config = await _configService.LoadAsync();
-            ServerIp = config.ServerIp;
-            ServerPortsStart = config.ServerPorts.Start;
-            ServerPortsEnd = config.ServerPorts.End;
             LogLevel = config.LogLevel;
-            XorKey = config.Encryption.XorKey;
-            SwapKey = config.Encryption.SwapKey;
 
-            RedirectProcesses.Clear();
-            foreach (var proc in config.RedirectProcesses)
-                RedirectProcesses.Add(proc);
+            foreach (var entry in config.Servers)
+            {
+                var tab = CreateServerTab();
+                tab.LoadFrom(entry);
+                Servers.Add(tab);
+            }
 
-            RedirectIps.Clear();
-            foreach (var ip in config.RedirectIps)
-                RedirectIps.Add(ip);
+            // Минимум одна вкладка всегда должна существовать
+            if (Servers.Count == 0)
+                Servers.Add(CreateServerTab());
 
-            RedirectDomains.Clear();
-            foreach (var domain in config.RedirectDomains)
-                RedirectDomains.Add(domain);
+            SelectedServer = Servers.FirstOrDefault();
+
+            // Подсветка пересечений, сохранённых в конфиге ранее
+            RecalculateConflicts();
         }
+
+        // ========== Фабрика вкладок ==========
+
+        private ServerTabViewModel CreateServerTab()
+        {
+            var tab = new ServerTabViewModel(
+                _localService,
+                _dialogService,
+                _sshFactory(),
+                RestartLocalServiceWithWarningAsync,
+                SaveClientConfigAsync);
+
+            tab.RemoveRequested += OnTabRemoveRequested;
+            tab.PropertyChanged += OnTabPropertyChanged;
+            tab.RedirectProcesses.CollectionChanged += OnTabItemsChanged;
+            tab.RedirectIps.CollectionChanged += OnTabItemsChanged;
+            tab.RedirectDomains.CollectionChanged += OnTabItemsChanged;
+
+            return tab;
+        }
+
+        private void UnhookTabHandlers(ServerTabViewModel tab)
+        {
+            tab.RemoveRequested -= OnTabRemoveRequested;
+            tab.PropertyChanged -= OnTabPropertyChanged;
+            tab.RedirectProcesses.CollectionChanged -= OnTabItemsChanged;
+            tab.RedirectIps.CollectionChanged -= OnTabItemsChanged;
+            tab.RedirectDomains.CollectionChanged -= OnTabItemsChanged;
+        }
+
+        private void OnServersCollectionChanged(object? sender, NotifyCollectionChangedEventArgs e)
+        {
+            OnPropertyChanged(nameof(WindowTitle));
+        }
+
+        private void OnTabPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+        {
+            if (e.PropertyName == nameof(ServerTabViewModel.IsDirty))
+                OnPropertyChanged(nameof(WindowTitle));
+        }
+
+        private void OnTabItemsChanged(object? sender, NotifyCollectionChangedEventArgs e)
+        {
+            RecalculateConflicts();
+        }
+
+        /// <summary>Кнопка "Удалить сервер" на вкладке.</summary>
+        private void OnTabRemoveRequested(object? sender, EventArgs e)
+        {
+            if (sender is not ServerTabViewModel tab)
+                return;
+
+            if (Servers.Count <= 1)
+            {
+                _dialogService.ShowWarning("Должен остаться хотя бы один сервер.");
+                return;
+            }
+
+            if (!_dialogService.ShowYesNo(
+                    $"Удалить сервер «{tab.DisplayName}»?\n\nНастройки будут удалены из конфигурации при следующем применении.",
+                    "Удаление сервера"))
+            {
+                return;
+            }
+
+            UnhookTabHandlers(tab);
+            tab.DisconnectSsh();
+            Servers.Remove(tab);
+
+            if (SelectedServer == null)
+                SelectedServer = Servers.FirstOrDefault();
+
+            RecalculateConflicts();
+
+            // Удаление сервера меняет состав конфигурации — помечаем как несохранённое
+            foreach (var t in Servers.ToList())
+                t.IsDirty = true;
+        }
+
+        // ========== Конфигурация ==========
 
         private async Task SaveClientConfigAsync()
         {
             var config = new ClientConfig
             {
-                ServerIp = ServerIp,
-                ServerPorts = new PortRange { Start = ServerPortsStart, End = ServerPortsEnd },
                 LogLevel = LogLevel,
-                Encryption = new EncryptionKeys { XorKey = XorKey, SwapKey = SwapKey },
-                RedirectProcesses = RedirectProcesses.ToList(),
-                RedirectIps = RedirectIps.ToList(),
-                RedirectDomains = RedirectDomains.ToList()
+                Servers = Servers.Select(t => t.ToServerEntry()).ToList()
             };
-            string json = JsonSerializer.Serialize(config, JsonOptions);
-            await File.WriteAllTextAsync(_configService.ConfigFilePath, json);
-        }
-
-        private async Task SaveRedirectsOnlyAsync()
-        {
-            var config = await _configService.LoadAsync();
-            config.RedirectProcesses = RedirectProcesses.ToList();
-            config.RedirectIps = RedirectIps.ToList();
-            config.RedirectDomains = RedirectDomains.ToList();
             await _configService.SaveAsync(config);
 
-            _localService.ReloadConfig();
-            _dialogService.ShowInfo("Изменения сохранены");
+            // Всё записано в файл — сбрасываем признак несохранённых изменений
+            foreach (var tab in Servers.ToList())
+                tab.MarkClean();
         }
 
-        private async Task GenerateNewKeys()
+        /// <summary>
+        /// Подтверждение закрытия окна при наличии несохранённых изменений.
+        /// Возвращает true, если окно можно закрывать.
+        /// </summary>
+        public async Task<bool> ConfirmClosingAsync()
         {
-            if (!IsSshConnected)
+            var decision = _dialogService.ShowUnsavedChangesDialog(
+                "Изменения ещё не записаны в файл конфигурации.\nСохранить изменения перед закрытием?",
+                "Несохранённые изменения");
+
+            switch (decision)
             {
-                _dialogService.ShowWarning("Для генерации ключей необходимо SSH-подключение к серверу.");
-                return;
-            }
+                case UnsavedChangesDecision.Save:
+                    var issues = GetConflictIssues();
+                    if (issues.Count > 0 && !_dialogService.ShowIssuesConfirmation(
+                            "Обнаружены пересечения настроек",
+                            "Настройки перенаправления пересекаются между серверами. Список проблем:",
+                            issues))
+                    {
+                        // Пользователь отменил запись — окно остаётся открытым
+                        return false;
+                    }
+                    await SaveClientConfigAsync();
+                    return true;
 
-            var notification = _dialogService.ShowPersistent("Генерация ключей");
-            try
-            {
-                _dialogService.UpdatePersistent(notification, "Генерация ключей", "Выполняется miga_server --generate-keys...");
-                await _sshManager.ExecuteCommandAsync("/usr/local/miga_server --generate-keys");
+                case UnsavedChangesDecision.Discard:
+                    return true;
 
-                _dialogService.UpdatePersistent(notification, "Генерация ключей", "Перезапуск серверного демона...");
-                await _sshManager.ExecuteCommandAsync("systemctl restart miga_server");
-                await Task.Delay(2000);
-
-                _dialogService.UpdatePersistent(notification, "Генерация ключей", "Загрузка новых ключей с сервера...");
-                await LoadServerConfigAsync(); // обновит локальные ключи и порты
-
-                await SaveClientConfigAsync();
-
-                _dialogService.ClosePersistent(notification, "Генерация ключей", "Ключи успешно сгенерированы и синхронизированы.");
-
-                // Предлагаем перезапустить локальную службу
-                await RestartLocalServiceWithWarningAsync();
-            }
-            catch (Exception ex)
-            {
-                _dialogService.ClosePersistent(notification, "Ошибка генерации ключей", ex.Message);
-                _dialogService.ShowError($"Ошибка: {ex.Message}");
+                default:
+                    return false;
             }
         }
+
+        /// <summary>
+        /// Применение всей конфигурации: проверка пересечений, сохранение,
+        /// применение серверной части для подключённых вкладок, перезапуск службы.
+        /// </summary>
+        private async Task ApplyConfigurationAsync()
+        {
+            var issues = GetConflictIssues();
+            if (issues.Count > 0)
+            {
+                bool applyAnyway = _dialogService.ShowIssuesConfirmation(
+                    "Обнаружены пересечения настроек",
+                    "Настройки перенаправления пересекаются между серверами. Список проблем:",
+                    issues);
+
+                if (!applyAnyway)
+                    return;
+            }
+
+            await SaveClientConfigAsync();
+
+            if (Servers.Any(t => t.IsSshConnected))
+            {
+                foreach (var tab in Servers.ToList())
+                    await tab.ApplyServerConfigIfConnectedAsync();
+            }
+            else
+            {
+                _dialogService.ShowInfo("Конфигурация клиента сохранена. Для применения на сервере установите SSH-подключение на нужной вкладке.");
+            }
+
+            // Предлагаем перезапустить локальную службу
+            await RestartLocalServiceWithWarningAsync();
+        }
+
+        // ========== Проверка пересечений ==========
+
+        private enum RedirectKind
+        {
+            Process,
+            Ip,
+            Domain
+        }
+
+        private static string KindName(RedirectKind kind) => kind switch
+        {
+            RedirectKind.Process => "Процесс",
+            RedirectKind.Ip => "IP",
+            _ => "Домен"
+        };
+
+        private static ObservableCollection<RedirectItemViewModel> ItemsOf(ServerTabViewModel tab, RedirectKind kind) => kind switch
+        {
+            RedirectKind.Process => tab.RedirectProcesses,
+            RedirectKind.Ip => tab.RedirectIps,
+            _ => tab.RedirectDomains
+        };
+
+        /// <summary>
+        /// Пересчитывает признак пересечения и подсказку для каждого элемента перенаправления.
+        /// Пересечение — значение встречается минимум у двух серверов.
+        /// </summary>
+        private void RecalculateConflicts()
+        {
+            var tabs = Servers.ToList();
+
+            foreach (var tab in tabs)
+            {
+                foreach (var item in tab.RedirectProcesses.Concat(tab.RedirectIps).Concat(tab.RedirectDomains))
+                {
+                    item.IsConflicting = false;
+                    item.ConflictTooltip = string.Empty;
+                }
+            }
+
+            RecalculateCategory(RedirectKind.Process, tabs);
+            RecalculateCategory(RedirectKind.Ip, tabs);
+            RecalculateCategory(RedirectKind.Domain, tabs);
+        }
+
+        private void RecalculateCategory(RedirectKind kind, List<ServerTabViewModel> tabs)
+        {
+            var map = new Dictionary<string, List<(ServerTabViewModel Tab, RedirectItemViewModel Item)>>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var tab in tabs)
+            {
+                foreach (var item in ItemsOf(tab, kind))
+                {
+                    if (!map.TryGetValue(item.Value, out var list))
+                        map[item.Value] = list = new List<(ServerTabViewModel, RedirectItemViewModel)>();
+                    list.Add((tab, item));
+                }
+            }
+
+            foreach (var (value, owners) in map)
+            {
+                if (owners.Count < 2)
+                    continue;
+
+                foreach (var (tab, item) in owners)
+                {
+                    var others = owners
+                        .Select(o => o.Tab.DisplayName)
+                        .Where(n => !string.Equals(n, tab.DisplayName, StringComparison.Ordinal))
+                        .Distinct()
+                        .ToList();
+
+                    item.IsConflicting = true;
+                    item.ConflictTooltip =
+                        $"Пересечение: {KindName(kind)} «{item.Value}» также используется на серверах: {string.Join(", ", others)}";
+                }
+            }
+        }
+
+        /// <summary>Список проблем пересечений для показа перед записью конфига.</summary>
+        private List<string> GetConflictIssues()
+        {
+            var issues = new List<string>();
+            issues.AddRange(GetCategoryIssues(RedirectKind.Process));
+            issues.AddRange(GetCategoryIssues(RedirectKind.Ip));
+            issues.AddRange(GetCategoryIssues(RedirectKind.Domain));
+            return issues;
+        }
+
+        private IEnumerable<string> GetCategoryIssues(RedirectKind kind)
+        {
+            var map = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var tab in Servers)
+            {
+                foreach (var item in ItemsOf(tab, kind))
+                {
+                    if (!map.TryGetValue(item.Value, out var list))
+                        map[item.Value] = list = new List<string>();
+                    if (!list.Contains(tab.DisplayName))
+                        list.Add(tab.DisplayName);
+                }
+            }
+
+            foreach (var (value, serversList) in map.Where(kv => kv.Value.Count > 1))
+            {
+                yield return $"{KindName(kind)} \"{value}\" назначен нескольким серверам: {string.Join(", ", serversList)}";
+            }
+        }
+
+        // ========== Локальная служба ==========
 
         private async Task UpdateServiceStatusAsync()
         {
@@ -337,410 +461,6 @@ namespace MIGA_Agent.ViewModels
             {
                 _dialogService.ShowError($"Ошибка остановки службы: {ex.Message}");
             }
-        }
-
-        private async Task ToggleSshAsync()
-        {
-            if (!IsSshConnected)
-            {
-                if (string.IsNullOrWhiteSpace(ServerIp))
-                {
-                    _dialogService.ShowWarning("Укажите Server IP");
-                    return;
-                }
-                if (string.IsNullOrWhiteSpace(ServerSshUser))
-                {
-                    _dialogService.ShowWarning("Введите пользователя");
-                    return;
-                }
-                if (string.IsNullOrWhiteSpace(ServerSshPassword))
-                {
-                    _dialogService.ShowWarning("Введите пароль");
-                    return;
-                }
-                try
-                {
-                    await _sshManager.ConnectAsync(ServerIp, 22, ServerSshUser, ServerSshPassword);
-                    IsSshConnected = true;
-                    SshButtonText = "Отключить";
-                    await UpdateServerDemoStatusAsync();
-                    await LoadServerConfigAsync();
-                }
-                catch (Exception ex)
-                {
-                    _dialogService.ShowError($"Ошибка SSH подключения: {ex.Message}");
-                }
-            }
-            else
-            {
-                try
-                {
-                    _sshManager.Disconnect();
-                    IsSshConnected = false;
-                    SshButtonText = "Подключиться";
-                    ServerDemoStatus = "Неизвестно";
-                    ServerDemoInstalled = false;
-                    DynamicDemoButtonText = "Загрузить и установить";
-                }
-                catch (Exception ex)
-                {
-                    _dialogService.ShowError($"Ошибка отключения SSH: {ex.Message}");
-                }
-            }
-        }
-
-        private async Task UpdateServerDemoStatusAsync()
-        {
-            if (!IsSshConnected)
-            {
-                ServerDemoStatus = "Нет подключения";
-                ServerDemoInstalled = false;
-                ServerNeedsUpdate = false;
-                DynamicDemoButtonText = "Загрузить и установить";
-                return;
-            }
-
-            try
-            {
-                string statusOutput = await _sshManager.ExecuteCommandAsync("systemctl status miga_server 2>&1 || true");
-                if (statusOutput.Contains("not found") || statusOutput.Contains("No such file") || statusOutput.Contains("could not be found"))
-                {
-                    ServerDemoInstalled = false;
-                    ServerNeedsUpdate = false;
-                    ServerDemoStatus = "Не установлен";
-                    DynamicDemoButtonText = "Загрузить и установить";
-                    return;
-                }
-
-                string versionOutput = await _sshManager.ExecuteCommandAsync("/usr/local/miga_server --version 2>&1 || true");
-                string actualVersion = versionOutput.Trim().Split('\n', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault() ?? "";
-                var versionMatch = System.Text.RegularExpressions.Regex.Match(actualVersion, @"(\d+\.\d+\.\d+)");
-                string versionNumber = versionMatch.Success ? versionMatch.Groups[1].Value : actualVersion;
-
-                if (versionNumber != RequiredServerVersion)
-                {
-                    ServerDemoInstalled = true;
-                    ServerNeedsUpdate = true;
-                    ServerDemoStatus = "Устаревшая версия";
-                    DynamicDemoButtonText = "Обновить сервер";
-                    return;
-                }
-
-                ServerDemoInstalled = true;
-                ServerNeedsUpdate = false;
-                string result = await _sshManager.ExecuteCommandAsync("systemctl is-active miga_server");
-                bool isActive = result.Trim() == "active";
-                ServerDemoStatus = isActive ? "Работает" : "Остановлен";
-                DynamicDemoButtonText = isActive ? "Остановить" : "Запустить";
-            }
-            catch
-            {
-                ServerDemoStatus = "Ошибка";
-                ServerDemoInstalled = false;
-                ServerNeedsUpdate = false;
-                DynamicDemoButtonText = "Загрузить и установить";
-            }
-        }
-
-        private async Task DynamicDemoAsync()
-        {
-            if (!IsSshConnected)
-            {
-                _dialogService.ShowWarning("Сначала установите SSH подключение");
-                return;
-            }
-
-            if (!ServerDemoInstalled)
-            {
-                await UploadAndInstallInternalAsync();
-            }
-            else if (ServerNeedsUpdate)
-            {
-                await UpdateServerInternalAsync();
-            }
-            else if (ServerDemoStatus == "Остановлен")
-            {
-                await StartServerDemoInternalAsync();
-            }
-            else if (ServerDemoStatus == "Работает")
-            {
-                await StopServerDemoInternalAsync();
-            }
-        }
-
-        private async Task UpdateServerInternalAsync()
-        {
-            IsBusy = true;
-            OnPropertyChanged(nameof(IsNotBusy));
-
-            var notification = _dialogService.ShowPersistent("Обновление сервера");
-
-            try
-            {
-                bool wasRunning = ServerDemoStatus == "Работает";
-
-                if (wasRunning)
-                {
-                    _dialogService.UpdatePersistent(notification, "Обновление сервера", "Остановка демона...");
-                    await _sshManager.ExecuteCommandAsync("systemctl stop miga_server");
-                    await Task.Delay(2000);
-                }
-
-                string pgrep = await _sshManager.ExecuteCommandAsync("pgrep -f miga_server || true");
-                if (!string.IsNullOrWhiteSpace(pgrep))
-                {
-                    _dialogService.UpdatePersistent(notification, "Обновление сервера", "Принудительное завершение процесса...");
-                    await _sshManager.ExecuteCommandAsync("pkill -f miga_server || true");
-                    await Task.Delay(1000);
-                }
-
-                string appDirectory = AppDomain.CurrentDomain.BaseDirectory;
-                string localMigraServer = Path.Combine(appDirectory, "miga_server");
-
-                if (!File.Exists(localMigraServer))
-                    throw new FileNotFoundException($"miga_server не найден в {appDirectory}");
-
-                _dialogService.UpdatePersistent(notification, "Обновление сервера", "Копирование нового файла...");
-
-                string tempRemotePath = "/usr/local/miga_server.new";
-                await _sshManager.UploadFileAsync(localMigraServer, tempRemotePath);
-                await _sshManager.ExecuteCommandAsync($"chmod +x {tempRemotePath}");
-
-                _dialogService.UpdatePersistent(notification, "Обновление сервера", "Замена исполняемого файла...");
-                await _sshManager.ExecuteCommandAsync($"mv {tempRemotePath} /usr/local/miga_server");
-
-                _dialogService.UpdatePersistent(notification, "Обновление сервера", "Обновляем конфигурацию...");
-                await _sshManager.ExecuteCommandAsync("/usr/local/miga_server --update");
-
-                if (wasRunning)
-                {
-                    _dialogService.UpdatePersistent(notification, "Обновление сервера", "Запуск демона...");
-                    await _sshManager.ExecuteCommandAsync("systemctl start miga_server");
-                    await Task.Delay(1000);
-                }
-
-                await UpdateServerDemoStatusAsync();
-
-                _dialogService.ClosePersistent(notification, "Обновление сервера", "Сервер успешно обновлён");
-            }
-            catch (Exception ex)
-            {
-                _dialogService.ClosePersistent(notification, "Ошибка обновления", $"Ошибка: {ex.Message}");
-                _dialogService.ShowError($"Ошибка обновления сервера: {ex.Message}");
-            }
-            finally
-            {
-                IsBusy = false;
-                OnPropertyChanged(nameof(IsNotBusy));
-            }
-        }
-
-        private async Task UploadAndInstallInternalAsync()
-        {
-            IsBusy = true;
-            OnPropertyChanged(nameof(IsNotBusy));
-
-            var notification = _dialogService.ShowPersistent("Установка сервера");
-
-            try
-            {
-                string appDirectory = AppDomain.CurrentDomain.BaseDirectory;
-                string localMigraServer = Path.Combine(appDirectory, "miga_server");
-                string localInstallScript = Path.Combine(appDirectory, "install.sh");
-
-                if (!File.Exists(localMigraServer))
-                    throw new FileNotFoundException($"miga_server не найден в {appDirectory}");
-                if (!File.Exists(localInstallScript))
-                    throw new FileNotFoundException($"install.sh не найден в {appDirectory}");
-
-                _dialogService.UpdatePersistent(notification, "Установка сервера", "Копирование файлов...");
-                await _sshManager.ExecuteCommandAsync("mkdir -p /tmp/miga_install");
-                await _sshManager.UploadFileAsync(localMigraServer, "/usr/local/miga_server");
-                await _sshManager.ExecuteCommandAsync("chmod +x /usr/local/miga_server");
-
-                _dialogService.UpdatePersistent(notification, "Установка сервера", "Установка...");
-                string remoteScriptPath = "/tmp/miga_install/install.sh";
-                await _sshManager.UploadFileAsync(localInstallScript, remoteScriptPath);
-                await _sshManager.ExecuteCommandAsync($"chmod +x {remoteScriptPath}");
-                string result = await _sshManager.ExecuteCommandAsync($"cd /tmp/miga_install && ./install.sh");
-                await _sshManager.ExecuteCommandAsync($"rm -f {remoteScriptPath}");
-
-                _dialogService.ClosePersistent(notification, "Установка сервера", "Установка завершена успешно");
-
-                // Обновляем ключи с сервера
-                await LoadServerConfigAsync();
-
-                await UpdateServerDemoStatusAsync();
-            }
-            catch (Exception ex)
-            {
-                _dialogService.ClosePersistent(notification, "Ошибка установки", $"Ошибка: {ex.Message}");
-            }
-            finally
-            {
-                IsBusy = false;
-                OnPropertyChanged(nameof(IsNotBusy));
-            }
-        }
-
-        private async Task StartServerDemoInternalAsync()
-        {
-            try
-            {
-                await _sshManager.ExecuteCommandAsync("systemctl start miga_server");
-                await UpdateServerDemoStatusAsync();
-            }
-            catch (Exception ex)
-            {
-                _dialogService.ShowError($"Ошибка запуска демона: {ex.Message}");
-            }
-        }
-
-        private async Task StopServerDemoInternalAsync()
-        {
-            try
-            {
-                await _sshManager.ExecuteCommandAsync("systemctl stop miga_server");
-                await UpdateServerDemoStatusAsync();
-            }
-            catch (Exception ex)
-            {
-                _dialogService.ShowError($"Ошибка остановки демона: {ex.Message}");
-            }
-        }
-
-        private async Task ApplyConfigurationAsync()
-        {
-            await SaveClientConfigAsync();
-
-            if (IsSshConnected)
-            {
-                await ApplyServerConfigInternalAsync();
-            }
-            else
-            {
-                _dialogService.ShowInfo("Конфигурация клиента сохранена. Для применения на сервере установите SSH-подключение.");
-            }
-
-            // Предлагаем перезапустить локальную службу
-            await RestartLocalServiceWithWarningAsync();
-        }
-
-        private async Task LoadServerConfigAsync()
-        {
-            try
-            {
-                // Проверяем существование файла
-                string checkResult = await _sshManager.ExecuteCommandAsync("test -f /etc/miga/config.json && echo 'exists' || echo 'not found'");
-                if (checkResult.Trim() != "exists")
-                {
-                    _dialogService.ShowInfo("Конфигурация сервера не найдена. Будут использованы локальные настройки.");
-                    return;
-                }
-
-                // Читаем файл
-                string json = await _sshManager.ExecuteCommandAsync("cat /etc/miga/config.json");
-                var serverConfig = System.Text.Json.JsonSerializer.Deserialize<ServerConfig>(json);
-                if (serverConfig == null)
-                {
-                    _dialogService.ShowWarning("Не удалось прочитать конфигурацию сервера.");
-                    return;
-                }
-
-                ServerLogLevel = serverConfig.LogLevel;
-                DnsServer = serverConfig.DnsServer;
-
-                // Обновляем локальные свойства
-                if (false
-                    || ServerPortsStart != serverConfig.ClientPorts.Start
-                    || ServerPortsEnd != serverConfig.ClientPorts.End
-                    || XorKey != serverConfig.Encryption.XorKey
-                    || SwapKey != serverConfig.Encryption.SwapKey)
-                {
-                    ServerPortsStart = serverConfig.ClientPorts.Start;
-                    ServerPortsEnd = serverConfig.ClientPorts.End;
-                    XorKey = serverConfig.Encryption.XorKey;
-                    SwapKey = serverConfig.Encryption.SwapKey;
-
-                    // Сохраняем синхронизированные настройки в локальный config.json
-                    await SaveClientConfigAsync();
-                    await RestartLocalServiceWithWarningAsync();
-                    _dialogService.ShowInfo("Настройки клиента синхронизированы с сервером.");
-                }
-            }
-            catch (Exception ex)
-            {
-                _dialogService.ShowError($"Ошибка загрузки конфигурации сервера: {ex.Message}");
-            }
-        }
-
-        private async Task ApplyServerConfigInternalAsync()
-        {
-            try
-            {
-                var serverConfig = new ServerConfig
-                {
-                    LogLevel = ServerLogLevel,
-                    ClientPorts = new PortRange { Start = ServerPortsStart, End = ServerPortsEnd },
-                    Encryption = new EncryptionKeys { XorKey = XorKey, SwapKey = SwapKey },
-                    DnsServer = DnsServer
-                };
-
-                string json = JsonSerializer.Serialize(serverConfig, JsonOptions);
-                string escapedJson = json.Replace("'", "'\\''");
-                await _sshManager.ExecuteCommandAsync($"echo '{escapedJson}' > /etc/miga/config.json");
-                await _sshManager.ExecuteCommandAsync("systemctl restart miga_server");
-                await UpdateServerDemoStatusAsync();
-                _dialogService.ShowInfo("Конфигурация клиента сохранена, серверная конфигурация применена, демон перезапущен.");
-            }
-            catch (Exception ex)
-            {
-                _dialogService.ShowError($"Ошибка применения серверной конфигурации: {ex.Message}");
-            }
-        }
-
-        private void AddItem(ObservableCollection<string> collection, string prompt, string title)
-        {
-            string? input = _dialogService.ShowMultiLineInputDialog(prompt, title, "");
-            if (string.IsNullOrWhiteSpace(input))
-                return;
-
-            var newItems = input.Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries)
-                                 .Select(s => s.Trim())
-                                 .Where(s => !string.IsNullOrEmpty(s))
-                                 .Distinct()
-                                 .ToList();
-
-            foreach (var item in newItems)
-            {
-                if (!collection.Contains(item))
-                    collection.Add(item);
-            }
-        }
-
-        private void EditItem(ObservableCollection<string> collection, string title, string prompt)
-        {
-            string currentText = string.Join(Environment.NewLine, collection);
-            string? input = _dialogService.ShowMultiLineInputDialog(prompt, title, currentText);
-            if (string.IsNullOrWhiteSpace(input))
-                return;
-
-            var newItems = input.Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries)
-                                 .Select(s => s.Trim())
-                                 .Where(s => !string.IsNullOrEmpty(s))
-                                 .Distinct()
-                                 .ToList();
-
-            collection.Clear();
-            foreach (var item in newItems)
-                collection.Add(item);
-        }
-
-        private void RemoveItem(ObservableCollection<string> collection, string? item, string title)
-        {
-            if (item == null) return;
-            if (_dialogService.ShowYesNo($"Удалить {item}?", title))
-                collection.Remove(item);
         }
 
         private async Task<bool> RestartLocalServiceWithWarningAsync()

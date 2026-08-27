@@ -5,13 +5,15 @@
         WindowStartupLocation="CenterOwner"
         ResizeMode="NoResize"
         ShowInTaskbar="False"
-        Width="400" Height="180">
+        SizeToContent="Height"
+        MinHeight="160"
+        Width="400">
     <Grid Margin="20">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
-        <TextBlock x:Name="MessageTextBlock" Text="Текст сообщения" TextWrapping="Wrap" Margin="0,0,0,20"/>
+        <TextBlock x:Name="MessageTextBlock" Text="Текст сообщения" TextWrapping="Wrap" Margin="0,0,0,20" MinHeight="40"/>
         <StackPanel Grid.Row="1" Orientation="Horizontal" HorizontalAlignment="Right">
             <Button x:Name="YesButton" Content="Да" Width="75" Margin="0,0,10,0" IsDefault="True" Click="YesButton_Click"/>
             <Button x:Name="NoButton" Content="Нет" Width="75" IsCancel="True" Click="NoButton_Click"/>

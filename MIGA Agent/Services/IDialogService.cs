@@ -1,4 +1,5 @@
 ﻿using Notification.Wpf.Classes;
+using System.Collections.Generic;
 using System.Threading.Tasks;
 
 namespace MIGA_Agent.Services
@@ -24,6 +25,18 @@ namespace MIGA_Agent.Services
         /// Показать диалог подтверждения (Yes/No)
         /// </summary>
         bool ShowYesNo(string message, string title = "Подтверждение");
+
+        /// <summary>
+        /// Показать диалог с выбором действия при несохранённых изменениях
+        /// (Сохранить / Не сохранять / Отмена).
+        /// </summary>
+        UnsavedChangesDecision ShowUnsavedChangesDialog(string message, string title = "Несохранённые изменения");
+
+        /// <summary>
+        /// Показать диалог со списком проблем конфигурации.
+        /// Возвращает true, если пользователь выбрал "все равно применить", false — отмена.
+        /// </summary>
+        bool ShowIssuesConfirmation(string title, string message, IEnumerable<string> issues);
 
         /// <summary>
         /// Показать диалог выбора папки

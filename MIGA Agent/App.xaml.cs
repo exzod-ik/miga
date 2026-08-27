@@ -1,5 +1,6 @@
 ﻿using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using System;
 using System.Windows;
 using MIGA_Agent.Services;
 using MIGA_Agent.ViewModels;
@@ -36,7 +37,10 @@ namespace MIGA_Agent
                     // Регистрация сервисов
                     services.AddSingleton<ILocalServiceManager, LocalServiceManager>();
                     services.AddSingleton<IClientConfigService, ClientConfigService>();
-                    services.AddSingleton<ISshManager, SshManager>();
+
+                    // SSH-менеджер создаётся отдельно для каждой вкладки сервера
+                    services.AddTransient<ISshManager, SshManager>();
+                    services.AddSingleton<Func<ISshManager>>(sp => () => sp.GetRequiredService<ISshManager>());
 
                     // Регистрация NotificationManager как синглтона
                     services.AddSingleton(NotificationManager);
