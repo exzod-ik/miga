@@ -64,6 +64,50 @@ string tcpFlagsWinDivert(WINDIVERT_TCPHDR* tcpHdr) {
     return result;
 }
 
+// max tcp mss the tunnel can carry without ip fragmentation of the outer datagram:
+// outer = inner(payload+mss-bytes) + 28 (20 ip + 8 udp), so with mss=1400 inner <= 1440, outer <= 1468
+static const uint16_t TUNNEL_MAX_MSS = 1400;
+
+// clamp the tcp MSS option in place, returns true if the packet was modified
+bool ClampTcpMss(uint8_t* packet, size_t packetLen, uint16_t maxMss) {
+    if (packetLen < sizeof(IP_HEADER)) return false;
+    IP_HEADER* ip = reinterpret_cast<IP_HEADER*>(packet);
+    if (ip->protocol != IPPROTO_TCP) return false;
+
+    uint8_t ipHdrLen = (ip->ver_hlen & 0x0F) * 4;
+    if (ipHdrLen < sizeof(IP_HEADER) || (size_t)(ipHdrLen + sizeof(TCP_HEADER)) > packetLen) return false;
+
+    TCP_HEADER* tcp = reinterpret_cast<TCP_HEADER*>(packet + ipHdrLen);
+    uint8_t tcpHdrLen = (tcp->data_offset & 0x0F) * 4;
+    if (tcpHdrLen < sizeof(TCP_HEADER) || (size_t)(ipHdrLen + tcpHdrLen) > packetLen) return false;
+
+    uint8_t* options = reinterpret_cast<uint8_t*>(tcp) + sizeof(TCP_HEADER);
+    size_t optsLen = tcpHdrLen - sizeof(TCP_HEADER);
+    size_t off = 0;
+    while (off < optsLen) {
+        uint8_t kind = options[off];
+        if (kind == 0) break;                  // end of options list
+        if (kind == 1) {                       // NOP
+            off += 1;
+            continue;
+        }
+        if (off + 1 >= optsLen) break;
+        uint8_t len = options[off + 1];
+        if (len < 2 || off + len > optsLen) break;
+        if (kind == 2 && len == 4) {           // MSS option
+            uint16_t* mssField = reinterpret_cast<uint16_t*>(options + off + 2);
+            uint16_t currentMss = ntohs(*mssField);
+            if (currentMss > maxMss) {
+                *mssField = htons(maxMss);
+                return true;
+            }
+            return false;
+        }
+        off += len;
+    }
+    return false;
+}
+
 bool iequals(const string& a, const string& b) {
     return equal(a.begin(), a.end(), b.begin(), b.end(),
         [](char ca, char cb) {
@@ -237,7 +281,7 @@ void PacketMonitor::SocketThread() {
                 default:
                     eventType = "UNKNOWN";
                 }
-                m_Logger->log(LOGGER_LEVEL_DEBUG, "SocketThread " + eventType + " event received: process=" + GetProcessNameByPid(addr.Socket.ProcessId) + ", proto=" + (isTCP ? "TCP" : "UDP") + " local=" + IpToString(*addr.Socket.LocalAddr) + ":" + to_string(localPort));
+                m_Logger->log(LOGGER_LEVEL_DEBUG, "SocketThread " + eventType + " event received: process=" + GetProcessNameByPid(addr.Socket.ProcessId) + ", proto=" + (isTCP ? "TCP" : "UDP") + " local=" + IpToString(ntohl(*addr.Socket.LocalAddr)) + ":" + to_string(localPort));
             }
 
             UpdateCache(localPort, pid, isTCP);
@@ -378,6 +422,19 @@ void PacketMonitor::NetworkThread() {
                 ProcessPacket(buffer.data(), packetLen, addr, pid);
             }
             else {
+                // pid is unknown; if this packet belongs to a flow we already tunneled,
+                // keep tunneling it instead of breaking the connection with a direct send
+                uint16_t remotePort = isTCP ? ntohs(tcpHdr->DstPort) : ntohs(udpHdr->DstPort);
+                FlowKey key{ protocol, ntohl(ipHdr->SrcAddr), localPort, ntohl(ipHdr->DstAddr), remotePort };
+                size_t flowServerIndex = 0;
+                uint32_t flowTranslatedDstIp = 0;
+                if (FindRedirectedFlow(key, flowServerIndex, flowTranslatedDstIp) &&
+                    flowServerIndex < m_Servers.size()) {
+                    m_Logger->log(LOGGER_LEVEL_DEBUG, "Continuation packet (PID not found) redirected via flow tracking.");
+                    RedirectPacket(buffer.data(), packetLen, addr, m_Servers[flowServerIndex], flowTranslatedDstIp);
+                    continue;
+                }
+
                 m_Logger->log(LOGGER_LEVEL_DEBUG, "PID not found");
                 // put packet to cache until socket event is occurs
                 unique_lock lock(pendingMutex);
@@ -414,7 +471,7 @@ void PacketMonitor::NetworkThread() {
                     }
                 }
             }
-            else // some inbound packet not fron any server - ignoring
+            else // some inbound packet not from any server - ignoring
                 WinDivertSend(m_Network, buffer.data(), packetLen, NULL, &addr);
         }
     }
@@ -429,8 +486,17 @@ bool PacketMonitor::SendUdpPacketToMstcp(const UdpPacketInfo* pkt, WINDIVERT_ADD
     // decrypt payload - original tranmitted packet
     server.encryption.Decrypt(pkt->payload, pkt->payloadSize, htons(pkt->srcPort));
 
-    // recalc checksums (server don't do it)
+    // clamp the mss in the remote's syn-ack so this host also sends small segments
     IP_HEADER* ip = reinterpret_cast<IP_HEADER*>(pkt->payload);
+    if (pkt->payloadSize >= sizeof(IP_HEADER) && ip->protocol == IPPROTO_TCP &&
+        (size_t)((ip->ver_hlen & 0x0F) * 4 + sizeof(TCP_HEADER)) <= pkt->payloadSize) {
+        TCP_HEADER* tcp = reinterpret_cast<TCP_HEADER*>(pkt->payload + (ip->ver_hlen & 0x0F) * 4);
+        if ((tcp->flags & 0x02) != 0 && (tcp->flags & 0x10) != 0) { // SYN-ACK
+            ClampTcpMss(pkt->payload, pkt->payloadSize, TUNNEL_MAX_MSS);
+        }
+    }
+
+    // recalc checksums (server don't do it)
     WinDivertHelperCalcChecksums(pkt->payload, pkt->payloadSize, pAddr, 0);
 
     // check for dns response
@@ -513,6 +579,7 @@ void PacketMonitor::CacheCleanupThread() {
     const auto TTL_TCP = chrono::minutes(124); // time to life tcp port cache - RFC 5382
     const auto TTL_UDP = chrono::minutes(20);
     const auto PACKET_TTL = chrono::seconds(5); // time to life packet in queue
+    const auto FLOW_TTL = chrono::minutes(10); // time to life tracked redirected flows
 
     while (m_Running.load()) {
         this_thread::sleep_for(chrono::seconds(5));
@@ -568,6 +635,19 @@ void PacketMonitor::CacheCleanupThread() {
             };
         cleanPendingQueue(pendingTCP);
         cleanPendingQueue(pendingUDP);
+
+        // Clean tracked redirected flows
+        {
+            unique_lock lockFlow(m_FlowMutex);
+            for (auto it = m_RedirectedFlows.begin(); it != m_RedirectedFlows.end();) {
+                if ((now - it->second.lastSeen) > FLOW_TTL) {
+                    it = m_RedirectedFlows.erase(it);
+                }
+                else {
+                    ++it;
+                }
+            }
+        }
 
         CleanupDnsState();
     }
@@ -775,49 +855,31 @@ void PacketMonitor::ProcessPacket(const uint8_t* packet, UINT packetLen, const W
             if (udpPayloadLen > 0) {
                 string domain;
                 if (ExtractDomainFromDNSQuery(udpPayload, udpPayloadLen, domain) && !domain.empty()) {
+                    uint16_t queryId = ntohs(*reinterpret_cast<const uint16_t*>(udpPayload));
+
+                    // 1. process rules take priority over domain rules
+                    string processName = GetProcessNameByPid(pid);
+                    const ServerConfig* procServer = FindServerByProcessRule(processName);
+                    if (procServer != nullptr) {
+                        ServerContext* procCtx = FindServerContext(procServer);
+                        if (procCtx != nullptr) {
+                            RedirectDNSQuery(packet, packetLen, addr, procCtx, queryId, "process: " + processName);
+                            return;
+                        }
+                    }
+
+                    // 2. domain rules
                     const ServerConfig* dnsServer = m_Config->FindServerByDomain(domain);
                     if (dnsServer != nullptr) {
                         ServerContext* dnsCtx = FindServerContext(dnsServer);
                         if (dnsCtx != nullptr) {
-                            uint16_t queryId = ntohs(*reinterpret_cast<const uint16_t*>(udpPayload));
-
-                            // 1.1.1.4 save actual query: original id -> found server
-                            {
-                                unique_lock lock(m_DnsMutex);
-                                m_ActualDns[queryId] = dnsCtx->configIndex;
-                                m_ActualIpByQuery[queryId] = 0;
-                                m_DnsTimestamp[queryId] = chrono::steady_clock::now();
-                            }
-
-                            // 1.1.1.3 send query to actual server with original id
-                            m_Logger->log(LOGGER_LEVEL_INFO, "Redirecting DNS query for domain: " + domain +
-                                " to actual server #" + to_string(dnsCtx->configIndex) + " (qid=" + to_string(queryId) + ")");
-                            RedirectPacket(packet, packetLen, addr, *dnsCtx);
-
-                            // 1.1.1.1/1.1.1.2/1.1.1.5 send query to all other servers with generated ids
-                            for (auto& other : m_Servers) {
-                                if (other.configIndex == dnsCtx->configIndex)
-                                    continue;
-
-                                uint16_t auxId;
-                                {
-                                    unique_lock lock(m_DnsMutex);
-                                    auxId = GenerateUniqueQueryId();
-                                    m_AuxiliaryDns[auxId] = other.configIndex;
-                                    m_ActualToAuxiliary[auxId] = queryId;
-                                    m_DnsTimestamp[auxId] = chrono::steady_clock::now();
-                                }
-
-                                m_Logger->log(LOGGER_LEVEL_DEBUG, "Sending aux DNS query for domain: " + domain +
-                                    " to server #" + to_string(other.configIndex) + " (aux qid=" + to_string(auxId) + ")");
-                                RedirectPacket(packet, packetLen, addr, other, 0, auxId);
-                            }
+                            RedirectDNSQuery(packet, packetLen, addr, dnsCtx, queryId, "domain: " + domain);
                             return;
                         }
                         WinDivertSend(m_Network, packet, packetLen, NULL, &addr);
                     }
                     else {
-                        m_Logger->log(LOGGER_LEVEL_DEBUG, "DNS query not redirected (domain not in list): " + domain);
+                        m_Logger->log(LOGGER_LEVEL_DEBUG, "DNS query not redirected (no matching rule): " + domain);
                         WinDivertSend(m_Network, packet, packetLen, NULL, &addr);
                     }
                     return;
@@ -859,14 +921,27 @@ void PacketMonitor::ProcessPacket(const uint8_t* packet, UINT packetLen, const W
     if (shouldRedirect) { // rules check passed
         ServerContext* targetCtx = FindServerContext(targetServer);
         if (targetCtx != nullptr) {
-            // 2.2 look up destination in dynamic ip correspondence by original ip and server
+            // remember this flow so that later packets keep tunneling even if
+            // the volatile pid cache entry is lost mid-connection
+            uint16_t srcPort = (iph->protocol == IPPROTO_TCP)
+                ? ntohs(reinterpret_cast<const TCP_HEADER*>(packet + sizeof(IP_HEADER))->src_port)
+                : ntohs(reinterpret_cast<const UDP_HEADER*>(packet + sizeof(IP_HEADER))->src_port);
+            uint16_t dstPort = (iph->protocol == IPPROTO_TCP)
+                ? ntohs(reinterpret_cast<const TCP_HEADER*>(packet + sizeof(IP_HEADER))->dst_port)
+                : ntohs(reinterpret_cast<const UDP_HEADER*>(packet + sizeof(IP_HEADER))->dst_port);
+            FlowKey key{ iph->protocol, ntohl(iph->src_ip), srcPort,
+                ntohl(iph->dst_ip), dstPort };
+
+            // look up destination in dynamic ip correspondence by original ip and server
             uint32_t translatedIp = 0;
             if (LookupIpTranslation(destIpHost, targetCtx->configIndex, translatedIp)) {
+                RememberRedirectedFlow(key, targetCtx->configIndex, translatedIp);
                 m_Logger->log(LOGGER_LEVEL_DEBUG, "Translating dst " + IpToString(destIpHost) + " -> " + IpToString(translatedIp) +
                     " for server #" + to_string(targetCtx->configIndex));
                 RedirectPacket(packet, packetLen, addr, *targetCtx, translatedIp);
             }
             else {
+                RememberRedirectedFlow(key, targetCtx->configIndex, 0);
                 RedirectPacket(packet, packetLen, addr, *targetCtx);
             }
             return;
@@ -898,8 +973,17 @@ void PacketMonitor::RedirectPacket(const uint8_t* packet, UINT packetLen, const 
         }
     }
 
+    // clamp the advertised mss so tunneled connections never exceed the safe payload size
+    bool mssClamped = false;
+    if (ipHeader->protocol == IPPROTO_TCP) {
+        const TCP_HEADER* tcp = reinterpret_cast<const TCP_HEADER*>(outgoingPacket.data() + (ipHeader->ver_hlen & 0x0F) * 4);
+        if ((tcp->flags & 0x02) != 0) { // SYN
+            mssClamped = ClampTcpMss(outgoingPacket.data(), outgoingPacket.size(), TUNNEL_MAX_MSS);
+        }
+    }
+
     // recalc checksums after any ip/payload rewrite
-    if (newDstIp != 0 || dnsQueryIdOverride != 0) {
+    if (newDstIp != 0 || dnsQueryIdOverride != 0 || mssClamped) {
         WinDivertHelperCalcChecksums(outgoingPacket.data(), outgoingPacket.size(), NULL, 0);
     }
 
@@ -925,6 +1009,27 @@ void PacketMonitor::RedirectPacket(const uint8_t* packet, UINT packetLen, const 
     }
 }
 
+// remember a flow we decided to tunnel so continuation packets keep being redirected
+void PacketMonitor::RememberRedirectedFlow(const FlowKey& key, size_t serverIndex, uint32_t translatedDstIp) {
+    unique_lock lock(m_FlowMutex);
+    auto& flow = m_RedirectedFlows[key];
+    flow.serverIndex = serverIndex;
+    flow.translatedDstIp = translatedDstIp;
+    flow.lastSeen = chrono::steady_clock::now();
+}
+
+// find a tunneled flow and refresh its last-seen time
+bool PacketMonitor::FindRedirectedFlow(const FlowKey& key, size_t& serverIndex, uint32_t& translatedDstIp) {
+    unique_lock lock(m_FlowMutex);
+    auto it = m_RedirectedFlows.find(key);
+    if (it == m_RedirectedFlows.end())
+        return false;
+    it->second.lastSeen = chrono::steady_clock::now();
+    serverIndex = it->second.serverIndex;
+    translatedDstIp = it->second.translatedDstIp;
+    return true;
+}
+
 // getting process name by pid
 string PacketMonitor::GetProcessNameByPid(DWORD pid) {
     HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ,
@@ -947,12 +1052,9 @@ string PacketMonitor::GetProcessNameByPid(DWORD pid) {
 
 // checking rules for packet, returns first matching server or nullptr
 const ServerConfig* PacketMonitor::CheckRules(const string& processName, UINT32 destIp) {
-    for (const auto& server : m_Config->GetServers()) {
-        for (const auto& rule : server.processRules) {
-            if (iequals(processName, rule)) {
-                return &server;
-            }
-        }
+    const ServerConfig* processServer = FindServerByProcessRule(processName);
+    if (processServer != nullptr) {
+        return processServer;
     }
 
     for (const auto& server : m_Config->GetServers()) {
@@ -968,6 +1070,52 @@ const ServerConfig* PacketMonitor::CheckRules(const string& processName, UINT32 
     }
 
     return nullptr;
+}
+
+// find the first server whose process rule matches the given process name
+const ServerConfig* PacketMonitor::FindServerByProcessRule(const string& processName) const {
+    for (const auto& server : m_Config->GetServers()) {
+        for (const auto& rule : server.processRules) {
+            if (iequals(processName, rule)) {
+                return &server;
+            }
+        }
+    }
+    return nullptr;
+}
+
+// redirect a dns query: send it to the "actual" server with the original query id and
+// send generated-id copies to every other server (aux) to build the ip correspondence
+void PacketMonitor::RedirectDNSQuery(const uint8_t* packet, UINT packetLen, const WINDIVERT_ADDRESS& addr,
+    ServerContext* actual, uint16_t queryId, const string& reason) {
+    {
+        unique_lock lock(m_DnsMutex);
+        m_ActualDns[queryId] = actual->configIndex;
+        m_ActualIpByQuery[queryId] = 0;
+        m_DnsTimestamp[queryId] = chrono::steady_clock::now();
+    }
+
+    m_Logger->log(LOGGER_LEVEL_INFO, "Redirecting DNS query (" + reason + ") " +
+        "to actual server #" + to_string(actual->configIndex) + " (qid=" + to_string(queryId) + ")");
+    RedirectPacket(packet, packetLen, addr, *actual);
+
+    for (auto& other : m_Servers) {
+        if (other.configIndex == actual->configIndex)
+            continue;
+
+        uint16_t auxId;
+        {
+            unique_lock lock(m_DnsMutex);
+            auxId = GenerateUniqueQueryId();
+            m_AuxiliaryDns[auxId] = other.configIndex;
+            m_ActualToAuxiliary[auxId] = queryId;
+            m_DnsTimestamp[auxId] = chrono::steady_clock::now();
+        }
+
+        m_Logger->log(LOGGER_LEVEL_DEBUG, "Sending aux DNS query (" + reason + ") " +
+            "to server #" + to_string(other.configIndex) + " (aux qid=" + to_string(auxId) + ")");
+        RedirectPacket(packet, packetLen, addr, other, 0, auxId);
+    }
 }
 
 bool PacketMonitor::ExtractDomainFromDNSQuery(const uint8_t* payload, size_t len, std::string& domain) {

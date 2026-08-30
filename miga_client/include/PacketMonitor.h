@@ -22,6 +22,39 @@ struct PendingPacket {
     std::chrono::steady_clock::time_point timestamp;
 };
 
+// key identifying a single tcp/udp flow (host byte order)
+struct FlowKey {
+    uint8_t proto;
+    uint32_t srcIp;
+    uint16_t srcPort;
+    uint32_t dstIp;
+    uint16_t dstPort;
+
+    bool operator==(const FlowKey& o) const {
+        return proto == o.proto && srcIp == o.srcIp && srcPort == o.srcPort &&
+            dstIp == o.dstIp && dstPort == o.dstPort;
+    }
+};
+
+struct FlowKeyHash {
+    size_t operator()(const FlowKey& k) const {
+        size_t h = std::hash<uint8_t>()(k.proto);
+        h ^= std::hash<uint32_t>()(k.srcIp) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        h ^= std::hash<uint16_t>()(k.srcPort) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        h ^= std::hash<uint32_t>()(k.dstIp) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        h ^= std::hash<uint16_t>()(k.dstPort) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        return h;
+    }
+};
+
+// a flow we decided to tunnel: continuation packets keep being redirected
+// even if the volatile per-port pid cache entry is lost mid-connection
+struct RedirectedFlow {
+    size_t serverIndex;
+    uint32_t translatedDstIp; // 0 if identity
+    std::chrono::steady_clock::time_point lastSeen;
+};
+
 class PacketMonitor {
 private:
     // runtime state of a single redirect server
@@ -69,6 +102,10 @@ private:
     std::unordered_map<uint16_t, std::vector<PendingPacket>> pendingUDP;
     std::shared_mutex pendingMutex;
 
+    // flows already tunneled: flow key -> target server (kept alive while active)
+    std::unordered_map<FlowKey, RedirectedFlow, FlowKeyHash> m_RedirectedFlows;
+    std::shared_mutex m_FlowMutex;
+
     std::mt19937 m_rng;
 
     std::vector<ServerContext> m_Servers;
@@ -107,6 +144,10 @@ private:
     void RedirectPacket(const uint8_t* packet, UINT packetLen, const WINDIVERT_ADDRESS& addr, ServerContext& server,
         uint32_t newDstIp = 0, uint16_t dnsQueryIdOverride = 0);
 
+    // helpers for tunneled-flow tracking
+    void RememberRedirectedFlow(const FlowKey& key, size_t serverIndex, uint32_t translatedDstIp);
+    bool FindRedirectedFlow(const FlowKey& key, size_t& serverIndex, uint32_t& translatedDstIp);
+
     // DNS parsing helpers
     bool ExtractDomainFromDNSQuery(const uint8_t* payload, size_t len, std::string& domain);
     bool ExtractFirstARecord(const uint8_t* payload, size_t len, uint32_t& ipOut);
@@ -125,5 +166,8 @@ private:
     std::string GetProcessNameByPid(DWORD pid);
 
     ServerContext* FindServerContext(const ServerConfig* config);
+    const ServerConfig* FindServerByProcessRule(const std::string& processName) const;
+    void RedirectDNSQuery(const uint8_t* packet, UINT packetLen, const WINDIVERT_ADDRESS& addr,
+        ServerContext* actual, uint16_t queryId, const std::string& reason);
     const ServerConfig* CheckRules(const std::string& processName, UINT32 destIp);
 };
