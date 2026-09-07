@@ -364,3 +364,4 @@ FodyWeavers.xsd
 /Build
 /miga_client/config.json
 /miga_server/config.json
+/AGENTS.md
