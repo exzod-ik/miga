@@ -147,6 +147,16 @@ bool ConfigManager::Load(const string& configPath, bool hotLoad) {
         json config;
         configFile >> config;
 
+        uint16_t tunnelMaxMss = 1400;
+        if (config.contains("tunnel_max_mss")) {
+            const auto& value = config["tunnel_max_mss"];
+            if (!value.is_number_integer() || value < 1 || value > 65535) {
+                m_Logger->log(LOGGER_LEVEL_ERROR, "tunnel_max_mss must be an integer between 1 and 65535");
+                return false;
+            }
+            tunnelMaxMss = value.get<uint16_t>();
+        }
+
         if (config.contains("log_level")) {
             string levelStr = config["log_level"];
             if (levelStr == "error") {
@@ -194,6 +204,7 @@ bool ConfigManager::Load(const string& configPath, bool hotLoad) {
         }
 
         m_Servers = move(newServers);
+        m_TunnelMaxMss = tunnelMaxMss;
 
         m_Logger->log(LOGGER_LEVEL_INFO, "Configuration loaded: " +
             to_string(m_Servers.size()) + " server(s)");

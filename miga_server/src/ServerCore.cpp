@@ -715,6 +715,31 @@ void ServerCore::CleanupLoop() {
     }
 }
 
+// make sure required iptables rules are present
+bool ServerCore::EnsureFirewallRules() {
+    string check = "iptables -w -C POSTROUTING -t nat -s 10.0.0.0/24 ! -o tun_miga -j MASQUERADE 2>/dev/null";
+    if (system(check.c_str()) == 0) {
+        return true;
+    }
+
+    string add = "iptables -w -A POSTROUTING -t nat -s 10.0.0.0/24 ! -o tun_miga -j MASQUERADE";
+    if (system(add.c_str()) != 0) {
+        m_logger.log(LOGGER_LEVEL_ERROR, "Failed to add MASQUERADE rule for tun_miga");
+        return false;
+    }
+
+    m_logger.log(LOGGER_LEVEL_INFO, "MASQUERADE rule for tun_miga was missing, re-added");
+    return true;
+}
+
+// firewall watchdog thread
+void ServerCore::FirewallWatchdogLoop() {
+    while (m_running) {
+        this_thread::sleep_for(chrono::seconds(3));
+        EnsureFirewallRules();
+    }
+}
+
 // client packet sniffing thread
 void ServerCore::ProcessPackets() {
     m_logger.log(LOGGER_LEVEL_INFO, "Packet processing thread started");
@@ -934,9 +959,11 @@ void ServerCore::Start() {
     if (m_running) return;
     m_running = true;
     system("iptables -I OUTPUT -p icmp --icmp-type destination-unreachable -j DROP"); // drop icmp "Port unreachable"
+    EnsureFirewallRules();
     m_processPacketsThread = thread(&ServerCore::ProcessPackets, this);
     m_processTunThread = thread(&ServerCore::ProcessTUN, this);
     m_cleanupThread = thread(&ServerCore::CleanupLoop, this);
+    m_firewallThread = thread(&ServerCore::FirewallWatchdogLoop, this);
     m_logger.log(LOGGER_LEVEL_INFO, "Server started");
 }
 
@@ -947,6 +974,7 @@ void ServerCore::Stop() {
         if (m_processPacketsThread.joinable()) m_processPacketsThread.join();
         if (m_processTunThread.joinable()) m_processTunThread.join();
         if (m_cleanupThread.joinable()) m_cleanupThread.join();
+        if (m_firewallThread.joinable()) m_firewallThread.join();
         m_logger.log(LOGGER_LEVEL_INFO, "Server stopped");
     }
 }

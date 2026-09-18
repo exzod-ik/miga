@@ -53,6 +53,7 @@ private:
 
     Logger* m_Logger;
     int m_LogLevel;
+    uint16_t m_TunnelMaxMss = 1400;
 
     bool ParseServer(const json& serverJson, ServerConfig& server);
     bool ParseProcessRules(const json& config, ServerConfig& server);
@@ -70,4 +71,5 @@ public:
     void AddDynamicIP(size_t serverIndex, uint32_t ip);
 
     int GetLogLevel() const { return m_LogLevel; }
+    uint16_t GetTunnelMaxMss() const { return m_TunnelMaxMss; }
 };

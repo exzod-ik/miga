@@ -120,13 +120,7 @@
     <IntDir>$(SolutionDir)Build\$(ProjectName)\obj\$(Platform)\$(Configuration)\</IntDir>
     <TargetExt />
   </PropertyGroup>
-  <ItemGroup>
-    <None Include="config.json">
-      <FileType>Document</FileType>
-      <RemoteCopyFile Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</RemoteCopyFile>
-      <RemoteCopyToOutputDir Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</RemoteCopyToOutputDir>
-    </None>
-  </ItemGroup>
+  
   <ItemGroup>
     <ClCompile Include="src\main.cpp" />
     <ClCompile Include="src\ServerCore.cpp" />

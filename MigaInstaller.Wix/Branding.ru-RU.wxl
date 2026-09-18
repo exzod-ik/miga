@@ -1,0 +1,27 @@
+<WixLocalization xmlns="http://wixtoolset.org/schemas/v4/wxl" Culture="ru-RU">
+  <!-- Fill the standard dialog area with the extended background. -->
+  <UI Dialog="WelcomeEulaDlg" Control="Bitmap" X="0" Y="0" Width="370" Height="234" />
+  <UI Dialog="WelcomeDlg" Control="Bitmap" X="0" Y="0" Width="370" Height="234" />
+  <UI Dialog="MaintenanceWelcomeDlg" Control="Bitmap" X="0" Y="0" Width="370" Height="234" />
+  <UI Dialog="ExitDialog" Control="Bitmap" X="0" Y="0" Width="370" Height="234" />
+  <UI Dialog="FatalError" Control="Bitmap" X="0" Y="0" Width="370" Height="234" />
+  <UI Dialog="UserExit" Control="Bitmap" X="0" Y="0" Width="370" Height="234" />
+  <UI Dialog="PrepareDlg" Control="Bitmap" X="0" Y="0" Width="370" Height="234" />
+  <UI Dialog="ResumeDlg" Control="Bitmap" X="0" Y="0" Width="370" Height="234" />
+
+  <!-- Fill the upper banner; reserve the right edge for the logo. -->
+  <UI Dialog="VerifyReadyDlg" Control="BannerBitmap" X="0" Y="0" Width="370" Height="44" />
+  <UI Dialog="MaintenanceTypeDlg" Control="BannerBitmap" X="0" Y="0" Width="370" Height="44" />
+  <UI Dialog="FilesInUse" Control="BannerBitmap" X="0" Y="0" Width="370" Height="44" />
+  <UI Dialog="MsiRMFilesInUse" Control="BannerBitmap" X="0" Y="0" Width="370" Height="44" />
+  <UI Dialog="ProgressDlg" Control="BannerBitmap" X="0" Y="0" Width="370" Height="44" />
+  <UI Dialog="OutOfRbDiskDlg" Control="BannerBitmap" X="0" Y="0" Width="370" Height="44" />
+  <UI Dialog="OutOfDiskDlg" Control="BannerBitmap" X="0" Y="0" Width="370" Height="44" />
+  <UI Dialog="MaintenanceTypeDlg" Control="Title" Width="300" />
+  <UI Dialog="MaintenanceTypeDlg" Control="Description" Width="290" />
+  <UI Dialog="ProgressDlg" Control="TitleInstalling" Width="295" />
+  <UI Dialog="ProgressDlg" Control="TitleChanging" Width="295" />
+  <UI Dialog="ProgressDlg" Control="TitleRepairing" Width="295" />
+  <UI Dialog="ProgressDlg" Control="TitleRemoving" Width="295" />
+  <UI Dialog="ProgressDlg" Control="TitleUpdating" Width="295" />
+</WixLocalization>

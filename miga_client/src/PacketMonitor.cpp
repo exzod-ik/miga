@@ -64,10 +64,6 @@ string tcpFlagsWinDivert(WINDIVERT_TCPHDR* tcpHdr) {
     return result;
 }
 
-// max tcp mss the tunnel can carry without ip fragmentation of the outer datagram:
-// outer = inner(payload+mss-bytes) + 28 (20 ip + 8 udp), so with mss=1400 inner <= 1440, outer <= 1468
-static const uint16_t TUNNEL_MAX_MSS = 1400;
-
 // clamp the tcp MSS option in place, returns true if the packet was modified
 bool ClampTcpMss(uint8_t* packet, size_t packetLen, uint16_t maxMss) {
     if (packetLen < sizeof(IP_HEADER)) return false;
@@ -218,7 +214,7 @@ bool PacketMonitor::OpenSocketHandle() {
 
 // open windivert network layer to snif packets
 bool PacketMonitor::OpenNetworkHandle() {
-    const char* filter = "ip and (tcp or udp)"; // the filter must be different from the socket layer, otherwise the winddivert freezes
+    const char* filter = "ip and (tcp or (udp.SrcPort != 67 and udp.DstPort != 67 and udp.SrcPort != 68 and udp.DstPort != 68))"; // the filter must be different from the socket layer, otherwise the winddivert freezes
     m_Network = WinDivertOpen(filter, WINDIVERT_LAYER_NETWORK, 0, 0);
     if (m_Network == INVALID_HANDLE_VALUE) {
         m_Logger->log(LOGGER_LEVEL_ERROR, "Failed to open Network layer: " + to_string(GetLastError()));
@@ -492,7 +488,7 @@ bool PacketMonitor::SendUdpPacketToMstcp(const UdpPacketInfo* pkt, WINDIVERT_ADD
         (size_t)((ip->ver_hlen & 0x0F) * 4 + sizeof(TCP_HEADER)) <= pkt->payloadSize) {
         TCP_HEADER* tcp = reinterpret_cast<TCP_HEADER*>(pkt->payload + (ip->ver_hlen & 0x0F) * 4);
         if ((tcp->flags & 0x02) != 0 && (tcp->flags & 0x10) != 0) { // SYN-ACK
-            ClampTcpMss(pkt->payload, pkt->payloadSize, TUNNEL_MAX_MSS);
+            ClampTcpMss(pkt->payload, pkt->payloadSize, m_Config->GetTunnelMaxMss());
         }
     }
 
@@ -978,7 +974,7 @@ void PacketMonitor::RedirectPacket(const uint8_t* packet, UINT packetLen, const 
     if (ipHeader->protocol == IPPROTO_TCP) {
         const TCP_HEADER* tcp = reinterpret_cast<const TCP_HEADER*>(outgoingPacket.data() + (ipHeader->ver_hlen & 0x0F) * 4);
         if ((tcp->flags & 0x02) != 0) { // SYN
-            mssClamped = ClampTcpMss(outgoingPacket.data(), outgoingPacket.size(), TUNNEL_MAX_MSS);
+            mssClamped = ClampTcpMss(outgoingPacket.data(), outgoingPacket.size(), m_Config->GetTunnelMaxMss());
         }
     }
 

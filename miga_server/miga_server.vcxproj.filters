@@ -24,7 +24,5 @@
   <ItemGroup>
     <CopyFileToFolders Include="install.sh" />
   </ItemGroup>
-  <ItemGroup>
-    <None Include="config.json" />
-  </ItemGroup>
+  
 </Project>

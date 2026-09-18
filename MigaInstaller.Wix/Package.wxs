@@ -1,0 +1,62 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+  <Package Name="M.I.G.A." Manufacturer="Exzod" Version="$(var.ProductVersion)"
+           UpgradeCode="2654C1FC-1389-4A26-8E91-7BC1FEF638DC" Language="1049" Codepage="1251"
+           Scope="perMachine">
+    <!-- Remove the legacy MSI before installing the replacement service. -->
+    <MajorUpgrade Schedule="afterInstallInitialize"
+                  DowngradeErrorMessage="Уже установлена более новая версия M.I.G.A." />
+    <MediaTemplate EmbedCab="yes" />
+    <!-- MSI WindowsBuild can report a compatibility version; read the actual OS build. -->
+    <Property Id="WINDOWSBUILDNUMBER" Secure="yes">
+      <RegistrySearch Id="WindowsBuildNumberSearch" Root="HKLM"
+                      Key="SOFTWARE\Microsoft\Windows NT\CurrentVersion"
+                      Name="CurrentBuildNumber" Type="raw" Bitness="always64" />
+    </Property>
+    <Launch Condition="Installed OR (VersionNT64 AND WINDOWSBUILDNUMBER &gt;= 19041)"
+            Message="Требуется Windows 10 x64 версии 2004 или новее." />
+    <Icon Id="MigaIcon.exe" SourceFile="..\MIGA Agent\Icon.ico" />
+    <Property Id="ARPPRODUCTICON" Value="MigaIcon.exe" />
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="M.I.G.A." />
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder" />
+    <StandardDirectory Id="DesktopFolder" />
+    <ui:WixUI Id="WixUI_Minimal" />
+    <WixVariable Id="WixUILicenseRtf" Value="License.rtf" />
+    <WixVariable Id="WixUIBannerBmp" Value="TopBanner.png" />
+    <WixVariable Id="WixUIDialogBmp" Value="DialogBackground.png" />
+    <Feature Id="Main" Title="M.I.G.A." Level="1">
+      <ComponentGroupRef Id="Payload" />
+    </Feature>
+  </Package>
+  <Fragment>
+    <ComponentGroup Id="Payload" Directory="INSTALLFOLDER">
+      <Files Include="$(var.PayloadDir)\**">
+        <Exclude Files="$(var.PayloadDir)\miga_client.exe" />
+        <Exclude Files="$(var.PayloadDir)\MIGA Agent.exe" />
+        <Exclude Files="$(var.PayloadDir)\**\config.json" />
+        <Exclude Files="$(var.PayloadDir)\**\*.pdb" />
+        <Exclude Files="$(var.PayloadDir)\**\*.log" />
+      </Files>
+      <Component Id="ClientService" Guid="*" Bitness="always64">
+        <File Id="ClientExe" Source="$(var.PayloadDir)\miga_client.exe" KeyPath="yes" />
+        <ServiceInstall Id="InstallClient" Name="MigaClient"
+                        DisplayName="Miga Client - Traffic Redirector"
+                        Description="Redirects traffic of specified processes and IP addresses"
+                        Type="ownProcess" Start="auto" ErrorControl="normal"
+                        Arguments="--service" Vital="yes" />
+        <!-- First installation has no config; start from the GUI after configuring. -->
+        <ServiceControl Id="ControlClient" Name="MigaClient" Stop="both" Remove="uninstall" Wait="yes" />
+      </Component>
+      <Component Id="Agent" Guid="*" Bitness="always64">
+        <File Id="AgentExe" Source="$(var.PayloadDir)\MIGA Agent.exe" KeyPath="yes">
+          <Shortcut Id="StartMenuShortcut" Directory="ProgramMenuFolder" Name="M.I.G.A."
+                    WorkingDirectory="INSTALLFOLDER" Advertise="yes" Icon="MigaIcon.exe" />
+          <Shortcut Id="DesktopShortcut" Directory="DesktopFolder" Name="M.I.G.A."
+                    WorkingDirectory="INSTALLFOLDER" Advertise="yes" Icon="MigaIcon.exe" />
+        </File>
+      </Component>
+    </ComponentGroup>
+  </Fragment>
+</Wix>

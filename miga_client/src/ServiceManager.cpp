@@ -3,6 +3,16 @@
 
 #pragma comment(lib , "Advapi32.lib")
 
+typedef BOOL (WINAPI *DnsFlushResolverCacheFn)();
+
+static void FlushDnsCache() {
+    HMODULE hDns = LoadLibraryW(L"Dnsapi.dll");
+    if (!hDns) return;
+    auto fn = reinterpret_cast<DnsFlushResolverCacheFn>(GetProcAddress(hDns, "DnsFlushResolverCache"));
+    if (fn) fn();
+    FreeLibrary(hDns);
+}
+
 using namespace std;
 
 const wchar_t* ServiceManager::SERVICE_NAME = L"MigaClient";
@@ -153,12 +163,16 @@ void WINAPI ServiceManager::ServiceMain(DWORD argc, LPWSTR* argv) {
         return;
     }
 
+    FlushDnsCache();
+
     m_Status.dwCurrentState = SERVICE_RUNNING;
     m_Status.dwCheckPoint = 0;
     m_Status.dwWaitHint = 0;
     SetServiceStatus(m_StatusHandle, &m_Status);
 
     g_Client->RunService();
+
+    FlushDnsCache();
 
     m_Status.dwCurrentState = SERVICE_STOPPED;
     SetServiceStatus(m_StatusHandle, &m_Status);
