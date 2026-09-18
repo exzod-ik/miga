@@ -4,6 +4,7 @@ using MIGA_Agent.Models;
 using MIGA_Agent.Services;
 using System;
 using System.Collections.Generic;
+using System.ComponentModel.DataAnnotations;
 using System.Collections.ObjectModel;
 using System.Collections.Specialized;
 using System.Linq;
@@ -16,8 +17,31 @@ namespace MIGA_Agent.ViewModels
     /// Корневая модель главного окна: вкладки серверов, состояние локальной
     /// службы и запись конфига.
     /// </summary>
-    public partial class MainViewModel : ObservableObject
+    public partial class MainViewModel : ObservableValidator
     {
+        private string _savedLogLevel = "none";
+        private string _savedTunnelMaxMss = "1400";
+
+        public IReadOnlyList<string> LogLevels { get; } = new[] { "none", "error", "info", "debug" };
+
+        [ObservableProperty]
+        [NotifyDataErrorInfo]
+        [Required(ErrorMessage = "Укажите MSS: целое число от 1 до 65535.")]
+        [Range(1, 65535, ErrorMessage = "MSS: целое число от 1 до 65535.")]
+        private string _tunnelMaxMss = "1400";
+
+        public bool IsDirty => LogLevel != _savedLogLevel || TunnelMaxMss != _savedTunnelMaxMss;
+
+        partial void OnLogLevelChanged(string value) => NotifyClientSettingsChanged();
+        partial void OnTunnelMaxMssChanged(string value) => NotifyClientSettingsChanged();
+
+        private void NotifyClientSettingsChanged()
+        {
+            OnPropertyChanged(nameof(IsDirty));
+            OnPropertyChanged(nameof(HasUnsavedChanges));
+            OnPropertyChanged(nameof(WindowTitle));
+        }
+
         private const string BaseWindowTitle = "Make Internet Greate Again";
 
         private readonly ILocalServiceManager _localService;
@@ -51,7 +75,7 @@ namespace MIGA_Agent.ViewModels
         [ObservableProperty]
         private ServerTabViewModel? _selectedServer;
 
-        /// <summary>Глобальный уровень логирования клиента (только чтение из конфига и запись при сохранении).</summary>
+        /// <summary>Глобальный уровень логирования клиента.</summary>
         [ObservableProperty]
         private string _logLevel = "none";
 
@@ -59,7 +83,7 @@ namespace MIGA_Agent.ViewModels
         private string _serviceStatus = "Неизвестно";
 
         /// <summary>Есть несохранённые изменения хотя бы на одной вкладке.</summary>
-        public bool HasUnsavedChanges => Servers.Any(t => t.IsDirty);
+        public bool HasUnsavedChanges => IsDirty || Servers.Any(t => t.IsDirty);
 
         /// <summary>Заголовок окна с индикатором несохранённых изменений.</summary>
         public string WindowTitle =>
@@ -119,6 +143,10 @@ namespace MIGA_Agent.ViewModels
         {
             var config = await _configService.LoadAsync();
             LogLevel = config.LogLevel;
+            TunnelMaxMss = config.TunnelMaxMss.ToString();
+            _savedLogLevel = LogLevel;
+            _savedTunnelMaxMss = TunnelMaxMss;
+            NotifyClientSettingsChanged();
 
             foreach (var entry in config.Servers)
             {
@@ -219,12 +247,20 @@ namespace MIGA_Agent.ViewModels
 
         private async Task SaveClientConfigAsync()
         {
+            ValidateAllProperties();
+            if (HasErrors)
+                throw new InvalidOperationException("MSS должен быть целым числом от 1 до 65535.");
+            string savedMssText = TunnelMaxMss;
             var config = new ClientConfig
             {
                 LogLevel = LogLevel,
+                TunnelMaxMss = int.Parse(TunnelMaxMss),
                 Servers = Servers.Select(t => t.ToServerEntry()).ToList()
             };
             await _configService.SaveAsync(config);
+            _savedLogLevel = config.LogLevel;
+            _savedTunnelMaxMss = savedMssText;
+            NotifyClientSettingsChanged();
 
             // Всё записано в файл — сбрасываем признак несохранённых изменений
             foreach (var tab in Servers.ToList())
@@ -244,6 +280,8 @@ namespace MIGA_Agent.ViewModels
             switch (decision)
             {
                 case UnsavedChangesDecision.Save:
+                    if (!ValidateClientSettings())
+                        return false;
                     var issues = GetConflictIssues();
                     if (issues.Count > 0 && !_dialogService.ShowIssuesConfirmation(
                             "Обнаружены пересечения настроек",
@@ -270,6 +308,9 @@ namespace MIGA_Agent.ViewModels
         /// </summary>
         private async Task ApplyConfigurationAsync()
         {
+            if (!ValidateClientSettings())
+                return;
+
             var issues = GetConflictIssues();
             if (issues.Count > 0)
             {
@@ -296,6 +337,16 @@ namespace MIGA_Agent.ViewModels
 
             // Предлагаем перезапустить локальную службу
             await RestartLocalServiceWithWarningAsync();
+        }
+
+        private bool ValidateClientSettings()
+        {
+            ValidateAllProperties();
+            if (!HasErrors)
+                return true;
+
+            _dialogService.ShowError("MSS должен быть целым числом от 1 до 65535.");
+            return false;
         }
 
         // ========== Проверка пересечений ==========
@@ -419,9 +470,13 @@ namespace MIGA_Agent.ViewModels
                 {
                     System.ServiceProcess.ServiceControllerStatus.Running => "Работает",
                     System.ServiceProcess.ServiceControllerStatus.Stopped => "Остановлена",
-                    System.ServiceProcess.ServiceControllerStatus.StartPending => "Запускается...",
-                    System.ServiceProcess.ServiceControllerStatus.StopPending => "Останавливается...",
-                    _ => "Неизвестно или служба не найдена"
+                    System.ServiceProcess.ServiceControllerStatus.StartPending => "Запускается…",
+                    System.ServiceProcess.ServiceControllerStatus.StopPending => "Останавливается…",
+                    System.ServiceProcess.ServiceControllerStatus.Paused => "Приостановлена",
+                    System.ServiceProcess.ServiceControllerStatus.PausePending => "Приостановка…",
+                    System.ServiceProcess.ServiceControllerStatus.ContinuePending => "Возобновляется…",
+                    null => "Не найдена",
+                    _ => "Неизвестно"
                 };
             }
             catch (Exception ex)

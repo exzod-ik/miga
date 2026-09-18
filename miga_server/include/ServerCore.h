@@ -52,6 +52,7 @@ private:
     std::thread m_processPacketsThread;
     std::thread m_processTunThread;
     std::thread m_cleanupThread;
+    std::thread m_firewallThread;
     std::atomic<bool> m_running;
     ServerConfig m_config;
     UdpPacketAssembler m_assembler;
@@ -77,6 +78,8 @@ private:
     uint32_t GetInterfaceIP();
     void SendPacket(const uint8_t* packet, size_t len);
     void CleanupLoop();
+    bool EnsureFirewallRules();
+    void FirewallWatchdogLoop();
 
 public:
     ServerCore();

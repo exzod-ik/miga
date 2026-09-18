@@ -24,12 +24,6 @@
   </ItemGroup>
 
   <ItemGroup>
-    <Content Include="Icon.ico">
-      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
-    </Content>
-  </ItemGroup>
-
-  <ItemGroup>
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.2" />
     <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.11" />
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.11" />
@@ -41,7 +35,9 @@
   </ItemGroup>
 
   <ItemGroup>
-    <Resource Include="Icon.ico" />
+    <Resource Include="Icon.ico">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Resource>
   </ItemGroup>
   
   <Target Name="CleanWpfTempFolders" AfterTargets="CoreClean">

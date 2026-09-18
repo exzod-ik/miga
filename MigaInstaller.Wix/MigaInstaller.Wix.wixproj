@@ -1,0 +1,31 @@
+﻿<Project Sdk="WixToolset.Sdk/7.0.0">
+  <Import Project="..\Build\MigaInstaller.Wix\Payload.props" Condition="Exists('..\Build\MigaInstaller.Wix\Payload.props')" />
+  <PropertyGroup>
+    <OutputType>Package</OutputType>
+    <InstallerPlatform>x64</InstallerPlatform>
+    <Cultures>ru-RU</Cultures>
+    <ProductVersion Condition="'$(ProductVersion)' == ''">1.2.2</ProductVersion>
+    <OutputName>MIGA-$(ProductVersion)-x64</OutputName>
+    <PayloadDir Condition="'$(PayloadDir)' == ''">$(MSBuildThisFileDirectory)..\Build\MigaInstaller.Wix\payload</PayloadDir>
+    <DefineConstants>$(DefineConstants);ProductVersion=$(ProductVersion);PayloadDir=$(PayloadDir)</DefineConstants>
+  </PropertyGroup>
+  <ItemGroup>
+    <None Include="build.ps1" />
+    <None Include="License.rtf" />
+    <None Include="logo.png" />
+    <None Include="TopBanner.png" />
+    <None Include="DialogBackground.png" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="WixToolset.UI.wixext" Version="7.0.0" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\MIGA Agent\MIGA Agent.csproj" />
+    <ProjectReference Include="..\miga_client\miga_client.vcxproj" />
+    <ProjectReference Include="..\miga_server\miga_server.vcxproj" />
+  </ItemGroup>
+  <Target Name="CheckPayload" BeforeTargets="BeforeBuild">
+    <Error Condition="!Exists('$(PayloadDir)\miga_client.exe') Or !Exists('$(PayloadDir)\MIGA Agent.exe') Or !Exists('$(PayloadDir)\miga_server')" Text="Payload missing. Run build.ps1 in MigaInstaller.Wix first." />
+    <Error Condition="Exists('$(PayloadDir)\config.json')" Text="Refusing to package a local config.json." />
+  </Target>
+</Project>
