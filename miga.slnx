@@ -1,6 +1,7 @@
 <Solution>
   <Configurations>
     <Platform Name="Any CPU" />
+    <Platform Name="ARM64" />
     <Platform Name="x64" />
     <Platform Name="x86" />
   </Configurations>
@@ -8,8 +9,10 @@
     <File Path="Directory.Build.props" />
   </Folder>
   <Project Path="MIGA Agent/MIGA Agent.csproj" Id="c17736e1-124b-464d-ac88-d3753ac8e655" />
-  <Project Path="MigaInstaller.Wix/MigaInstaller.Wix.wixproj" Type="B7DD6F7E-DEF8-4E67-B5B7-07EF123DB6F0" />
-  <Project Path="miga_client/miga_client.vcxproj" Id="f112fd91-618c-4eed-8469-02e559413aca" />
+  <Project Path="MigaInstaller.Wix/MigaInstaller.Wix.wixproj" Type="b7dd6f7e-def8-4e67-b5b7-07ef123db6f0" />
+  <Project Path="miga_client/miga_client.vcxproj" Id="f112fd91-618c-4eed-8469-02e559413aca">
+    <Platform Solution="*|ARM64" Project="x64" />
+  </Project>
   <Project Path="miga_server/miga_server.vcxproj" Id="e5f82f2d-0300-4a8c-b420-6e1c8135439a">
     <Platform Solution="*|x86" Project="x86" />
     <Deploy />
