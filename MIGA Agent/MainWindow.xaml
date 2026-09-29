@@ -2,7 +2,7 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:helpers="clr-namespace:MIGA_Agent.Helpers"
-        xmlns:notifications="clr-namespace:Notification.Wpf.Controls;assembly=Notification.Wpf"
+        xmlns:services="clr-namespace:MIGA_Agent.Services"
         Title="{Binding WindowTitle}"
         Height="880" Width="1200"
         Icon="/Icon.ico"
@@ -61,6 +61,10 @@
                             <TabPanel IsItemsHost="True" Margin="0,0,8,0"/>
                             <Button Content="+ Добавить сервер"
                                     Command="{Binding AddServerCommand}"
+                                    VerticalAlignment="Center"
+                                    Padding="8,4" Margin="0,3,8,0"/>
+                            <Button Content="Загрузить из файла"
+                                    Command="{Binding ImportServerFileCommand}"
                                     VerticalAlignment="Center"
                                     Padding="8,4" Margin="0,3,0,0"/>
                         </StackPanel>
@@ -126,8 +130,22 @@
                                             </Grid>
                                         </StackPanel>
 
-                                        <!-- Динамическая кнопка (загрузить/запустить/остановить) -->
-                                        <Button Content="{Binding DynamicDemoButtonText}" Command="{Binding DynamicDemoCommand}" Width="220" Padding="5" IsEnabled="{Binding IsSshConnected}" HorizontalAlignment="Left"/>
+                                        <!-- Управление сервером и обмен его настройками -->
+                                        <StackPanel Orientation="Horizontal" Width="343" HorizontalAlignment="Left">
+                                            <Button Content="{Binding DynamicDemoButtonText}" Command="{Binding DynamicDemoCommand}"
+                                                    Width="220" Padding="5" IsEnabled="{Binding IsSshConnected}" Margin="0,0,7,0"/>
+                                            <Button Content="Поделиться ▾" Width="116" Padding="5" Click="ShareServer_Click"
+                                                    AutomationProperties.Name="Поделиться сервером"
+                                                    ToolTip="Адрес, порты и ключи сервера. Передавайте только доверенному получателю.">
+                                                <Button.ContextMenu>
+                                                    <ContextMenu Placement="Bottom"
+                                                                 DataContext="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource Self}}">
+                                                        <MenuItem Header="Показать QR-код" Command="{Binding ShareServerQrCommand}"/>
+                                                        <MenuItem Header="Сохранить в файл..." Command="{Binding ShareServerFileCommand}"/>
+                                                    </ContextMenu>
+                                                </Button.ContextMenu>
+                                            </Button>
+                                        </StackPanel>
 
                                     </StackPanel>
                                 </GroupBox>
@@ -258,10 +276,74 @@
             </StackPanel>
         </WrapPanel>
 
-        <!-- Область уведомлений -->
-        <notifications:NotificationArea Grid.Row="0" Grid.RowSpan="2"
-            x:Name="NotificationArea"
-            Position="BottomRight"
-            MaxItems="5"/>
+        <!-- Компактные уведомления поверх правого нижнего угла окна. -->
+        <ItemsControl x:Name="NotificationList" Grid.Row="0" Grid.RowSpan="2"
+                      HorizontalAlignment="Right" VerticalAlignment="Bottom"
+                      Width="350" Margin="0,0,12,12" Panel.ZIndex="10">
+            <ItemsControl.ItemTemplate>
+                <DataTemplate>
+                    <Border Background="#202630" BorderBrush="#49515E" BorderThickness="1"
+                            CornerRadius="12" Margin="0,8,0,0" ClipToBounds="True">
+                        <Border.Effect>
+                            <DropShadowEffect BlurRadius="16" ShadowDepth="3" Opacity="0.22"/>
+                        </Border.Effect>
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="4"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <Border x:Name="Accent" Background="#75A7F5"/>
+                            <Grid Grid.Column="1" Margin="13,10,9,11">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="28"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="28"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock x:Name="Icon" Text="i" Foreground="#9AC1FF"
+                                           FontSize="17" FontWeight="Bold" VerticalAlignment="Top"
+                                           HorizontalAlignment="Center"/>
+                                <StackPanel Grid.Column="1">
+                                    <TextBlock Text="{Binding Title}" Foreground="#F7F9FC"
+                                               FontWeight="SemiBold" FontSize="13"/>
+                                    <TextBlock Text="{Binding Message}" Foreground="#D1D8E1"
+                                               FontSize="12" TextWrapping="Wrap" TextTrimming="CharacterEllipsis"
+                                               MaxHeight="80" ToolTip="{Binding Message}" Margin="0,3,0,0"/>
+                                    <ProgressBar x:Name="OperationProgress" IsIndeterminate="True"
+                                                 Height="3" Margin="0,10,0,0" Visibility="Collapsed"/>
+                                </StackPanel>
+                                <Button x:Name="DismissButton" Grid.Column="2" Content="×" Width="26" Height="26"
+                                        Padding="0" VerticalAlignment="Top"
+                                        ToolTip="Закрыть уведомление"
+                                        AutomationProperties.Name="Закрыть уведомление"
+                                        Click="DismissNotification_Click"/>
+                            </Grid>
+                        </Grid>
+                    </Border>
+                    <DataTemplate.Triggers>
+                        <DataTrigger Binding="{Binding Kind}" Value="{x:Static services:NotificationKind.Warning}">
+                            <Setter TargetName="Accent" Property="Background" Value="#F3B75E"/>
+                            <Setter TargetName="Icon" Property="Text" Value="!"/>
+                            <Setter TargetName="Icon" Property="Foreground" Value="#F3B75E"/>
+                        </DataTrigger>
+                        <DataTrigger Binding="{Binding Kind}" Value="{x:Static services:NotificationKind.Error}">
+                            <Setter TargetName="Accent" Property="Background" Value="#EF7D83"/>
+                            <Setter TargetName="Icon" Property="Text" Value="×"/>
+                            <Setter TargetName="Icon" Property="Foreground" Value="#EF7D83"/>
+                        </DataTrigger>
+                        <DataTrigger Binding="{Binding Kind}" Value="{x:Static services:NotificationKind.Success}">
+                            <Setter TargetName="Accent" Property="Background" Value="#70D2A0"/>
+                            <Setter TargetName="Icon" Property="Text" Value="✓"/>
+                            <Setter TargetName="Icon" Property="Foreground" Value="#70D2A0"/>
+                        </DataTrigger>
+                        <DataTrigger Binding="{Binding Kind}" Value="{x:Static services:NotificationKind.Progress}">
+                            <Setter TargetName="Accent" Property="Background" Value="#9AC1FF"/>
+                            <Setter TargetName="Icon" Property="Text" Value="…"/>
+                            <Setter TargetName="OperationProgress" Property="Visibility" Value="Visible"/>
+                            <Setter TargetName="DismissButton" Property="Visibility" Value="Collapsed"/>
+                        </DataTrigger>
+                    </DataTemplate.Triggers>
+                </DataTemplate>
+            </ItemsControl.ItemTemplate>
+        </ItemsControl>
     </Grid>
 </Window>

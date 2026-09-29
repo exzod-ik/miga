@@ -1,5 +1,6 @@
-﻿using CommunityToolkit.Mvvm.ComponentModel;
+using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using Microsoft.Win32;
 using MIGA_Agent.Models;
 using MIGA_Agent.Services;
 using System;
@@ -8,6 +9,7 @@ using System.ComponentModel.DataAnnotations;
 using System.Collections.ObjectModel;
 using System.Collections.Specialized;
 using System.Linq;
+using System.IO;
 using System.Threading.Tasks;
 using System.Windows;
 
@@ -114,6 +116,67 @@ namespace MIGA_Agent.ViewModels
 
             // Новый сервер ещё не записан в конфигурационный файл
             tab.IsDirty = true;
+        }
+
+        [RelayCommand]
+        private void ImportServerFile()
+        {
+            var dialog = new OpenFileDialog
+            {
+                Title = "Загрузить сервер из файла",
+                Filter = "Файл сервера M.I.G.A. (*.miga-server.json)|*.miga-server.json|JSON (*.json)|*.json",
+                CheckFileExists = true,
+                Multiselect = false
+            };
+            if (dialog.ShowDialog(Application.Current.MainWindow) != true)
+                return;
+
+            try
+            {
+                if (new FileInfo(dialog.FileName).Length > ServerSharePayload.MaxJsonLength)
+                    throw new InvalidDataException("Файл сервера слишком большой.");
+
+                var payload = ServerSharePayload.Parse(File.ReadAllText(dialog.FileName));
+                var existing = Servers.FirstOrDefault(tab =>
+                    string.Equals(tab.ServerIp, payload.Address, StringComparison.OrdinalIgnoreCase)
+                    && tab.ServerPortsStart == payload.FirstPort && tab.ServerPortsEnd == payload.LastPort
+                    && tab.XorKey == payload.XorKey && tab.SwapKey == payload.SwapKey);
+                if (existing != null)
+                {
+                    SelectedServer = existing;
+                    _dialogService.ShowWarning("Этот сервер уже добавлен.");
+                    return;
+                }
+
+                // На пустой конфигурации используем начальную пустую вкладку.
+                var placeholder = Servers.Count == 1 ? Servers[0] : null;
+                var tab = placeholder != null && !placeholder.IsDirty
+                    && string.IsNullOrWhiteSpace(placeholder.ServerIp)
+                    && string.IsNullOrEmpty(placeholder.XorKey)
+                    && string.IsNullOrEmpty(placeholder.SwapKey)
+                    && placeholder.ServerSshUser == "root"
+                    && string.IsNullOrEmpty(placeholder.ServerSshPassword)
+                    && !placeholder.IsSshConnected
+                    && placeholder.RedirectProcesses.Count == 0
+                    && placeholder.RedirectIps.Count == 0
+                    && placeholder.RedirectDomains.Count == 0
+                    ? placeholder : CreateServerTab();
+                tab.LoadFrom(payload.ToServerEntry());
+                if (tab != placeholder)
+                    Servers.Add(tab);
+                tab.IsDirty = true;
+                SelectedServer = tab;
+                RecalculateConflicts();
+                _dialogService.ShowInfo("Сервер добавлен. Примените конфигурацию, чтобы сохранить его.");
+            }
+            catch (InvalidDataException ex)
+            {
+                _dialogService.ShowWarning(ex.Message, "Неверный файл сервера");
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                _dialogService.ShowError($"Не удалось загрузить файл сервера: {ex.Message}");
+            }
         }
 
         // ========== Инициализация ==========

@@ -1,8 +1,5 @@
 ﻿using MIGA_Agent.Services;
 using MIGA_Agent.Views.Dialogs;
-using Notification.Wpf;
-using Notification.Wpf.Classes;
-using Notification.Core;
 using Ookii.Dialogs.Wpf;
 using System.Collections.Generic;
 using System.Windows;
@@ -12,38 +9,31 @@ namespace MIGA_Agent.Services
 {
     public class DialogService : IDialogService
     {
-        private readonly NotificationManager _notificationManager;
-        private const string AreaName = "NotificationArea";
+        private readonly NotificationCenter _notificationCenter;
 
-        public DialogService(NotificationManager notificationManager)
+        public DialogService(NotificationCenter notificationCenter)
         {
-            _notificationManager = notificationManager;
+            _notificationCenter = notificationCenter;
         }
 
-        private void ShowNotification(string message, string title, NotificationType type)
+        private void ShowNotification(string message, string title, NotificationKind kind)
         {
-            _notificationManager.Show(new NotificationContent
-            {
-                Title = title,
-                Message = message,
-                Type = type
-            },
-            areaName: AreaName);
+            _notificationCenter.Show(title, message, kind);
         }
 
         public void ShowInfo(string message, string title = "Информация")
         {
-            ShowNotification(message, title, NotificationType.Information);
+            ShowNotification(message, title, NotificationKind.Information);
         }
 
         public void ShowWarning(string message, string title = "Предупреждение")
         {
-            ShowNotification(message, title, NotificationType.Warning);
+            ShowNotification(message, title, NotificationKind.Warning);
         }
 
         public void ShowError(string message, string title = "Ошибка")
         {
-            ShowNotification(message, title, NotificationType.Error);
+            ShowNotification(message, title, NotificationKind.Error);
         }
 
         public bool ShowYesNo(string message, string title = "Подтверждение")
@@ -67,20 +57,19 @@ namespace MIGA_Agent.Services
             return dialog.DialogResult == true;
         }
 
-        public NotifierProgress<Notification.Core.NotificationProgressReport> ShowPersistent(string title)
+        public NotificationEntry ShowPersistent(string title)
         {
-            _notificationManager.ShowProgressBar(new ProgressBarOptions { Title = title, ShowCancelButton = false, ShowProgress = false, AreaName = AreaName });
-            return _notificationManager.ShowProgressBar(new ProgressBarOptions { Title = title, ShowCancelButton = false, ShowProgress = false, AreaName = AreaName });
+            return _notificationCenter.ShowProgress(title);
         }
 
-        public void UpdatePersistent(NotifierProgress<Notification.Core.NotificationProgressReport> notification, string title, string message)
+        public void UpdatePersistent(NotificationEntry notification, string title, string message)
         {
-            notification.Report(0, message, title, false);
+            _notificationCenter.UpdateProgress(notification, title, message);
         }
 
-        public void ClosePersistent(NotifierProgress<Notification.Core.NotificationProgressReport> notification, string title, string message)
+        public void ClosePersistent(NotificationEntry notification, string title, string message, bool isError = false)
         {
-            notification.Report(100, message, title, false);
+            _notificationCenter.CompleteProgress(notification, title, message, isError);
         }
 
         public string? ShowFolderDialog(string description = "Выберите папку", string? selectedPath = null)

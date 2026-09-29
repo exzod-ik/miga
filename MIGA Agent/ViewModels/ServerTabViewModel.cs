@@ -1,8 +1,10 @@
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using Microsoft.Win32;
 using MIGA_Agent.Helpers;
 using MIGA_Agent.Models;
 using MIGA_Agent.Services;
+using MIGA_Agent.Views.Dialogs;
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
@@ -10,6 +12,8 @@ using System.ComponentModel;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
+using System.Text;
+using System.Windows;
 using System.Threading.Tasks;
 
 namespace MIGA_Agent.ViewModels
@@ -30,7 +34,7 @@ namespace MIGA_Agent.ViewModels
         /// <summary>Сохранение всего клиентского конфига (реализует MainViewModel).</summary>
         private readonly Func<Task> _persistConfigAsync;
 
-        private const string RequiredServerVersion = "1.2.0";
+        private const string RequiredServerVersion = "1.2.1";
 
         /// <summary>Вкладка просит удалить сервер (вкладку).</summary>
         public event EventHandler? RemoveRequested;
@@ -217,6 +221,57 @@ namespace MIGA_Agent.ViewModels
 
         [RelayCommand]
         private void RemoveServer() => RemoveRequested?.Invoke(this, EventArgs.Empty);
+
+        [RelayCommand]
+        private void ShareServerQr()
+        {
+            var payload = CreateSharePayload();
+            if (payload != null)
+                new ShareServerQrDialog(payload.ToJson()) { Owner = Application.Current.MainWindow }.ShowDialog();
+        }
+
+        [RelayCommand]
+        private void ShareServerFile()
+        {
+            var payload = CreateSharePayload();
+            if (payload == null)
+                return;
+
+            var dialog = new SaveFileDialog
+            {
+                Title = "Сохранить файл сервера",
+                Filter = "Файл сервера M.I.G.A. (*.miga-server.json)|*.miga-server.json|JSON (*.json)|*.json",
+                FileName = $"{payload.Address}.miga-server.json",
+                DefaultExt = ".miga-server.json",
+                AddExtension = true,
+                OverwritePrompt = true
+            };
+            if (dialog.ShowDialog(Application.Current.MainWindow) != true)
+                return;
+
+            try
+            {
+                File.WriteAllText(dialog.FileName, payload.ToJson(indented: true), new UTF8Encoding(false));
+                _dialogService.ShowInfo("Файл сохранён. Он содержит ключи сервера — передавайте его только доверенному получателю.");
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                _dialogService.ShowError($"Не удалось сохранить файл сервера: {ex.Message}");
+            }
+        }
+
+        private ServerSharePayload? CreateSharePayload()
+        {
+            try
+            {
+                return ServerSharePayload.Create(ServerIp, ServerPortsStart, ServerPortsEnd, XorKey, SwapKey);
+            }
+            catch (InvalidDataException ex)
+            {
+                _dialogService.ShowWarning(ex.Message);
+                return null;
+            }
+        }
 
         // Работа со списками
         [RelayCommand]
@@ -469,8 +524,7 @@ namespace MIGA_Agent.ViewModels
             }
             catch (Exception ex)
             {
-                _dialogService.ClosePersistent(notification, "Ошибка обновления", $"Ошибка: {ex.Message}");
-                _dialogService.ShowError($"Ошибка обновления сервера: {ex.Message}");
+                _dialogService.ClosePersistent(notification, "Ошибка обновления", ex.Message, isError: true);
             }
             finally
             {
@@ -516,7 +570,7 @@ namespace MIGA_Agent.ViewModels
             }
             catch (Exception ex)
             {
-                _dialogService.ClosePersistent(notification, "Ошибка установки", $"Ошибка: {ex.Message}");
+                _dialogService.ClosePersistent(notification, "Ошибка установки", ex.Message, isError: true);
             }
             finally
             {
@@ -580,8 +634,7 @@ namespace MIGA_Agent.ViewModels
             }
             catch (Exception ex)
             {
-                _dialogService.ClosePersistent(notification, "Ошибка генерации ключей", ex.Message);
-                _dialogService.ShowError($"Ошибка: {ex.Message}");
+                _dialogService.ClosePersistent(notification, "Ошибка генерации ключей", ex.Message, isError: true);
             }
         }
 

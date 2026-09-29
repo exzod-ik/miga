@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [ValidatePattern('^\d+\.\d+\.\d+$')]
-    [string]$ProductVersion = '1.2.2',
+    [string]$ProductVersion = '1.2.3',
     [string]$ServerBinary,
     [string]$VisualStudioPath,
     [string]$CrtDirectory
@@ -49,15 +49,7 @@ $payload = Join-Path $repoRoot ('Build\MigaInstaller.Wix\staging\' + [guid]::New
 New-Item -ItemType Directory -Path $payload -Force | Out-Null
 & $msbuild (Join-Path $repoRoot 'miga_client\miga_client.vcxproj') /t:Build /p:Configuration=Release /p:Platform=x64 "/p:SolutionDir=$repoRoot\" /m
 if ($LASTEXITCODE -ne 0) { throw 'Client build failed.' }
-# Package the existing GUI publication without building or publishing its project.
-Get-ChildItem -LiteralPath $agentPublishDir -File -Recurse |
-    Where-Object { $_.Name -ne 'config.json' -and $_.Extension -notin @('.pdb', '.log') } |
-    ForEach-Object {
-        $relativePath = $_.FullName.Substring($agentPublishDir.Length + 1)
-        $destination = Join-Path $payload $relativePath
-        New-Item -ItemType Directory -Path (Split-Path $destination -Parent) -Force | Out-Null
-        Copy-Item -LiteralPath $_.FullName -Destination $destination
-    }
+# WiX reads the ready GUI publication directly; staging contains native files only.
 $clientOutput = Join-Path $repoRoot 'Build\miga_client\bin\x64\Release'
 Copy-Item -LiteralPath (Join-Path $clientOutput 'miga_client.exe') -Destination $payload
 foreach ($driverFile in @('WinDivert.dll', 'WinDivert64.sys')) {
@@ -78,5 +70,5 @@ $pathProperty.SetAttribute('Condition', "'`$(PayloadDir)' == ''")
 $pathProperty.InnerText = $payload
 [void]$group.AppendChild($pathProperty)
 $propsXml.Save($payloadProps)
-& dotnet build (Join-Path $PSScriptRoot 'MigaInstaller.Wix.wixproj') --configuration Release "/p:ProductVersion=$ProductVersion" "/p:PayloadDir=$payload"
+& dotnet build (Join-Path $PSScriptRoot 'MigaInstaller.Wix.wixproj') --configuration Release "/p:ProductVersion=$ProductVersion" "/p:PayloadDir=$payload" "/p:AgentPublishDir=$agentPublishDir"
 if ($LASTEXITCODE -ne 0) { throw 'WiX build failed.' }

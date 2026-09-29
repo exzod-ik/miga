@@ -1,0 +1,55 @@
+<resources>
+    <string name="app_name">M.I.G.A.</string>
+    <string name="tunnel">Туннель</string><string name="servers">Серверы</string><string name="routes">Маршруты</string>
+    <string name="settings">Настройки</string><string name="diagnostics">Диагностика</string><string name="back">Назад</string>
+    <string name="turn_on">Включить</string><string name="turn_off">выключить</string><string name="cancel_start">Отменить</string><string name="stopping">Останавливаем</string>
+    <string name="need_server">Добавьте сервер для запуска туннеля</string><string name="need_routes">Назначьте хотя бы одно приложение</string><string name="need_public_rules">Назначьте приложение или добавьте правило IP или домена</string>
+    <string name="direct_unavailable">Правила IP и доменов недоступны: отсутствует нативная библиотека DIRECT</string>
+    <string name="settings_unavailable">Настройки недоступны. Сохранённые данные не изменены.</string>
+    <string name="theme">Тема</string><string name="theme_system">Системная</string><string name="theme_light">Светлая</string><string name="theme_dark">Тёмная</string>
+    <string name="version">Версия %1$s</string>
+    <string name="github_label">Github:</string><string name="github_open_failed">Не удалось открыть GitHub</string>
+    <string name="author_info">Автор: exzod-ik</string><string name="license_info">Лицензия: MIT</string>
+    <string name="stop_to_edit">Чтобы изменить настройки, остановите туннель.</string><string name="no_servers">Серверов пока нет.</string>
+    <string name="server_usage">Назначений: %1$d · правил: %2$d</string><string name="primary_dns">Основной DNS</string>
+    <string name="no_server_reply">Нет ответа на отправленный трафик</string><string name="not_used">Не используется</string>
+    <string name="edit">Изменить</string><string name="delete">Удалить</string><string name="cancel">Отмена</string><string name="add_server">Добавить сервер</string>
+    <string name="add_server_manual">+ Вручную</string><string name="add_server_qr">QR-код</string>
+    <string name="scan_server_prompt">Наведите камеру на QR-код сервера</string>
+    <string name="import_server_qr">Добавить сервер из QR-кода?</string>
+    <string name="qr_secret_warning">QR-код содержит ключи сервера. Сохраните профиль только из доверенного источника.</string>
+    <string name="delete_server">Удалить «%1$s»?</string><string name="server_dependencies">Сначала измените назначения (%1$d) и правила (%2$d).</string><string name="delete_confirm">Профиль будет удалён.</string>
+    <string name="dns_requires_assignment">Сначала добавьте назначение или правило.</string><string name="dns_explanation">Через этот сервер идут основные DNS-запросы в VPN.</string>
+    <string name="route_priority">Приоритет: приложение → IP → домен</string><string name="applications">Приложения</string><string name="ip_rules">IP</string><string name="domains">Домены</string>
+    <string name="search_apps">Поиск по названию или package name</string><string name="available">Все доступные</string><string name="assigned">Назначенные</string>
+    <string name="loading_apps">Загрузка приложений…</string><string name="apps_load_failed">Не удалось загрузить список приложений</string><string name="retry">Повторить</string>
+    <string name="unavailable_app">Недоступно: %1$s</string><string name="remove_assignment">Удалить назначение</string>
+    <string name="shared_uid_conflict">Эти приложения используют общий сетевой идентификатор. Назначьте один сервер.</string>
+    <string name="unassigned">Не назначено</string><string name="add_rule">Добавить правило</string>
+    <string name="domain_note">Маска *.example.com включает example.com и поддомены. Для доменных маршрутов нужен наблюдаемый DNS.</string>
+    <string name="local_state">Локальный VPN: %1$s</string><string name="packet_counts">Пакеты: отправлено %1$d, получено %2$d</string>
+    <string name="direct_counts">DIRECT: %1$s · отправлено %2$d · получено %3$d</string><string name="dns_counts">DNS: ожидание %1$d · завершено %2$d · таймауты %3$d</string>
+    <string name="direct_details">DIRECT: недоступно %1$d · очередь %2$d · отклонено ответов %3$d · неоднозначный владелец %4$d · сервер недоступен %5$d</string>
+    <string name="dns_details">DNS: вспомогательные %1$d · повреждено %2$d · устарело %3$d · активные %4$d · истекло %5$d · неоднозначно %6$d · лимиты %7$d</string>
+    <string name="drop_counts">Отклонено: повреждённые %1$d, фрагменты %2$d, endpoint %3$d, flow %4$d, размер %5$d, очередь %6$d, владелец %7$d</string>
+    <string name="server_editor">Сервер</string><string name="ip_editor">IP-правило</string><string name="domain_editor">Доменное правило</string>
+    <string name="server_name">Имя</string><string name="public_ipv4">Публичный IPv4</string>
+    <string name="ssh_login">Логин SSH</string><string name="ssh_password">Пароль SSH</string>
+    <string name="ssh_import">Подключиться и сохранить</string>
+    <string name="ssh_key_title">Ключ SSH-сервера</string>
+    <string name="ssh_key_confirm">Доверять этому ключу</string>
+    <string name="ip_expression">IPv4, CIDR или диапазон</string><string name="domain_expression">Домен или *.example.com</string><string name="choose_server">Сервер</string>
+    <string name="save">Сохранить</string><string name="unsaved_changes">Несохранённые изменения</string><string name="discard_question">Отменить правки?</string>
+    <string name="discard">Отменить правки</string><string name="continue_editing">Продолжить</string>
+    <string name="error_name">Укажите имя сервера до 80 символов</string><string name="error_endpoint">Проверьте публичный IPv4-адрес</string>
+    <string name="error_ssh_credentials">Укажите логин и пароль SSH</string><string name="error_ip">Проверьте IPv4, CIDR или диапазон</string>
+    <string name="error_domain">Укажите домен</string><string name="error_server">Выберите сервер</string>
+    <string name="notification_title">M.I.G.A. · Туннель запущен</string><string name="notification_stop">Остановить</string>
+    <string name="notification_starting">M.I.G.A. · Запуск туннеля</string><string name="notification_servers">Работают серверы: %1$d из %2$d</string>
+    <string name="notification_problem">Проверьте серверы · работают %1$d из %2$d</string>
+    <string name="tunnel_state_off">Туннель выключен</string><string name="state_preparing">Подготовка подключения</string>
+    <string name="state_connecting">Запуск подключения</string><string name="state_running">Локальный VPN запущен</string>
+    <string name="state_partial">Частичный отказ</string><string name="state_network_wait">Нет сети · ожидание подключения</string>
+    <string name="state_retrying">Восстановление подключения</string><string name="state_unavailable">Не удалось запустить туннель</string>
+    <string name="state_revoked">Разрешение VPN отозвано</string>
+</resources>

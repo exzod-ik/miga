@@ -4,10 +4,11 @@
     <OutputType>Package</OutputType>
     <InstallerPlatform>x64</InstallerPlatform>
     <Cultures>ru-RU</Cultures>
-    <ProductVersion Condition="'$(ProductVersion)' == ''">1.2.2</ProductVersion>
+    <ProductVersion Condition="'$(ProductVersion)' == ''">1.2.3</ProductVersion>
     <OutputName>MIGA-$(ProductVersion)-x64</OutputName>
     <PayloadDir Condition="'$(PayloadDir)' == ''">$(MSBuildThisFileDirectory)..\Build\MigaInstaller.Wix\payload</PayloadDir>
-    <DefineConstants>$(DefineConstants);ProductVersion=$(ProductVersion);PayloadDir=$(PayloadDir)</DefineConstants>
+    <AgentPublishDir Condition="'$(AgentPublishDir)' == ''">$(MSBuildThisFileDirectory)..\Build\MIGA Agent\publish</AgentPublishDir>
+    <DefineConstants>$(DefineConstants);ProductVersion=$(ProductVersion);PayloadDir=$(PayloadDir);AgentPublishDir=$(AgentPublishDir)</DefineConstants>
   </PropertyGroup>
   <ItemGroup>
     <None Include="build.ps1" />
@@ -19,13 +20,10 @@
   <ItemGroup>
     <PackageReference Include="WixToolset.UI.wixext" Version="7.0.0" />
   </ItemGroup>
-  <ItemGroup>
-    <ProjectReference Include="..\MIGA Agent\MIGA Agent.csproj" />
-    <ProjectReference Include="..\miga_client\miga_client.vcxproj" />
-    <ProjectReference Include="..\miga_server\miga_server.vcxproj" />
-  </ItemGroup>
   <Target Name="CheckPayload" BeforeTargets="BeforeBuild">
-    <Error Condition="!Exists('$(PayloadDir)\miga_client.exe') Or !Exists('$(PayloadDir)\MIGA Agent.exe') Or !Exists('$(PayloadDir)\miga_server')" Text="Payload missing. Run build.ps1 in MigaInstaller.Wix first." />
+    <Error Condition="!Exists('$(PayloadDir)\miga_client.exe') Or !Exists('$(PayloadDir)\miga_server')" Text="Payload missing. Run build.ps1 in MigaInstaller.Wix first." />
+    <Error Condition="!Exists('$(AgentPublishDir)\MIGA Agent.exe')" Text="MIGA Agent publication missing. Publish the Agent before building the installer." />
+    <Error Condition="Exists('$(PayloadDir)\MIGA Agent.exe')" Text="Staging contains MIGA Agent. Run build.ps1 to create native-only staging." />
     <Error Condition="Exists('$(PayloadDir)\config.json')" Text="Refusing to package a local config.json." />
   </Target>
 </Project>

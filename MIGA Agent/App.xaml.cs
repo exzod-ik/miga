@@ -5,7 +5,6 @@ using System.Windows;
 using MIGA_Agent.Services;
 using MIGA_Agent.ViewModels;
 using MIGA_Agent.Views;
-using Notification.Wpf;
 
 namespace MIGA_Agent
 {
@@ -14,9 +13,6 @@ namespace MIGA_Agent
         private static IHost? _host;
 
         public static IServiceProvider Services => _host?.Services ?? throw new InvalidOperationException("Host is not built.");
-
-        // Синглтон NotificationManager для использования во всём приложении
-        public static NotificationManager NotificationManager { get; } = new NotificationManager();
 
         protected override async void OnStartup(StartupEventArgs e)
         {
@@ -42,10 +38,7 @@ namespace MIGA_Agent
                     services.AddTransient<ISshManager, SshManager>();
                     services.AddSingleton<Func<ISshManager>>(sp => () => sp.GetRequiredService<ISshManager>());
 
-                    // Регистрация NotificationManager как синглтона
-                    services.AddSingleton(NotificationManager);
-
-                    // Регистрация DialogService (он получит NotificationManager через конструктор)
+                    services.AddSingleton<NotificationCenter>();
                     services.AddSingleton<IDialogService, DialogService>();
 
                     // Регистрация ViewModel и окон

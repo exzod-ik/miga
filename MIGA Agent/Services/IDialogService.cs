@@ -1,5 +1,4 @@
-﻿using Notification.Wpf.Classes;
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using System.Threading.Tasks;
 
 namespace MIGA_Agent.Services
@@ -56,16 +55,16 @@ namespace MIGA_Agent.Services
         /// <summary>
         /// Показать "липкое" уведомление
         /// </summary>
-        NotifierProgress<Notification.Core.NotificationProgressReport> ShowPersistent(string title);
+        NotificationEntry ShowPersistent(string title);
 
         /// <summary>
         /// Обновить "липкое" уведомление
         /// </summary>
-        void UpdatePersistent(NotifierProgress<Notification.Core.NotificationProgressReport> notification, string title, string message);
+        void UpdatePersistent(NotificationEntry notification, string title, string message);
 
         /// <summary>
         /// Закрыть "липкое" уведомление
         /// </summary>
-        void ClosePersistent(NotifierProgress<Notification.Core.NotificationProgressReport> notification, string title, string message);
+        void ClosePersistent(NotificationEntry notification, string title, string message, bool isError = false);
     }
 }

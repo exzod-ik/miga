@@ -11,8 +11,8 @@
 	<BaseIntermediateOutputPath>$(SolutionDir)Build\MIGA Agent</BaseIntermediateOutputPath>
     <BaseOutputPath>$(SolutionDir)Build\MIGA Agent</BaseOutputPath>
     <ApplicationManifest>app.manifest</ApplicationManifest>
-    <AssemblyVersion>1.2.1.0</AssemblyVersion>
-    <FileVersion>1.2.1.0</FileVersion>
+    <AssemblyVersion>1.2.3.0</AssemblyVersion>
+    <FileVersion>1.2.3.0</FileVersion>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|AnyCPU'">
@@ -27,8 +27,8 @@
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.2" />
     <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.11" />
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.11" />
-    <PackageReference Include="Notification.Wpf" Version="11.0.0" />
     <PackageReference Include="Ookii.Dialogs.Wpf" Version="5.0.1" />
+    <PackageReference Include="QRCoder" Version="1.8.0" />
     <PackageReference Include="SSH.NET" Version="2026.0.0" />
     <PackageReference Include="System.ServiceProcess.ServiceController" Version="10.0.11" />
     <PackageReference Include="System.Text.Json" Version="10.0.11" />
