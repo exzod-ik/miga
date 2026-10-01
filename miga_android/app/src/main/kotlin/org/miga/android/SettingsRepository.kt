@@ -354,7 +354,9 @@ class SettingsRepository(
 
     suspend fun snapshot(availablePackages: Set<String>, directAvailable: Boolean): SessionSettings = mutex.withLock {
         val saved = SettingsCodec.decode(settingsStore.read())
-        val mode = if (directAvailable) CaptureMode.PUBLIC_IPV4_RULES else CaptureMode.ASSIGNED_APPS
+        // App-only routing must leave unassigned UIDs on their physical network.
+        val mode = if (directAvailable && (saved.ipv4Rules.isNotEmpty() || saved.domainRules.isNotEmpty()))
+            CaptureMode.PUBLIC_IPV4_RULES else CaptureMode.ASSIGNED_APPS
         if (mode == CaptureMode.ASSIGNED_APPS)
             require(saved.assignments.isNotEmpty()) { "Choose at least one application" }
         else require(saved.assignments.isNotEmpty() || saved.ipv4Rules.isNotEmpty() || saved.domainRules.isNotEmpty()) {

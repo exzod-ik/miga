@@ -48,12 +48,15 @@ class SettingsRepositoryTest {
         Unit
     }
 
-    @Test fun publicModeAcceptsApplicationAssignmentWithoutIpOrDomainRule() = runBlocking {
-        val repository = SettingsRepository(MemorySettings(), MemorySecrets()) { false }
+    @Test fun appOnlyRoutingExcludesUnassignedPackagesEvenWithNativeAndLegacyPublicMode() = runBlocking {
+        val store = MemorySettings()
+        val repository = SettingsRepository(store, MemorySecrets()) { false }
         val profile = repository.saveProfile(null, "One", "8.8.8.8", "1000", "1000", keys).profiles.single()
         repository.assignPackage("org.example.app", profile.id)
-        val session = repository.snapshot(setOf("org.example.app"), true)
-        assertEquals(CaptureMode.PUBLIC_IPV4_RULES, session.captureMode)
+        store.value = SettingsCodec.encode(repository.load().copy(captureMode = CaptureMode.PUBLIC_IPV4_RULES))
+        val session = repository.snapshot(setOf("org.example.app", "com.carshering"), true)
+        assertEquals(CaptureMode.ASSIGNED_APPS, session.captureMode)
+        assertEquals(setOf("org.example.app"), session.packages)
         assertEquals(profile.id, session.assignments["org.example.app"])
         assertTrue(session.ipv4Rules.isEmpty())
         assertTrue(session.domainRules.isEmpty())
