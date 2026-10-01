@@ -23,6 +23,7 @@
   <Target Name="CheckPayload" BeforeTargets="BeforeBuild">
     <Error Condition="!Exists('$(PayloadDir)\miga_client.exe') Or !Exists('$(PayloadDir)\miga_server')" Text="Payload missing. Run build.ps1 in MigaInstaller.Wix first." />
     <Error Condition="!Exists('$(AgentPublishDir)\MIGA Agent.exe')" Text="MIGA Agent publication missing. Publish the Agent before building the installer." />
+    <Error Condition="Exists('$(AgentPublishDir)\MIGA Agent.runtimeconfig.json') Or Exists('$(AgentPublishDir)\MIGA Agent.dll') Or Exists('$(AgentPublishDir)\coreclr.dll')" Text="Agent must be a self-contained single-file publication. Run build.ps1." />
     <Error Condition="Exists('$(PayloadDir)\MIGA Agent.exe')" Text="Staging contains MIGA Agent. Run build.ps1 to create native-only staging." />
     <Error Condition="Exists('$(PayloadDir)\config.json')" Text="Refusing to package a local config.json." />
   </Target>

@@ -9,10 +9,6 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $repoRoot = Split-Path $PSScriptRoot -Parent
-$agentPublishDir = Join-Path $repoRoot 'Build\MIGA Agent\publish'
-if (!(Test-Path -LiteralPath (Join-Path $agentPublishDir 'MIGA Agent.exe') -PathType Leaf)) {
-    throw "Publish MIGA Agent to '$agentPublishDir' before building the installer."
-}
 if (!$ServerBinary) {
     $ServerBinary = Join-Path $repoRoot 'Build\miga_server\bin\x64\Release\miga_server'
 }
@@ -47,9 +43,12 @@ foreach ($required in @('msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll'
 # Fresh staging prevents obsolete files from entering the package. No local configs are copied.
 $payload = Join-Path $repoRoot ('Build\MigaInstaller.Wix\staging\' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $payload -Force | Out-Null
+$agentPublishDir = Join-Path $payload 'Agent'
+& dotnet publish (Join-Path $repoRoot 'MIGA Agent\MIGA Agent.csproj') --configuration Release --runtime win-x64 --self-contained true /p:PublishSingleFile=true /p:IncludeNativeLibrariesForSelfExtract=true /p:EnableCompressionInSingleFile=false /p:PublishReadyToRun=true "/p:SolutionDir=$repoRoot\" --output $agentPublishDir
+if ($LASTEXITCODE -ne 0) { throw 'Agent publication failed.' }
 & $msbuild (Join-Path $repoRoot 'miga_client\miga_client.vcxproj') /t:Build /p:Configuration=Release /p:Platform=x64 "/p:SolutionDir=$repoRoot\" /m
 if ($LASTEXITCODE -ne 0) { throw 'Client build failed.' }
-# WiX reads the ready GUI publication directly; staging contains native files only.
+# WiX reads the fresh self-contained GUI publication separately from native files.
 $clientOutput = Join-Path $repoRoot 'Build\miga_client\bin\x64\Release'
 Copy-Item -LiteralPath (Join-Path $clientOutput 'miga_client.exe') -Destination $payload
 foreach ($driverFile in @('WinDivert.dll', 'WinDivert64.sys')) {
@@ -69,6 +68,10 @@ $pathProperty = $propsXml.CreateElement('PayloadDir')
 $pathProperty.SetAttribute('Condition', "'`$(PayloadDir)' == ''")
 $pathProperty.InnerText = $payload
 [void]$group.AppendChild($pathProperty)
+$agentProperty = $propsXml.CreateElement('AgentPublishDir')
+$agentProperty.SetAttribute('Condition', "'`$(AgentPublishDir)' == ''")
+$agentProperty.InnerText = $agentPublishDir
+[void]$group.AppendChild($agentProperty)
 $propsXml.Save($payloadProps)
 & dotnet build (Join-Path $PSScriptRoot 'MigaInstaller.Wix.wixproj') --configuration Release "/p:ProductVersion=$ProductVersion" "/p:PayloadDir=$payload" "/p:AgentPublishDir=$agentPublishDir"
 if ($LASTEXITCODE -ne 0) { throw 'WiX build failed.' }

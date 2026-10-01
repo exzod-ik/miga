@@ -33,19 +33,11 @@
   <Fragment>
     <ComponentGroup Id="Payload" Directory="INSTALLFOLDER">
       <Files Include="$(var.PayloadDir)\**">
+        <Exclude Files="$(var.PayloadDir)\Agent\**" />
         <Exclude Files="$(var.PayloadDir)\miga_client.exe" />
         <Exclude Files="$(var.PayloadDir)\**\config.json" />
         <Exclude Files="$(var.PayloadDir)\**\*.pdb" />
         <Exclude Files="$(var.PayloadDir)\**\*.log" />
-      </Files>
-      <Files Include="$(var.AgentPublishDir)\**">
-        <Exclude Files="$(var.AgentPublishDir)\MIGA Agent.exe" />
-        <Exclude Files="$(var.AgentPublishDir)\config.json" />
-        <Exclude Files="$(var.AgentPublishDir)\**\config.json" />
-        <Exclude Files="$(var.AgentPublishDir)\*.pdb" />
-        <Exclude Files="$(var.AgentPublishDir)\**\*.pdb" />
-        <Exclude Files="$(var.AgentPublishDir)\*.log" />
-        <Exclude Files="$(var.AgentPublishDir)\**\*.log" />
       </Files>
       <Component Id="ClientService" Guid="*" Bitness="always64">
         <File Id="ClientExe" Source="$(var.PayloadDir)\miga_client.exe" KeyPath="yes" />
