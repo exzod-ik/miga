@@ -5,7 +5,8 @@
 #include <thread>
 #include <atomic>
 #include <vector>
-#include <map>
+#include <tuple>
+#include <unordered_map>
 #include <mutex>
 #include <random>
 #include <arpa/inet.h>
@@ -14,6 +15,10 @@
 #include <linux/tcp.h>
 #include <linux/udp.h>
 #include "UdpPacketAssembler.h"
+#include "TcpConnectionState.h"
+#include "PortPool.h"
+#include "ConnectionKey.h"
+#include "InterfaceIpCache.h"
 
 #define SRC_PORT_START 1000
 #define SRC_PORT_END 65535
@@ -34,12 +39,14 @@ struct ClientInfo {
     uint32_t original_src_ip;
     uint16_t original_src_port;
     uint32_t original_dst_ip;
+    uint32_t remote_ip;
+    uint16_t remote_port;
+    TcpConnectionState tcpState;
     std::chrono::steady_clock::time_point last_used;
 };
 
 struct PortInfo {
     uint16_t port; // chosen_src_port
-    std::chrono::steady_clock::time_point last_used;
 };
 
 class ServerCore {
@@ -58,13 +65,14 @@ private:
     UdpPacketAssembler m_assembler;
 
     std::mt19937 m_rng;
-    std::uniform_int_distribution<uint16_t> m_portDist;
+    PortPool m_tcpPorts{SRC_PORT_START, SRC_PORT_END};
+    PortPool m_udpPorts{SRC_PORT_START, SRC_PORT_END};
 
-    std::map<std::tuple<uint16_t, uint8_t>, ClientInfo> m_forwardTable;
+    std::unordered_map<uint32_t, ClientInfo> m_forwardTable;
     std::mutex m_tableMutex;
 
     // orig src ip, orig src port, orig dst ip, orig dst port, orig proto
-    std::map<std::tuple<uint32_t, uint16_t, uint32_t, uint16_t, uint8_t>, PortInfo> m_connPortMap;
+    std::unordered_map<ConnectionKey, PortInfo, ConnectionKeyHash> m_connPortMap;
     std::mutex m_connMutex;
 
     bool InitSocket();
@@ -75,7 +83,7 @@ private:
     void ProcessClientUdpPacket(UdpPacketInfo* pkt);
     bool ValidateInnerIpPacket(const uint8_t* packet, size_t len, struct iphdr*& outIp, size_t& outIpHeaderLen);
     void HandleInternetPacket(const uint8_t* ipPacket, size_t ipLen, uint16_t dstPort);
-    uint32_t GetInterfaceIP();
+    InterfaceIpCache m_interfaceIp;
     void SendPacket(const uint8_t* packet, size_t len);
     void CleanupLoop();
     bool EnsureFirewallRules();

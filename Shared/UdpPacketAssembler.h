@@ -1,8 +1,12 @@
 #pragma once
 
 #include <queue>
+#include <atomic>
 #include <unordered_map>
 #include <mutex>
+#include <list>
+#include <chrono>
+#include <cstdint>
 
 struct UdpPacketInfo {
     uint32_t srcIp;
@@ -20,6 +24,7 @@ public:
     bool AddIpPacket(const uint8_t* packet, size_t len);
     UdpPacketInfo* GetCompleteUdpPacket();
     void ReleaseUdpPacket(UdpPacketInfo* pkt);
+    uint64_t TakeExpiredIncompleteCount() { return expiredIncomplete_.exchange(0, std::memory_order_relaxed); }
 
 private:
     struct FragmentedPacket {
@@ -34,6 +39,7 @@ private:
         uint32_t dstIp;
         std::chrono::steady_clock::time_point lastUpdate;
         bool completed; 
+        std::list<uint64_t>::iterator expiryPosition;
 
         FragmentedPacket();
     };
@@ -44,7 +50,9 @@ private:
     void CleanupTimeoutFragments();
 
     std::unordered_map<uint64_t, FragmentedPacket> fragments_;
+    std::list<uint64_t> fragmentOrder_;
     std::queue<UdpPacketInfo*> completedPackets_;
     std::mutex mtx_;
     uint32_t timeoutMs_;
+    std::atomic<uint64_t> expiredIncomplete_{0};
 };

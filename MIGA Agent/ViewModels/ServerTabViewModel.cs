@@ -34,7 +34,7 @@ namespace MIGA_Agent.ViewModels
         /// <summary>Сохранение всего клиентского конфига (реализует MainViewModel).</summary>
         private readonly Func<Task> _persistConfigAsync;
 
-        private const string RequiredServerVersion = "1.2.1";
+        private const string RequiredServerVersion = "1.2.4";
 
         /// <summary>Вкладка просит удалить сервер (вкладку).</summary>
         public event EventHandler? RemoveRequested;
@@ -62,7 +62,7 @@ namespace MIGA_Agent.ViewModels
             _restartLocalServiceAsync = restartLocalServiceAsync;
             _persistConfigAsync = persistConfigAsync;
 
-            LogLevels = new List<string> { "none", "error", "info", "debug" };
+            LogLevels = new List<string> { "none", "error", "warning", "info", "debug" };
 
             PropertyChanged += OnSelfPropertyChanged;
             RedirectProcesses.CollectionChanged += (_, _) => MarkDirty();

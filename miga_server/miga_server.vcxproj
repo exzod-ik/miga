@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|ARM">
@@ -127,6 +127,10 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="include\ServerCore.h" />
+    <ClInclude Include="include\TcpConnectionState.h" />
+    <ClInclude Include="include\PortPool.h" />
+    <ClInclude Include="include\ConnectionKey.h" />
+    <ClInclude Include="include\InterfaceIpCache.h" />
   </ItemGroup>
   <ItemGroup>
     <CopyFileToFolders Include="install.sh">
@@ -175,6 +179,7 @@
   </ItemGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM'">
     <ClCompile>
+      <CppLanguageStandard>c++17</CppLanguageStandard>
       <AdditionalIncludeDirectories>include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
@@ -186,6 +191,7 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM'">
     <ClCompile>
+      <CppLanguageStandard>c++17</CppLanguageStandard>
       <AdditionalIncludeDirectories>include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
@@ -197,6 +203,7 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">
     <ClCompile>
+      <CppLanguageStandard>c++17</CppLanguageStandard>
       <AdditionalIncludeDirectories>include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
@@ -208,6 +215,7 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM64'">
     <ClCompile>
+      <CppLanguageStandard>c++17</CppLanguageStandard>
       <AdditionalIncludeDirectories>include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
@@ -219,11 +227,12 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
+      <CppLanguageStandard>c++17</CppLanguageStandard>
       <AdditionalIncludeDirectories>$(RemoteHeadersRoot)/usr/include;$(RemoteHeadersRoot)/usr/include/x86_64-linux-gnu;$(RemoteHeadersRoot)/usr/include/c++/12;$(RemoteHeadersRoot)/usr/include/x86_64-linux-gnu/c++/12;$(SolutionDir)Shared;$(ProjectDir)include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <AdditionalDependencies>/usr/lib/x86_64-linux-gnu/libpthread.so.0;%(AdditionalDependencies)</AdditionalDependencies>
-      <AdditionalOptions>-std=c++17  -lpthread %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalOptions>-lpthread %(AdditionalOptions)</AdditionalOptions>
       <AdditionalLibraryDirectories>%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
     </Link>
     <PostBuildEvent>
@@ -232,11 +241,12 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
+      <CppLanguageStandard>c++17</CppLanguageStandard>
       <AdditionalIncludeDirectories>$(RemoteHeadersRoot)/usr/include;$(RemoteHeadersRoot)/usr/include/x86_64-linux-gnu;$(RemoteHeadersRoot)/usr/include/c++/12;$(RemoteHeadersRoot)/usr/include/x86_64-linux-gnu/c++/12;$(SolutionDir)Shared;$(ProjectDir)include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <AdditionalDependencies>/usr/lib/x86_64-linux-gnu/libpthread.so.0;%(AdditionalDependencies)</AdditionalDependencies>
-      <AdditionalOptions>-std=c++17  -lpthread %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalOptions>-lpthread %(AdditionalOptions)</AdditionalOptions>
       <AdditionalLibraryDirectories>%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
     </Link>
     <PostBuildEvent>
@@ -245,6 +255,7 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x86'">
     <ClCompile>
+      <CppLanguageStandard>c++17</CppLanguageStandard>
       <AdditionalIncludeDirectories>include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
@@ -256,6 +267,7 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x86'">
     <ClCompile>
+      <CppLanguageStandard>c++17</CppLanguageStandard>
       <AdditionalIncludeDirectories>include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>

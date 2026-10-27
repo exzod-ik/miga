@@ -1,6 +1,8 @@
 #include <ws2tcpip.h>
-#include <psapi.h>
+#include <iphlpapi.h>
 #include "PacketMonitor.h"
+#include "WindowsProcessIdentity.h"
+#include "PacketWarning.h"
 
 using namespace std;
 
@@ -203,11 +205,8 @@ static bool ExtractQName(const uint8_t* dnsHeader, size_t len, std::string& qnam
 bool PacketMonitor::OpenSocketHandle() {
     m_Socket = WinDivertOpen("protocol == 6 or protocol == 17", WINDIVERT_LAYER_SOCKET, 0, WINDIVERT_FLAG_SNIFF | WINDIVERT_FLAG_RECV_ONLY);
     if (m_Socket == INVALID_HANDLE_VALUE) {
-        m_Logger->log(LOGGER_LEVEL_ERROR, "Failed to open Socket layer: " + to_string(GetLastError()));
+        m_Logger->logLazy(LOGGER_LEVEL_ERROR, [&] { return "windivert_open_failed layer=SOCKET win32_error=" + to_string(GetLastError()); });
         return false;
-    }
-    if (!WinDivertSetParam(m_Socket, WINDIVERT_PARAM_QUEUE_TIME, 50)) {
-        m_Logger->log(LOGGER_LEVEL_INFO, "Failed to set queue time for Socket layer");
     }
     return true;
 }
@@ -217,270 +216,284 @@ bool PacketMonitor::OpenNetworkHandle() {
     const char* filter = "ip and (tcp or (udp.SrcPort != 67 and udp.DstPort != 67 and udp.SrcPort != 68 and udp.DstPort != 68))"; // the filter must be different from the socket layer, otherwise the winddivert freezes
     m_Network = WinDivertOpen(filter, WINDIVERT_LAYER_NETWORK, 0, 0);
     if (m_Network == INVALID_HANDLE_VALUE) {
-        m_Logger->log(LOGGER_LEVEL_ERROR, "Failed to open Network layer: " + to_string(GetLastError()));
+        m_Logger->logLazy(LOGGER_LEVEL_ERROR, [&] { return "windivert_open_failed layer=NETWORK win32_error=" + to_string(GetLastError()); });
         return false;
-    }
-    if (!WinDivertSetParam(m_Network, WINDIVERT_PARAM_QUEUE_TIME, 50)) {
-        m_Logger->log(LOGGER_LEVEL_INFO, "Failed to set queue time for Network layer");
     }
     return true;
 }
 
-// updating cache of process's ports. If can found process of the port - update last time enabled.
-void PacketMonitor::UpdateCache(uint16_t port, uint32_t pid, bool isTCP) {
-    unique_lock lock(cacheMutex);
-    auto& cache = isTCP ? tcpCache : udpCache;
-    auto it = cache.find(port);
-    if (it != cache.end() && it->second.pid == pid) {
-        it->second.lastSeen = chrono::steady_clock::now();
-    }
-    else if (it != cache.end() && pid == 4) { // SYSTEM overide
-        if (m_Logger->isEnabled())
-            m_Logger->log(LOGGER_LEVEL_DEBUG, "UpdateCache: ignoring SYSTEM event for port " + to_string(port) + " (already owned by PID " + to_string(it->second.pid) + ")");
-        return;
-    }
-    else {
-        cache[port] = { pid, chrono::steady_clock::now() };
-    }
-}
-
-// thread to listen socket layer
 void PacketMonitor::SocketThread() {
-    WINDIVERT_ADDRESS addr;
-    UINT packetLen;
-
     while (m_Running.load()) {
-        if (!WinDivertRecv(m_Socket, NULL, 0, &packetLen, &addr)) {
-            if (GetLastError() == ERROR_OPERATION_ABORTED) break;
+        WorkItem item;
+        UINT packetLength = 0;
+        if (!WinDivertRecv(m_Socket, nullptr, 0, &packetLength, &item.socket)) {
+            if (!m_Running.load() || GetLastError() == ERROR_OPERATION_ABORTED || GetLastError() == ERROR_NO_DATA)
+                break;
             continue;
         }
-
-        switch (addr.Event) {
-        // received bind (for udp) or connect (for tcp) event
-        case WINDIVERT_EVENT_SOCKET_BIND:
-        case WINDIVERT_EVENT_SOCKET_CONNECT:
-        {
-            uint32_t pid = addr.Socket.ProcessId;
-            uint16_t localPort = addr.Socket.LocalPort;
-            uint8_t protocol = addr.Socket.Protocol;
-
-            bool isTCP = (protocol == IPPROTO_TCP);
-            if (addr.Socket.ProcessId != 4 && m_Logger->isEnabled()) { // pid 4 - SYSTEM - ignoring
-                string eventType;
-                switch (addr.Event) {
-                case WINDIVERT_EVENT_SOCKET_BIND:
-                    eventType = "BIND";
-                    break;
-                case WINDIVERT_EVENT_SOCKET_CONNECT:
-                    eventType = "CONNECT";
-                    break;
-                default:
-                    eventType = "UNKNOWN";
-                }
-                m_Logger->log(LOGGER_LEVEL_DEBUG, "SocketThread " + eventType + " event received: process=" + GetProcessNameByPid(addr.Socket.ProcessId) + ", proto=" + (isTCP ? "TCP" : "UDP") + " local=" + IpToString(ntohl(*addr.Socket.LocalAddr)) + ":" + to_string(localPort));
-            }
-
-            UpdateCache(localPort, pid, isTCP);
-
-            // check if there are any pending packets for this port
-            unique_lock pendingLock(pendingMutex);
-            auto& pendingMap = isTCP ? pendingTCP : pendingUDP;
-            auto it = pendingMap.find(localPort);
-            if (it != pendingMap.end()) {
-                for (const auto& pkt : it->second) {
-                    ProcessPacket(pkt.packetData.data(), pkt.packetData.size(), pkt.addr, pid);
-                }
-                pendingMap.erase(it);
-            }
-            break;
+        const auto& addr = item.socket;
+        if (addr.IPv6 || (addr.Socket.Protocol != IPPROTO_TCP && addr.Socket.Protocol != IPPROTO_UDP)) continue;
+        if (addr.Event == WINDIVERT_EVENT_SOCKET_BIND || addr.Event == WINDIVERT_EVENT_SOCKET_CONNECT ||
+            addr.Event == WINDIVERT_EVENT_SOCKET_ACCEPT) {
+            auto process = GetProcessByPid(addr.Socket.ProcessId);
+            process->Name();
+            item.owner = make_shared<const SocketOwner>(
+                SocketOwner{ process, addr.Socket.EndpointId, addr.Timestamp });
         }
-
-        // received close tcp connection - clear cache
-        case WINDIVERT_EVENT_SOCKET_CLOSE:
-        {
-            uint16_t localPort = addr.Socket.LocalPort;
-            uint8_t protocol = addr.Socket.Protocol;
-            bool isTCP = (protocol == IPPROTO_TCP);
-            unique_lock lock(cacheMutex);
-            auto& cache = isTCP ? tcpCache : udpCache;
-            cache.erase(localPort);
-            break;
-        }
-        }
+        else if (addr.Event != WINDIVERT_EVENT_SOCKET_CLOSE) continue;
+        if (!m_Work.Push(move(item), &item.queuedAt)) break;
     }
 }
 
-// thread to listen network layer
+void PacketMonitor::ProcessSocketEvent(const WorkItem& item) {
+    const auto& addr = item.socket;
+    if (item.owner) {
+        const SocketTuple tuple{ addr.Socket.Protocol, addr.Socket.LocalAddr[0], addr.Socket.LocalPort,
+            addr.Socket.RemoteAddr[0], addr.Socket.RemotePort };
+        m_Routing.Observe(tuple, item.owner, chrono::steady_clock::now());
+    }
+    else if (addr.Event == WINDIVERT_EVENT_SOCKET_CLOSE) {
+        m_Routing.Close(addr.Socket.Protocol, addr.Socket.LocalPort, addr.Socket.EndpointId,
+            addr.Timestamp, chrono::steady_clock::now());
+        m_Routing.CloseSnapshot({ addr.Socket.Protocol, addr.Socket.LocalAddr[0], addr.Socket.LocalPort,
+            addr.Socket.RemoteAddr[0], addr.Socket.RemotePort }, addr.Socket.ProcessId,
+            addr.Timestamp, chrono::steady_clock::now());
+    }
+    DrainPending((uint32_t(addr.Socket.Protocol) << 16) | addr.Socket.LocalPort);
+}
+
 void PacketMonitor::NetworkThread() {
-
-#define NETWORK_BUFFER_SIZE 0xFFFF
-
-    vector<uint8_t> buffer(NETWORK_BUFFER_SIZE);
-    WINDIVERT_ADDRESS addr;
-    UINT packetLen;
-
     while (m_Running.load()) {
-        if (!WinDivertRecv(m_Network, buffer.data(), buffer.size(), &packetLen, &addr)) {
-            if (GetLastError() == ERROR_OPERATION_ABORTED) break;
+        unique_ptr<NetworkBatch> batch;
+        const auto waitStarted = chrono::steady_clock::now();
+        if (!m_FreeNetworkBatches.Pop(batch)) break;
+        m_Logger->recordDelay(NetworkWarning::ReceiveBufferWait, waitStarted);
+        if (!m_Running.load()) break;
+        batch->addressLength = static_cast<UINT>(sizeof(batch->addresses));
+        if (!WinDivertRecvEx(m_Network, batch->data.data(), static_cast<UINT>(batch->data.size()),
+            &batch->length, 0, batch->addresses.data(), &batch->addressLength, nullptr)) {
+            const auto error = GetLastError();
+            if (!m_Running.load() || error == ERROR_OPERATION_ABORTED || error == ERROR_NO_DATA) break;
+            m_Logger->logLazy(LOGGER_LEVEL_ERROR, [&] { return "network_receive_failed win32_error=" + to_string(error); });
+            if (!m_FreeNetworkBatches.Push(move(batch))) break;
+            unique_lock lock(m_StopMutex);
+            if (m_StopCondition.wait_for(lock, chrono::milliseconds(100), [&] { return !m_Running.load(); })) break;
             continue;
         }
+        batch->receivedAt = chrono::steady_clock::now();
+        WorkItem item;
+        item.batch = move(batch);
+        const auto queueStarted = chrono::steady_clock::now();
+        if (!m_Work.Push(move(item), &item.queuedAt)) break;
+        m_Logger->recordDelay(NetworkWarning::ReceiveEventQueueWait, queueStarted);
+    }
+}
 
-        WINDIVERT_IPHDR* ipHdr = nullptr;
-        WINDIVERT_IPV6HDR* ipv6Hdr = nullptr;
-        uint8_t protocol = 0;
-        WINDIVERT_TCPHDR* tcpHdr = nullptr;
-        WINDIVERT_UDPHDR* udpHdr = nullptr;
-        void* payload = nullptr;
-        uint32_t payloadLen = 0;
+void PacketMonitor::EventProcessThread() {
+    auto maintenance = chrono::steady_clock::now() + chrono::seconds(5);
+    while (m_Running.load()) {
+        WorkItem item;
+        size_t queueDepth = 0;
+        const auto result = m_Work.PopUntil(item, m_Pending.Deadline(maintenance), &queueDepth);
+        if (result == decltype(m_Work)::WaitResult::Closed || !m_Running.load()) break;
+        if (result == decltype(m_Work)::WaitResult::Item) {
+            if (m_Logger->isEnabled(LOGGER_LEVEL_WARNING))
+                m_EventQueueDelay.Record(item.reload ? EventQueueDelay::Type::Control :
+                    item.batch ? EventQueueDelay::Type::Network : EventQueueDelay::Type::Socket,
+                    chrono::steady_clock::now() - item.queuedAt, queueDepth);
+            if (item.reload) {
+                try {
+                    if (!m_Config->Load(item.reloadPath, true,
+                        [&](const vector<ServerConfig>& servers) { return InitUdpSocket(servers); })) item.reload->set_value(false);
+                    else {
 
-        if (!WinDivertHelperParsePacket(buffer.data(), packetLen,
-            &ipHdr, &ipv6Hdr, &protocol,
-            nullptr, nullptr,
-            &tcpHdr, &udpHdr,
-            &payload, &payloadLen,
-            nullptr, nullptr)) {
-            WinDivertSend(m_Network, buffer.data(), packetLen, nullptr, &addr);
-            continue;
-        }
-
-        // ipv6 not support right now
-        if (!ipHdr) {
-            WinDivertSend(m_Network, buffer.data(), packetLen, nullptr, &addr);
-            continue;
-        }
-
-        bool isTCP = (protocol == IPPROTO_TCP);
-        bool isUDP = (protocol == IPPROTO_UDP);
-        bool outbound = (addr.Outbound != 0);
-
-        uint16_t localPort = 0;
-        if (isTCP && tcpHdr) {
-            localPort = outbound ? ntohs(tcpHdr->SrcPort) : ntohs(tcpHdr->DstPort);
-        }
-        else if (isUDP && udpHdr) {
-            localPort = outbound ? ntohs(udpHdr->SrcPort) : ntohs(udpHdr->DstPort);
-        }
-        else {
-            // not support anything else protocol
-            WinDivertSend(m_Network, buffer.data(), packetLen, nullptr, &addr);
-            continue;
-        }
-
-        if (m_Logger->isEnabled()) {
-            string localAddr, remoteAddr, tcpFlagsInfo;
-            uint16_t remotePort = 0;
-            if (outbound) {
-                localAddr = IpToString(ipHdr->SrcAddr);
-                remoteAddr = IpToString(ipHdr->DstAddr);
-                remotePort = isTCP ? ntohs(tcpHdr->DstPort) : ntohs(udpHdr->DstPort);
-            }
-            else {
-                remoteAddr = IpToString(ipHdr->SrcAddr);
-                localAddr = IpToString(ipHdr->DstAddr);
-                remotePort = isTCP ? ntohs(tcpHdr->SrcPort) : ntohs(udpHdr->SrcPort);
-            }
-
-            if (isTCP && tcpHdr) {
-                tcpFlagsInfo = tcpFlagsWinDivert(tcpHdr);
-            }
-
-            m_Logger->log(LOGGER_LEVEL_DEBUG, "NetworkThread event: " + string(isTCP ? "TCP" : isUDP ? "UDP" : "?") +
-                " " + localAddr + ":" + to_string(localPort) + (outbound ? " -> " : " <- ")
-                + remoteAddr + ":" + to_string(remotePort) + (isTCP ? " flags=" + tcpFlagsInfo : ""));
-        }
-
-        if (outbound) {
-            uint32_t destIpHost = ntohl(ipHdr->DstAddr);
-            if (IsLocalIPv4(destIpHost)) { // ignoring local and intranet packets
-                if (m_Logger->isEnabled()) {
-                    m_Logger->log(LOGGER_LEVEL_DEBUG, "Skipping local destination: " + IpToString(ntohl(destIpHost)));
-                }
-                WinDivertSend(m_Network, buffer.data(), packetLen, nullptr, &addr);
-                continue;
-            }
-
-            // search pid by port and proto in cache
-            uint32_t pid = 0;
-            {
-                unique_lock lock(cacheMutex);
-                auto& cache = isTCP ? tcpCache : udpCache;
-                auto it = cache.find(localPort);
-                if (it != cache.end()) {
-                    pid = it->second.pid;
-                    it->second.lastSeen = chrono::steady_clock::now();
-                }
-            }
-
-            if (m_Logger->isEnabled())
-                m_Logger->log(LOGGER_LEVEL_DEBUG, "Looking for port " + to_string(localPort) + " in cache (isTCP=" + (isTCP ? "true" : "false") + ")");
-
-            if (pid != 0) { // pid was found
-                ProcessPacket(buffer.data(), packetLen, addr, pid);
-            }
-            else {
-                // pid is unknown; if this packet belongs to a flow we already tunneled,
-                // keep tunneling it instead of breaking the connection with a direct send
-                uint16_t remotePort = isTCP ? ntohs(tcpHdr->DstPort) : ntohs(udpHdr->DstPort);
-                FlowKey key{ protocol, ntohl(ipHdr->SrcAddr), localPort, ntohl(ipHdr->DstAddr), remotePort };
-                size_t flowServerIndex = 0;
-                uint32_t flowTranslatedDstIp = 0;
-                if (FindRedirectedFlow(key, flowServerIndex, flowTranslatedDstIp) &&
-                    flowServerIndex < m_Servers.size()) {
-                    m_Logger->log(LOGGER_LEVEL_DEBUG, "Continuation packet (PID not found) redirected via flow tracking.");
-                    RedirectPacket(buffer.data(), packetLen, addr, m_Servers[flowServerIndex], flowTranslatedDstIp);
-                    continue;
-                }
-
-                m_Logger->log(LOGGER_LEVEL_DEBUG, "PID not found");
-                // put packet to cache until socket event is occurs
-                unique_lock lock(pendingMutex);
-                auto& pendingMap = isTCP ? pendingTCP : pendingUDP;
-                PendingPacket pkt;
-                pkt.packetData.assign(buffer.data(), buffer.data() + packetLen);
-                pkt.addr = addr;
-                pkt.timestamp = chrono::steady_clock::now();
-                pendingMap[localPort].push_back(move(pkt));
-            }
-        }
-        else { // inbound
-            if (!ipHdr) { // ignoring ipv6
-                WinDivertSend(m_Network, buffer.data(), packetLen, nullptr, &addr);
-                continue;
-            }
-            ServerContext* server = nullptr;
-            for (auto& ctx : m_Servers) {
-                if (ipHdr->SrcAddr == ctx.serverAddr.sin_addr.s_addr) {
-                    server = &ctx;
-                    break;
-                }
-            }
-
-            if (server != nullptr && protocol == IPPROTO_UDP) {
-                // ip-packet from one of miga servers - adding fragment to its udp assembler
-                m_Logger->log(LOGGER_LEVEL_DEBUG, "Received packet from server #" + to_string(server->configIndex) + ".");
-                if (server->assembler->AddIpPacket(reinterpret_cast<const uint8_t*>(buffer.data()), packetLen)) {
-                    // we have at least 1 ready-made udp package - process it and release
-                    UdpPacketInfo* pkt;
-                    while ((pkt = server->assembler->GetCompleteUdpPacket()) != nullptr) {
-                        SendUdpPacketToMstcp(pkt, &addr, *server);
-                        server->assembler->ReleaseUdpPacket(pkt);
+                        m_Logger->enable(m_Config->GetLogLevel(), false);
+                        item.reload->set_value(true);
                     }
                 }
+                catch (...) { item.reload->set_exception(current_exception()); }
             }
-            else // some inbound packet not from any server - ignoring
-                WinDivertSend(m_Network, buffer.data(), packetLen, NULL, &addr);
+            else if (!item.batch) ProcessSocketEvent(item);
+            else {
+                auto& batch = item.batch;
+                m_Logger->recordDelay(NetworkWarning::BatchAge, batch->receivedAt);
+                const auto started = chrono::steady_clock::now();
+                const UINT count = batch->addressLength / sizeof(WINDIVERT_ADDRESS);
+                UINT offset = 0;
+                bool valid = batch->addressLength != 0 &&
+                    batch->addressLength % sizeof(WINDIVERT_ADDRESS) == 0 &&
+                    count <= batch->addresses.size() && batch->length <= batch->data.size();
+                for (UINT i = 0; valid && i < count && m_Running.load(); ++i) {
+                    const auto length = static_cast<UINT>(
+                        Ipv4BatchPacketLength(batch->data.data(), batch->length, offset));
+                    if (length == 0) { valid = false; break; }
+                    ProcessNetworkPacket(batch->data.data() + offset, length, batch->addresses[i]);
+                    offset += length;
+                }
+                if (m_Running.load() && (!valid || offset != batch->length))
+                    m_Logger->log(LOGGER_LEVEL_ERROR, "network_batch_invalid");
+                m_Logger->recordDelay(NetworkWarning::BatchProcessing, started);
+                if (!m_FreeNetworkBatches.Push(move(batch))) break;
+            }
+        }
+        const auto now = chrono::steady_clock::now();
+        if (now >= m_Pending.Deadline(maintenance)) DrainPending();
+        if (now >= maintenance) {
+            MaintainState();
+            maintenance = now + chrono::seconds(5);
+        }
+    }
+}
+void PacketMonitor::ProcessNetworkPacket(uint8_t* packet, UINT packetLen, WINDIVERT_ADDRESS addr) {
+    WINDIVERT_IPHDR* ipHdr = nullptr;
+    WINDIVERT_IPV6HDR* ipv6Hdr = nullptr;
+    uint8_t protocol = 0;
+    WINDIVERT_TCPHDR* tcpHdr = nullptr;
+    WINDIVERT_UDPHDR* udpHdr = nullptr;
+    void* payload = nullptr;
+    uint32_t payloadLen = 0;
+
+    if (!WinDivertHelperParsePacket(packet, packetLen,
+        &ipHdr, &ipv6Hdr, &protocol,
+        nullptr, nullptr,
+        &tcpHdr, &udpHdr,
+        &payload, &payloadLen,
+        nullptr, nullptr)) {
+        WinDivertSend(m_Network, packet, packetLen, nullptr, &addr);
+        return;
+    }
+
+    // ipv6 not support right now
+    if (!ipHdr) {
+        WinDivertSend(m_Network, packet, packetLen, nullptr, &addr);
+        return;
+    }
+
+    bool isTCP = (protocol == IPPROTO_TCP);
+    bool isUDP = (protocol == IPPROTO_UDP);
+    bool outbound = (addr.Outbound != 0);
+
+    uint16_t localPort = 0;
+    if (isTCP && tcpHdr) {
+        localPort = outbound ? ntohs(tcpHdr->SrcPort) : ntohs(tcpHdr->DstPort);
+    }
+    else if (isUDP && udpHdr) {
+        localPort = outbound ? ntohs(udpHdr->SrcPort) : ntohs(udpHdr->DstPort);
+    }
+    else {
+        // not support anything else protocol
+        WinDivertSend(m_Network, packet, packetLen, nullptr, &addr);
+        return;
+    }
+
+    if (m_Logger->isEnabled(LOGGER_LEVEL_DEBUG)) {
+        string localAddr, remoteAddr, tcpFlagsInfo;
+        uint16_t remotePort = 0;
+        if (outbound) {
+            localAddr = IpToString(ipHdr->SrcAddr);
+            remoteAddr = IpToString(ipHdr->DstAddr);
+            remotePort = isTCP ? ntohs(tcpHdr->DstPort) : ntohs(udpHdr->DstPort);
+        }
+        else {
+            remoteAddr = IpToString(ipHdr->SrcAddr);
+            localAddr = IpToString(ipHdr->DstAddr);
+            remotePort = isTCP ? ntohs(tcpHdr->SrcPort) : ntohs(udpHdr->SrcPort);
+        }
+
+        if (isTCP && tcpHdr) {
+            tcpFlagsInfo = tcpFlagsWinDivert(tcpHdr);
+        }
+
+        m_Logger->logLazy(LOGGER_LEVEL_DEBUG, [&] { return "packet_captured protocol=" + string(isTCP ? "TCP" : isUDP ? "UDP" : "unknown") +
+            " direction=" + (outbound ? "outbound" : "inbound") +
+            " local=" + localAddr + ":" + to_string(localPort) +
+            " remote=" + remoteAddr + ":" + to_string(remotePort) +
+            (isTCP ? " tcp_flags_text=" + LogValue(tcpFlagsInfo) : ""); });
+    }
+
+    if (outbound) {
+        uint32_t destIpHost = ntohl(ipHdr->DstAddr);
+        if (IsLocalIPv4(destIpHost)) { // ignoring local and intranet packets
+            if (m_Logger->isEnabled(LOGGER_LEVEL_DEBUG)) {
+                m_Logger->logLazy(LOGGER_LEVEL_DEBUG, [&] { return "packet_bypass reason=local_destination dst_ip=" + IpToString(ntohl(destIpHost)); });
+            }
+            WinDivertSend(m_Network, packet, packetLen, nullptr, &addr);
+            return;
+        }
+
+        if (isUDP) {
+            for (const auto& server : m_Servers) {
+                if (localPort == server.localPort && ipHdr->DstAddr == server.serverAddr.sin_addr.s_addr &&
+                    ntohs(udpHdr->DstPort) >= server.transport.portStart &&
+                    ntohs(udpHdr->DstPort) <= server.transport.portEnd) {
+                    WinDivertSend(m_Network, packet, packetLen, nullptr, &addr);
+                    return;
+                }
+            }
+        }
+        const auto now = chrono::steady_clock::now();
+        if (!ResolvePacket(packet, packetLen, addr, false, now)) {
+            PendingPacket pending;
+            pending.packetData.assign(packet, packet + packetLen);
+            pending.addr = addr;
+            pending.timestamp = now;
+            if (!m_Pending.Push(move(pending), now, (uint32_t(ipHdr->Protocol) << 16) | localPort))
+                RecordPacketWarning(packet, packetLen, "owner_queue_full", now, true, addr.Timestamp);
+        }
+    }    else { // inbound
+        if (!ipHdr) { // ignoring ipv6
+            WinDivertSend(m_Network, packet, packetLen, nullptr, &addr);
+            return;
+        }
+        ServerContext* server = nullptr;
+        for (auto& ctx : m_Servers) {
+            if (isUDP && ipHdr->SrcAddr == ctx.serverAddr.sin_addr.s_addr &&
+                ntohs(udpHdr->DstPort) == ctx.localPort &&
+                ntohs(udpHdr->SrcPort) >= ctx.transport.portStart &&
+                ntohs(udpHdr->SrcPort) <= ctx.transport.portEnd) {
+                server = &ctx;
+                break;
+            }
+        }
+
+        if (server != nullptr && protocol == IPPROTO_UDP) {
+            // ip-packet from one of miga servers - adding fragment to its udp assembler
+            m_Logger->logLazy(LOGGER_LEVEL_DEBUG, [&] { return "tunnel_packet_received server_index=" + to_string(server->configIndex); });
+            if (server->assembler->AddIpPacket(reinterpret_cast<const uint8_t*>(packet), packetLen)) {
+                // we have at least 1 ready-made udp package - process it and release
+                UdpPacketInfo* pkt;
+                while ((pkt = server->assembler->GetCompleteUdpPacket()) != nullptr) {
+                    SendUdpPacketToMstcp(pkt, &addr, *server);
+                    server->assembler->ReleaseUdpPacket(pkt);
+                }
+            }
+        }
+        else {
+            SocketTuple incoming;
+            bool syn = false;
+            if (ReadSocketPacket(packet, packetLen, incoming, syn)) {
+                std::swap(incoming.localIp, incoming.remoteIp);
+                std::swap(incoming.localPort, incoming.remotePort);
+                m_Routing.ObserveInbound(incoming, addr.Timestamp, chrono::steady_clock::now());
+            }
+            WinDivertSend(m_Network, packet, packetLen, NULL, &addr);
         }
     }
 }
 
 // place the assembled udp-packet into tcp/ip stack
 bool PacketMonitor::SendUdpPacketToMstcp(const UdpPacketInfo* pkt, WINDIVERT_ADDRESS* pAddr, ServerContext& server) {
-    if (!pkt || !pAddr) return false;
+    if (!pkt || !pAddr || !pkt->payload || pkt->payloadSize < 28 || pkt->payloadSize > 65535) return false;
 
-    m_Logger->log(LOGGER_LEVEL_DEBUG, "Processing a full udp packet...");
+    m_Logger->logLazy(LOGGER_LEVEL_DEBUG, [&] { return "tunnel_packet_processing_started"; });
 
     // decrypt payload - original tranmitted packet
     server.encryption.Decrypt(pkt->payload, pkt->payloadSize, htons(pkt->srcPort));
+    SocketTuple decoded;
+    bool syn = false;
+    if (!ReadSocketPacket(pkt->payload, pkt->payloadSize, decoded, syn)) return false;
+    const auto innerLength = static_cast<UINT>((UINT(pkt->payload[2]) << 8) | pkt->payload[3]);
+    const auto ipLength = size_t(pkt->payload[0] & 15) * 4;
 
     // clamp the mss in the remote's syn-ack so this host also sends small segments
     IP_HEADER* ip = reinterpret_cast<IP_HEADER*>(pkt->payload);
@@ -493,21 +506,21 @@ bool PacketMonitor::SendUdpPacketToMstcp(const UdpPacketInfo* pkt, WINDIVERT_ADD
     }
 
     // recalc checksums (server don't do it)
-    WinDivertHelperCalcChecksums(pkt->payload, pkt->payloadSize, pAddr, 0);
+    WinDivertHelperCalcChecksums(pkt->payload, innerLength, pAddr, 0);
 
     // check for dns response
     if (ip->protocol == IPPROTO_UDP) {
-        const UDP_HEADER* udp = reinterpret_cast<const UDP_HEADER*>(ip + 1);
+        const UDP_HEADER* udp = reinterpret_cast<const UDP_HEADER*>(pkt->payload + ipLength);
         uint16_t srcPort = ntohs(udp->src_port);
         if (srcPort == 53) {
             const uint8_t* dnsPayload = reinterpret_cast<const uint8_t*>(udp + 1);
-            size_t dnsLen = pkt->payloadSize - (sizeof(IP_HEADER) + sizeof(UDP_HEADER));
-            if (dnsLen > 0) {
+            size_t dnsLen = ntohs(udp->length) - sizeof(UDP_HEADER);
+            if (dnsLen >= 12) {
                 uint16_t queryId = ntohs(*reinterpret_cast<const uint16_t*>(dnsPayload));
                 // 3.x handle dns response - decide whether to inject into stack
                 bool inject = HandleDNSResponse(dnsPayload, dnsLen, server.configIndex, queryId);
                 if (!inject) {
-                    m_Logger->log(LOGGER_LEVEL_DEBUG, "Auxiliary DNS response dropped (qid=" + to_string(queryId) + ")");
+                    m_Logger->logLazy(LOGGER_LEVEL_DEBUG, [&] { return "dns_response_suppressed reason=auxiliary query_id=" + to_string(queryId); });
                     return false;
                 }
             }
@@ -522,14 +535,14 @@ bool PacketMonitor::SendUdpPacketToMstcp(const UdpPacketInfo* pkt, WINDIVERT_ADD
         uint32_t srcIpHost = ntohl(ip->src_ip);
         uint32_t originalIp = 0;
         if (LookupIpReverse(srcIpHost, server.configIndex, originalIp)) {
-            m_Logger->log(LOGGER_LEVEL_DEBUG, "Reverse translating src " + IpToString(srcIpHost) + " -> " + IpToString(originalIp));
+            m_Logger->logLazy(LOGGER_LEVEL_DEBUG, [&] { return "dns_address_translated direction=reverse src_ip=" + IpToString(srcIpHost) + " translated_ip=" + IpToString(originalIp); });
             ip->src_ip = htonl(originalIp);
-            WinDivertHelperCalcChecksums(pkt->payload, pkt->payloadSize, pAddr, 0);
+            WinDivertHelperCalcChecksums(pkt->payload, innerLength, pAddr, 0);
         }
     }
 
-    if (m_Logger->isEnabled()) {
-        uint8_t* ipPayload = reinterpret_cast<uint8_t*>(ip + 1);
+    if (m_Logger->isEnabled(LOGGER_LEVEL_DEBUG)) {
+        uint8_t* ipPayload = pkt->payload + ipLength;
 
         string proto, flags;
         uint16_t srcPort = 0;
@@ -553,7 +566,7 @@ bool PacketMonitor::SendUdpPacketToMstcp(const UdpPacketInfo* pkt, WINDIVERT_ADD
             TCP_HEADER* tcp = reinterpret_cast<TCP_HEADER*>(ipPayload);
             srcPort = ntohs(tcp->src_port);
             dstPort = ntohs(tcp->dst_port);
-            flags = " flags=" + tcpFlags(tcp->flags);
+            flags = " tcp_flags_text=" + LogValue(tcpFlags(tcp->flags));
 
         }
         break;
@@ -563,92 +576,126 @@ bool PacketMonitor::SendUdpPacketToMstcp(const UdpPacketInfo* pkt, WINDIVERT_ADD
             dstPort = 0;
             flags = "";
         }
-        m_Logger->log(LOGGER_LEVEL_INFO, "RECEIVED: " + proto + " " + srcIp + ":" + to_string(srcPort) + " -> " + dstIp + ":" + to_string(dstPort) + flags + " size=" + to_string(pkt->payloadSize));
+        m_Logger->logLazy(LOGGER_LEVEL_DEBUG, [&] { return "packet_received protocol=" + proto + " src=" + srcIp + ":" + to_string(srcPort) + " dst=" + dstIp + ":" + to_string(dstPort) + flags + " size=" + to_string(pkt->payloadSize); });
     }
 
+    decoded = { decoded.protocol, ntohl(ip->dst_ip), decoded.remotePort,
+        ntohl(ip->src_ip), decoded.localPort };
+    m_Routing.ObserveInbound(decoded, pAddr->Timestamp, chrono::steady_clock::now(), server.id);
     UINT sended = 0;
-    return WinDivertSend(m_Network, pkt->payload, pkt->payloadSize, &sended, pAddr);
+    return WinDivertSend(m_Network, pkt->payload, innerLength, &sended, pAddr);
 }
 
-// thread for clearing expired cache
-void PacketMonitor::CacheCleanupThread() {
-    const auto TTL_TCP = chrono::minutes(124); // time to life tcp port cache - RFC 5382
-    const auto TTL_UDP = chrono::minutes(20);
-    const auto PACKET_TTL = chrono::seconds(5); // time to life packet in queue
-    const auto FLOW_TTL = chrono::minutes(10); // time to life tracked redirected flows
-
-    while (m_Running.load()) {
-        this_thread::sleep_for(chrono::seconds(5));
-        auto now = chrono::steady_clock::now();
-
-        unique_lock lock(cacheMutex);
-
-        // Clean TCP cache
-        for (auto it = tcpCache.begin(); it != tcpCache.end();) {
-            if ((now - it->second.lastSeen) > TTL_TCP) {
-                if (m_Logger->isEnabled())
-                    m_Logger->log(LOGGER_LEVEL_DEBUG, "PID " + to_string(it->second.pid) + " was removed from TCP cache.");
-                it = tcpCache.erase(it);
-            }
-            else {
-                ++it;
-            }
-        }
-
-        // Clean UDP cache
-        for (auto it = udpCache.begin(); it != udpCache.end();) {
-            if ((now - it->second.lastSeen) > TTL_UDP) {
-                if (m_Logger->isEnabled())
-                    m_Logger->log(LOGGER_LEVEL_DEBUG, "PID " + to_string(it->second.pid) + " was removed from UDP cache.");
-                it = udpCache.erase(it);
-            }
-            else {
-                ++it;
-            }
-        }
-
-        // Clean packet queue
-        unique_lock lockTTL(pendingMutex);
-        auto cleanPendingQueue = [&](auto& pendingMap) {
-            for (auto it = pendingMap.begin(); it != pendingMap.end();) {
-                bool isStale = false;
-                for (const auto& pkt : it->second) {
-                    if ((now - pkt.timestamp) > PACKET_TTL) {
-                        isStale = true;
-                        break;
-                    }
-                }
-                if (isStale) {
-                    for (const auto& pkt : it->second) {
-                        WinDivertSend(m_Network, pkt.packetData.data(), (UINT)pkt.packetData.size(), nullptr, &pkt.addr);
-                    }
-                    it = pendingMap.erase(it);
-                }
-                else {
-                    ++it;
-                }
-            }
-            };
-        cleanPendingQueue(pendingTCP);
-        cleanPendingQueue(pendingUDP);
-
-        // Clean tracked redirected flows
-        {
-            unique_lock lockFlow(m_FlowMutex);
-            for (auto it = m_RedirectedFlows.begin(); it != m_RedirectedFlows.end();) {
-                if ((now - it->second.lastSeen) > FLOW_TTL) {
-                    it = m_RedirectedFlows.erase(it);
-                }
-                else {
-                    ++it;
-                }
-            }
-        }
-
-        CleanupDnsState();
+bool PacketMonitor::ResolvePacket(const uint8_t* packet, UINT length, const WINDIVERT_ADDRESS& addr,
+    bool deadline, chrono::steady_clock::time_point receivedAt) {
+    SocketTuple tuple;
+    bool syn = false;
+    if (!ReadSocketPacket(packet, length, tuple, syn)) {
+        RecordPacketWarning(packet, length, "invalid_packet", receivedAt, true, addr.Timestamp);
+        return true;
     }
+    const auto now = chrono::steady_clock::now();
+    const auto decision = deadline ? m_Routing.Expire(tuple, addr.Timestamp, syn, now) :
+        m_Routing.Resolve(tuple, addr.Timestamp, syn, now);
+    switch (decision.action) {
+    case RoutingState::Action::AwaitOwner:
+        return false;
+    case RoutingState::Action::SelectRoute:
+        ProcessPacket(packet, length, addr, decision.owner);
+        return true;
+    case RoutingState::Action::Send:
+        if (!decision.owner && string_view(decision.reason) == "owner_deadline_direct")
+            RecordPacketWarning(packet, length, decision.reason, receivedAt, false, addr.Timestamp);
+        SendRoute(packet, length, addr, decision.route);
+        return true;
+    case RoutingState::Action::Drop:
+        RecordPacketWarning(packet, length, decision.reason, receivedAt, true, addr.Timestamp);
+        return true;
+    }
+    return true;
 }
 
+void PacketMonitor::SendRoute(const uint8_t* packet, UINT length, const WINDIVERT_ADDRESS& addr,
+    const FlowRoute& route) {
+    if (route.kind == FlowRoute::Kind::Direct) {
+        WinDivertSend(m_Network, packet, length, nullptr, &addr);
+        return;
+    }
+    for (auto& server : m_Servers) {
+        if (server.id == route.serverId && route.kind == FlowRoute::Kind::Tunnel) {
+            RedirectPacket(packet, length, addr, server, route.translatedIp);
+            return;
+        }
+    }
+    RecordPacketWarning(packet, length, "route_server_unavailable", chrono::steady_clock::now(), true, addr.Timestamp);
+}
+
+void PacketMonitor::DrainPending(uint32_t key) {
+    const auto now = chrono::steady_clock::now();
+    const auto resolve = [&](PendingPacket& packet, bool expired) {
+        return ResolvePacket(packet.packetData.data(), static_cast<UINT>(packet.packetData.size()),
+            packet.addr, expired, packet.timestamp);
+    };
+    if (key != 0) m_Pending.DrainMatching(key, now, resolve);
+    else m_Pending.DrainExpired(now, resolve);
+}
+
+void PacketMonitor::RecordPacketWarning(const uint8_t* packet, UINT length, const char* reason,
+    chrono::steady_clock::time_point receivedAt, bool dropped, int64_t packetTimestampQpc) {
+    m_Logger->recordWarning(dropped ? NetworkWarning::RoutingDrop : NetworkWarning::PendingPidFallback);
+    if (!m_Logger->isEnabled(LOGGER_LEVEL_WARNING)) return;
+    if (m_WarningSampleCount == m_WarningSamples.size()) { ++m_OmittedWarnings; return; }
+    auto& sample = m_WarningSamples[m_WarningSampleCount++];
+    sample.packetTimestampQpc = packetTimestampQpc;
+    sample.size = length;
+    sample.captured = (std::min)(size_t(length), sample.header.size());
+    memcpy(sample.header.data(), packet, sample.captured);
+    sample.ownerLookup = reason;
+    sample.ageMs = chrono::duration_cast<chrono::milliseconds>(chrono::steady_clock::now() - receivedAt).count();
+}
+
+void PacketMonitor::MaintainState() {
+    m_Routing.Cleanup(chrono::steady_clock::now());
+    m_ProcessNames.Cleanup();
+    CleanupDnsState();
+    for (size_t i = 0; i < m_WarningSampleCount; ++i)
+        m_Logger->logLazy(LOGGER_LEVEL_WARNING, [&] {
+            return "routing_packet " + FormatPacketWarning(m_WarningSamples[i]);
+        });
+    if (m_OmittedWarnings)
+        m_Logger->logLazy(LOGGER_LEVEL_WARNING, [&] {
+            return "routing_packet omitted=" + to_string(m_OmittedWarnings);
+        });
+    m_WarningSampleCount = m_OmittedWarnings = 0;
+    for (auto& server : m_Servers)
+        m_Logger->recordWarning(NetworkWarning::IncompleteFragments, 0, server.assembler->TakeExpiredIncompleteCount());
+    m_EventQueueDelay.Flush([&](const string& message) {
+        m_Logger->log(LOGGER_LEVEL_WARNING, message);
+    });
+    m_Logger->flushWarnings();
+}
+
+bool PacketMonitor::ReloadConfig(const string& path) {
+    if (!m_Running.load()) return false;
+    WorkItem item;
+    item.reloadPath = path;
+    item.reload = make_shared<promise<bool>>();
+    auto result = item.reload->get_future();
+    if (!m_Work.Push(move(item), &item.queuedAt)) return false;
+    try { return result.get(); }
+    catch (const exception&) { return false; }
+}
+
+void PacketMonitor::ClearDnsState() {
+    m_ActualDns.clear();
+    m_AuxiliaryDns.clear();
+    m_ActualToAuxiliary.clear();
+    m_DynamicIpMap.clear();
+    m_DynamicIpReverse.clear();
+    m_PendingDynamicIp.clear();
+    m_ActualIpByQuery.clear();
+    m_DnsTimestamp.clear();
+}
 PacketMonitor::PacketMonitor(ConfigManager* config, Logger* logger)
     : m_Config(config)
     , m_Logger(logger)
@@ -660,10 +707,65 @@ PacketMonitor::PacketMonitor(ConfigManager* config, Logger* logger)
     if (!m_Config || !m_Logger) {
         throw invalid_argument("ConfigManager and Logger must not be null");
     }
+    m_Routing.SetEvictionHandler([this](const SocketOwnerTable::Eviction& entry) {
+        m_Logger->logLazy(LOGGER_LEVEL_ERROR, [&] { return entry.Describe(); });
+    });
+    m_Routing.SetOwnerChangeHandler([this](const SocketOwnerTable::Change& change) {
+        if (change.state.owner->process->pid == m_ourPid) return;
+        m_Logger->logLazy(LOGGER_LEVEL_INFO, [&] { return change.Describe(); });
+    });
 }
 
 PacketMonitor::~PacketMonitor() {
     Stop();
+}
+
+void PacketMonitor::SeedExistingSockets() {
+    LARGE_INTEGER captured;
+    QueryPerformanceCounter(&captured);
+    uint64_t id = 0;
+    const auto seed = [&](const SocketTuple& tuple, DWORD pid) {
+        auto process = GetProcessByPid(pid);
+        if (!process->isAlive()) return;
+        process->Name();
+        auto owner = make_shared<const SocketOwner>(SocketOwner{ process, ++id, captured.QuadPart, true });
+        const auto now = chrono::steady_clock::now();
+        m_Routing.Observe(tuple, owner, now);
+        if (tuple.protocol == IPPROTO_TCP) m_Routing.Commit(tuple, captured.QuadPart, owner, {}, now);
+    };
+    vector<uint8_t> buffer;
+    DWORD size = 0;
+    DWORD error = GetExtendedTcpTable(nullptr, &size, FALSE, AF_INET, TCP_TABLE_OWNER_PID_ALL, 0);
+    for (int attempt = 0; error == ERROR_INSUFFICIENT_BUFFER && attempt < 4; ++attempt) {
+        buffer.resize(size);
+        error = GetExtendedTcpTable(buffer.data(), &size, FALSE, AF_INET, TCP_TABLE_OWNER_PID_ALL, 0);
+    }
+    if (error == NO_ERROR && !buffer.empty()) {
+        auto* table = reinterpret_cast<MIB_TCPTABLE_OWNER_PID*>(buffer.data());
+        for (DWORD i = 0; i < table->dwNumEntries; ++i) {
+            const auto& row = table->table[i];
+            if (row.dwState == MIB_TCP_STATE_LISTEN || row.dwOwningPid == 0) continue;
+            seed({ IPPROTO_TCP, ntohl(row.dwLocalAddr), ntohs(static_cast<u_short>(row.dwLocalPort)),
+                ntohl(row.dwRemoteAddr), ntohs(static_cast<u_short>(row.dwRemotePort)) }, row.dwOwningPid);
+        }
+    }
+    else m_Logger->log(LOGGER_LEVEL_WARNING, "socket_snapshot_failed protocol=TCP win32_error=" + to_string(error));
+    buffer.clear();
+    size = 0;
+    error = GetExtendedUdpTable(nullptr, &size, FALSE, AF_INET, UDP_TABLE_OWNER_PID, 0);
+    for (int attempt = 0; error == ERROR_INSUFFICIENT_BUFFER && attempt < 4; ++attempt) {
+        buffer.resize(size);
+        error = GetExtendedUdpTable(buffer.data(), &size, FALSE, AF_INET, UDP_TABLE_OWNER_PID, 0);
+    }
+    if (error == NO_ERROR && !buffer.empty()) {
+        auto* table = reinterpret_cast<MIB_UDPTABLE_OWNER_PID*>(buffer.data());
+        for (DWORD i = 0; i < table->dwNumEntries; ++i) {
+            const auto& row = table->table[i];
+            seed({ IPPROTO_UDP, ntohl(row.dwLocalAddr), ntohs(static_cast<u_short>(row.dwLocalPort)), 0, 0 },
+                row.dwOwningPid);
+        }
+    }
+    else m_Logger->log(LOGGER_LEVEL_WARNING, "socket_snapshot_failed protocol=UDP win32_error=" + to_string(error));
 }
 
 bool PacketMonitor::Start() {
@@ -676,23 +778,31 @@ bool PacketMonitor::Start() {
     random_device rd;
     m_rng.seed(rd());
 
-    if (!InitUdpSocket()) {
-        m_Logger->log(LOGGER_LEVEL_ERROR, "Failed to initialize UDP socket");
+    if (!InitUdpSocket(m_Config->GetServers())) {
+        m_Logger->logLazy(LOGGER_LEVEL_ERROR, [&] { return "transport_init_failed protocol=UDP"; });
         Stop();
         return false;
     }
 
-    if (!InitWinDivert()) {
-        m_Logger->log(LOGGER_LEVEL_ERROR, "Failed to initialize WinDivert");
+    if (!OpenSocketHandle()) {
+        m_Logger->logLazy(LOGGER_LEVEL_ERROR, [&] { return "windivert_init_failed"; });
         Stop();
         return false;
     }
+
+    m_Work.Reset();
+    m_FreeNetworkBatches.Reset();
+    for (size_t i = 0; i < NetworkBufferCount; ++i)
+        m_FreeNetworkBatches.Push(make_unique<NetworkBatch>());
 
     m_SocketThread = thread(&PacketMonitor::SocketThread, this);
+    SeedExistingSockets();
+    if (!OpenNetworkHandle()) { Stop(); return false; }
+    m_EventProcessThread = thread(&PacketMonitor::EventProcessThread, this);
     m_NetworkThread = thread(&PacketMonitor::NetworkThread, this);
-    m_CleanupThread = thread(&PacketMonitor::CacheCleanupThread, this);
 
-    m_Logger->log(LOGGER_LEVEL_INFO, "PacketMonitor started successfully");
+
+    m_Logger->logLazy(LOGGER_LEVEL_INFO, [&] { return "packet_monitor_started"; });
     return true;
 }
 
@@ -701,116 +811,142 @@ void PacketMonitor::Stop() {
         return;
     }
 
-    m_Running.store(false);
+    {
+        lock_guard lock(m_StopMutex);
+        m_Running.store(false);
+    }
+    m_StopCondition.notify_all();
+    m_Work.Close();
+    m_FreeNetworkBatches.Close();
+
+    if (m_Socket != INVALID_HANDLE_VALUE)
+        WinDivertShutdown(m_Socket, WINDIVERT_SHUTDOWN_RECV);
+    if (m_Network != INVALID_HANDLE_VALUE)
+        WinDivertShutdown(m_Network, WINDIVERT_SHUTDOWN_RECV);
+
+    if (m_NetworkThread.joinable()) m_NetworkThread.join();
+    if (m_SocketThread.joinable()) m_SocketThread.join();
+    if (m_EventProcessThread.joinable()) m_EventProcessThread.join();
+
 
     CloseUdpSockets();
-
     if (m_Socket != INVALID_HANDLE_VALUE) {
-        WinDivertShutdown(m_Socket, WINDIVERT_SHUTDOWN_RECV);
         WinDivertClose(m_Socket);
         m_Socket = INVALID_HANDLE_VALUE;
     }
     if (m_Network != INVALID_HANDLE_VALUE) {
-        WinDivertShutdown(m_Network, WINDIVERT_SHUTDOWN_RECV);
         WinDivertClose(m_Network);
         m_Network = INVALID_HANDLE_VALUE;
     }
+    m_Work.Reset();
+    m_FreeNetworkBatches.Reset();
 
-    // wait for threads shutdown
-    if (m_SocketThread.joinable()) m_SocketThread.join();
-    if (m_NetworkThread.joinable()) m_NetworkThread.join();
-    if (m_CleanupThread.joinable()) m_CleanupThread.join();
+    m_Routing.Clear();
+    ClearDnsState();
+    m_Pending.Clear();
+    m_EventQueueDelay.Clear();
 
-    m_Logger->log(LOGGER_LEVEL_INFO, "PacketMonitor stopped");
+    m_ProcessNames.Clear();
+
+    m_Logger->logLazy(LOGGER_LEVEL_INFO, [&] { return "packet_monitor_stopped"; });
 }
 
-bool PacketMonitor::InitWinDivert() {
-    if (!OpenSocketHandle()) return false;
-    if (!OpenNetworkHandle()) return false;
-
-    m_Logger->log(LOGGER_LEVEL_INFO, "WinDivert initialized");
-    return true;
-}
 
 // initilize udp socket to send datagrams to each configured server
-bool PacketMonitor::InitUdpSocket() {
-    WSADATA wsaData;
-    static bool wsaInitialized = false;
-
-    if (!wsaInitialized) {
-        int result = WSAStartup(MAKEWORD(2, 2), &wsaData);
-        if (result != 0) {
-            m_Logger->log(LOGGER_LEVEL_ERROR, "WSAStartup failed: " + to_string(result));
-            return false;
-        }
-        wsaInitialized = true;
-    }
-
-    const vector<ServerConfig>& servers = m_Config->GetServers();
-    m_Servers.clear();
-    m_Servers.resize(servers.size());
-
+bool PacketMonitor::InitUdpSocket(const vector<ServerConfig>& servers) {
+    static const int winsock = [] { WSADATA data; return WSAStartup(MAKEWORD(2, 2), &data); }();
+    if (winsock != 0) return false;
+    vector<ServerContext> next(servers.size());
+    vector<size_t> reuse(servers.size(), m_Servers.size());
+    vector<size_t> oldToNew(m_Servers.size(), servers.size());
+    const auto cancel = [&] {
+        for (auto& server : next)
+            if (server.udpSocket != INVALID_SOCKET) closesocket(server.udpSocket);
+        return false;
+    };
     for (size_t i = 0; i < servers.size(); ++i) {
-        const ServerConfig& cfg = servers[i];
-
-        ServerContext& ctx = m_Servers[i];
-        ctx.configIndex = i;
-        ctx.udpSocket = INVALID_SOCKET;
-        memset(&ctx.serverAddr, 0, sizeof(ctx.serverAddr));
-        ctx.assembler = make_unique<UdpPacketAssembler>();
-
-        if (!ctx.encryption.Initialize(cfg.xorKeyBase64, cfg.swapKeyBase64)) {
-            m_Logger->log(LOGGER_LEVEL_ERROR, "Failed to initialize Encryption for server #" + to_string(i));
-            CloseUdpSockets();
-            return false;
+        for (size_t j = 0; j < m_Servers.size(); ++j) {
+            if (oldToNew[j] == servers.size() && servers[i].SameTransport(m_Servers[j].transport)) {
+                reuse[i] = j;
+                oldToNew[j] = i;
+                break;
+            }
         }
-
-        ctx.udpSocket = socket(AF_INET, SOCK_DGRAM, 0);
-        if (ctx.udpSocket == INVALID_SOCKET) {
-            m_Logger->log(LOGGER_LEVEL_ERROR, "Failed to create UDP socket for server #" + to_string(i) + ", error: " + to_string(WSAGetLastError()));
-            CloseUdpSockets();
-            return false;
-        }
-
-        if (cfg.serverIP.empty()) {
-            m_Logger->log(LOGGER_LEVEL_ERROR, "Server IP not configured for server #" + to_string(i));
-            CloseUdpSockets();
-            return false;
-        }
-
-        ctx.serverAddr.sin_family = AF_INET;
-        struct in_addr addr;
-        if (inet_pton(AF_INET, cfg.serverIP.c_str(), &addr) == 1) {
-            ctx.serverAddr.sin_addr.s_addr = addr.s_addr;
-        }
-
-        if (ctx.serverAddr.sin_addr.s_addr == INADDR_NONE) {
-            struct addrinfo hints, * result = nullptr;
-            memset(&hints, 0, sizeof(hints));
+        if (reuse[i] != m_Servers.size()) continue;
+        auto& context = next[i];
+        context.configIndex = i;
+        context.id = m_NextServerId++;
+        context.transport.serverIP = servers[i].serverIP;
+        context.transport.portStart = servers[i].portStart;
+        context.transport.portEnd = servers[i].portEnd;
+        context.transport.xorKeyBase64 = servers[i].xorKeyBase64;
+        context.transport.swapKeyBase64 = servers[i].swapKeyBase64;
+        context.assembler = make_unique<UdpPacketAssembler>();
+        if (!context.encryption.Initialize(servers[i].xorKeyBase64, servers[i].swapKeyBase64)) return cancel();
+        context.serverAddr = {};
+        context.serverAddr.sin_family = AF_INET;
+        if (inet_pton(AF_INET, servers[i].serverIP.c_str(), &context.serverAddr.sin_addr) != 1) {
+            addrinfo hints{};
             hints.ai_family = AF_INET;
             hints.ai_socktype = SOCK_DGRAM;
-            hints.ai_protocol = IPPROTO_UDP;
-
-            int ret = getaddrinfo(cfg.serverIP.c_str(), nullptr, &hints, &result);
-            if (ret != 0) {
-                m_Logger->log(LOGGER_LEVEL_ERROR, "Failed to resolve server address: " + cfg.serverIP);
-                closesocket(ctx.udpSocket);
-                CloseUdpSockets();
-                return false;
-            }
-
-            sockaddr_in* resolved = reinterpret_cast<sockaddr_in*>(result->ai_addr);
-            memcpy(&ctx.serverAddr, resolved, sizeof(sockaddr_in));
-            freeaddrinfo(result);
+            addrinfo* address = nullptr;
+            if (getaddrinfo(servers[i].serverIP.c_str(), nullptr, &hints, &address) != 0) return cancel();
+            context.serverAddr = *reinterpret_cast<sockaddr_in*>(address->ai_addr);
+            freeaddrinfo(address);
         }
-
-        m_Logger->log(LOGGER_LEVEL_INFO, "UDP socket initialized for server #" + to_string(i) + ": " +
-            cfg.serverIP + " ports " + to_string(cfg.portStart) + "-" + to_string(cfg.portEnd));
+        context.udpSocket = socket(AF_INET, SOCK_DGRAM, 0);
+        if (context.udpSocket == INVALID_SOCKET) return cancel();
+        BOOL exclusive = TRUE;
+        if (setsockopt(context.udpSocket, SOL_SOCKET, SO_EXCLUSIVEADDRUSE,
+            reinterpret_cast<const char*>(&exclusive), sizeof(exclusive)) != 0) return cancel();
+        sockaddr_in local{};
+        local.sin_family = AF_INET;
+        if (::bind(context.udpSocket, reinterpret_cast<sockaddr*>(&local), sizeof(local)) != 0) return cancel();
+        int length = sizeof(local);
+        if (getsockname(context.udpSocket, reinterpret_cast<sockaddr*>(&local), &length) != 0) return cancel();
+        context.localPort = ntohs(local.sin_port);
     }
-
+    const auto remapValues = [&](auto& map) {
+        for (auto it = map.begin(); it != map.end();) {
+            if (it->second >= oldToNew.size() || oldToNew[it->second] == servers.size()) it = map.erase(it);
+            else { it->second = oldToNew[it->second]; ++it; }
+        }
+    };
+    const auto remapKeys = [&](auto& map) {
+        std::decay_t<decltype(map)> updated;
+        for (const auto& item : map) {
+            const auto old = static_cast<uint32_t>(item.first);
+            if (old < oldToNew.size() && oldToNew[old] != servers.size())
+                updated.emplace((item.first & 0xFFFFFFFF00000000ull) | oldToNew[old], item.second);
+        }
+        map = move(updated);
+    };
+    remapValues(m_ActualDns);
+    remapValues(m_AuxiliaryDns);
+    remapKeys(m_DynamicIpMap);
+    remapKeys(m_DynamicIpReverse);
+    for (auto& query : m_PendingDynamicIp) {
+        unordered_map<size_t, uint32_t> updated;
+        for (const auto& item : query.second)
+            if (item.first < oldToNew.size() && oldToNew[item.first] != servers.size())
+                updated.emplace(oldToNew[item.first], item.second);
+        query.second = move(updated);
+    }
+    unordered_set<size_t> ids;
+    for (size_t i = 0; i < next.size(); ++i) {
+        if (reuse[i] != m_Servers.size()) {
+            next[i] = move(m_Servers[reuse[i]]);
+            m_Servers[reuse[i]].udpSocket = INVALID_SOCKET;
+            next[i].configIndex = i;
+        }
+        ids.insert(next[i].id);
+    }
+    for (auto& old : m_Servers)
+        if (old.udpSocket != INVALID_SOCKET) closesocket(old.udpSocket);
+    m_Servers = move(next);
+    m_Routing.RetainServers(ids);
     return true;
 }
-
 void PacketMonitor::CloseUdpSockets() {
     for (auto& server : m_Servers) {
         if (server.udpSocket != INVALID_SOCKET) {
@@ -830,11 +966,23 @@ PacketMonitor::ServerContext* PacketMonitor::FindServerContext(const ServerConfi
     return nullptr;
 }
 
-void PacketMonitor::CleanupWinDivert() {
-}
 
 // process received outbound packet
-void PacketMonitor::ProcessPacket(const uint8_t* packet, UINT packetLen, const WINDIVERT_ADDRESS& addr, uint32_t pid) {
+void PacketMonitor::ProcessPacket(const uint8_t* packet, UINT packetLen, const WINDIVERT_ADDRESS& addr,
+    const shared_ptr<const SocketOwner>& owner) {
+    const auto& process = owner->process;
+    SocketTuple tuple;
+    bool syn = false;
+    if (!ReadSocketPacket(packet, packetLen, tuple, syn)) return;
+    const auto commit = [&](FlowRoute route) {
+        if (!m_Routing.Commit(tuple, addr.Timestamp, owner, route, chrono::steady_clock::now())) {
+            RecordPacketWarning(packet, packetLen, "flow_capacity_or_stale_generation",
+                chrono::steady_clock::now(), true, addr.Timestamp);
+            return;
+        }
+        SendRoute(packet, packetLen, addr, route);
+    };
+    const auto pid = process->pid;
     if (pid == 4 || pid == m_ourPid) { // SYSTEM or own
         WinDivertSend(m_Network, packet, packetLen, NULL, &addr);
         return;
@@ -843,18 +991,18 @@ void PacketMonitor::ProcessPacket(const uint8_t* packet, UINT packetLen, const W
     const IP_HEADER* iph = reinterpret_cast<const IP_HEADER*>(packet);
 
     if (iph->protocol == IPPROTO_UDP) {
-        const UDP_HEADER* udph = reinterpret_cast<const UDP_HEADER*>(packet + sizeof(IP_HEADER));
+        const UDP_HEADER* udph = reinterpret_cast<const UDP_HEADER*>(packet + ((packet[0] & 15) * 4));
         uint16_t dstPort = ntohs(udph->dst_port);
         if (addr.Outbound && dstPort == 53) { // outbound DNS query
-            const uint8_t* udpPayload = packet + sizeof(IP_HEADER) + sizeof(UDP_HEADER);
-            size_t udpPayloadLen = packetLen - (sizeof(IP_HEADER) + sizeof(UDP_HEADER));
+            const uint8_t* udpPayload = packet + ((packet[0] & 15) * 4) + sizeof(UDP_HEADER);
+            size_t udpPayloadLen = packetLen - ((packet[0] & 15) * 4 + sizeof(UDP_HEADER));
             if (udpPayloadLen > 0) {
                 string domain;
                 if (ExtractDomainFromDNSQuery(udpPayload, udpPayloadLen, domain) && !domain.empty()) {
                     uint16_t queryId = ntohs(*reinterpret_cast<const uint16_t*>(udpPayload));
 
                     // 1. process rules take priority over domain rules
-                    string processName = GetProcessNameByPid(pid);
+                    string processName = process->Name();
                     const ServerConfig* procServer = FindServerByProcessRule(processName);
                     if (procServer != nullptr) {
                         ServerContext* procCtx = FindServerContext(procServer);
@@ -875,7 +1023,7 @@ void PacketMonitor::ProcessPacket(const uint8_t* packet, UINT packetLen, const W
                         WinDivertSend(m_Network, packet, packetLen, NULL, &addr);
                     }
                     else {
-                        m_Logger->log(LOGGER_LEVEL_DEBUG, "DNS query not redirected (no matching rule): " + domain);
+                        m_Logger->logLazy(LOGGER_LEVEL_DEBUG, [&] { return "dns_query_bypass reason=no_matching_rule domain=" + LogValue(domain); });
                         WinDivertSend(m_Network, packet, packetLen, NULL, &addr);
                     }
                     return;
@@ -884,75 +1032,28 @@ void PacketMonitor::ProcessPacket(const uint8_t* packet, UINT packetLen, const W
         }
     }
 
-    string processName = GetProcessNameByPid(pid);
-    uint32_t destIpHost = ntohl(iph->dst_ip);
-    const ServerConfig* targetServer = CheckRules(processName, destIpHost);
-    bool shouldRedirect = (targetServer != nullptr);
-
-    if (shouldRedirect && m_Logger->isEnabled()) {
-        string proto, flags;
-        uint16_t srcPort = 0;
-        uint16_t dstPort = 0;
-        if (iph->protocol == IPPROTO_UDP) {
-            proto = "UDP";
-            const UDP_HEADER* udph = reinterpret_cast<const UDP_HEADER*>(packet + sizeof(IP_HEADER));
-            srcPort = htons(udph->src_port);
-            dstPort = htons(udph->dst_port);
-            flags = "";
-        }
-        else if (iph->protocol == IPPROTO_TCP) {
-            proto = "TCP";
-            const TCP_HEADER* tcph = reinterpret_cast<const TCP_HEADER*>(packet + sizeof(IP_HEADER));
-            srcPort = htons(tcph->src_port);
-            dstPort = htons(tcph->dst_port);
-            flags = " flags=" + tcpFlags(tcph->flags);
-        }
-        else {
-            proto = to_string(iph->protocol);
-        }
-
-        m_Logger->log(LOGGER_LEVEL_INFO, "REDIRECT: " + proto + " " + IpToString(iph->src_ip) + ":" + to_string(srcPort) + " -> " + IpToString(iph->dst_ip) + ":" + to_string(dstPort) + flags + " PID=" + processName + " size=" + to_string(packetLen));
+    if (tuple.protocol == IPPROTO_TCP && !syn) {
+        commit({});
+        return;
     }
-
-    if (shouldRedirect) { // rules check passed
-        ServerContext* targetCtx = FindServerContext(targetServer);
-        if (targetCtx != nullptr) {
-            // remember this flow so that later packets keep tunneling even if
-            // the volatile pid cache entry is lost mid-connection
-            uint16_t srcPort = (iph->protocol == IPPROTO_TCP)
-                ? ntohs(reinterpret_cast<const TCP_HEADER*>(packet + sizeof(IP_HEADER))->src_port)
-                : ntohs(reinterpret_cast<const UDP_HEADER*>(packet + sizeof(IP_HEADER))->src_port);
-            uint16_t dstPort = (iph->protocol == IPPROTO_TCP)
-                ? ntohs(reinterpret_cast<const TCP_HEADER*>(packet + sizeof(IP_HEADER))->dst_port)
-                : ntohs(reinterpret_cast<const UDP_HEADER*>(packet + sizeof(IP_HEADER))->dst_port);
-            FlowKey key{ iph->protocol, ntohl(iph->src_ip), srcPort,
-                ntohl(iph->dst_ip), dstPort };
-
-            // look up destination in dynamic ip correspondence by original ip and server
-            uint32_t translatedIp = 0;
-            if (LookupIpTranslation(destIpHost, targetCtx->configIndex, translatedIp)) {
-                RememberRedirectedFlow(key, targetCtx->configIndex, translatedIp);
-                m_Logger->log(LOGGER_LEVEL_DEBUG, "Translating dst " + IpToString(destIpHost) + " -> " + IpToString(translatedIp) +
-                    " for server #" + to_string(targetCtx->configIndex));
-                RedirectPacket(packet, packetLen, addr, *targetCtx, translatedIp);
-            }
-            else {
-                RememberRedirectedFlow(key, targetCtx->configIndex, 0);
-                RedirectPacket(packet, packetLen, addr, *targetCtx);
-            }
-            return;
-        }
+    const auto* target = CheckRules(process->Name(), tuple.remoteIp);
+    auto* server = target ? FindServerContext(target) : nullptr;
+    if (!server) {
+        commit({});
+        return;
     }
-    // ignoring
-    WinDivertSend(m_Network, packet, packetLen, NULL, &addr);
+    uint32_t translated = 0;
+    LookupIpTranslation(tuple.remoteIp, server->configIndex, translated);
+    commit({ FlowRoute::Kind::Tunnel, server->id, translated });
 }
-
 // redirecting ip packet to server
 void PacketMonitor::RedirectPacket(const uint8_t* packet, UINT packetLen, const WINDIVERT_ADDRESS& addr, ServerContext& server, uint32_t newDstIp, uint16_t dnsQueryIdOverride) {
 
     // copy and encrypt packet
-    vector<uint8_t> outgoingPacket(packetLen);
-    memcpy(outgoingPacket.data(), packet, packetLen);
+    if (packetLen > 1472)
+        m_Logger->recordWarning(NetworkWarning::LargeTunnelPacket, static_cast<uint64_t>(packetLen) + 28);
+    auto& outgoingPacket = m_OutgoingPacket;
+    outgoingPacket.assign(packet, packet + packetLen);
 
     IP_HEADER* ipHeader = reinterpret_cast<IP_HEADER*>(outgoingPacket.data());
 
@@ -961,8 +1062,8 @@ void PacketMonitor::RedirectPacket(const uint8_t* packet, UINT packetLen, const 
     }
 
     if (dnsQueryIdOverride != 0 && ipHeader->protocol == IPPROTO_UDP) {
-        const UDP_HEADER* udpHeader = reinterpret_cast<const UDP_HEADER*>(outgoingPacket.data() + sizeof(IP_HEADER));
-        uint8_t* udpPayload = outgoingPacket.data() + sizeof(IP_HEADER) + sizeof(UDP_HEADER);
+
+        uint8_t* udpPayload = outgoingPacket.data() + ((outgoingPacket[0] & 15) * 4) + sizeof(UDP_HEADER);
         if (udpPayload + 2 <= outgoingPacket.data() + packetLen) {
             uint16_t* pQueryId = reinterpret_cast<uint16_t*>(udpPayload);
             *pQueryId = htons(dnsQueryIdOverride);
@@ -980,70 +1081,39 @@ void PacketMonitor::RedirectPacket(const uint8_t* packet, UINT packetLen, const 
 
     // recalc checksums after any ip/payload rewrite
     if (newDstIp != 0 || dnsQueryIdOverride != 0 || mssClamped) {
-        WinDivertHelperCalcChecksums(outgoingPacket.data(), outgoingPacket.size(), NULL, 0);
+        WinDivertHelperCalcChecksums(outgoingPacket.data(), static_cast<UINT>(outgoingPacket.size()), NULL, 0);
     }
 
-    const ServerConfig& cfg = m_Config->GetServers()[server.configIndex];
+    const ServerConfig& cfg = server.transport;
 
     // select a random udp port based on the packet checksum
-    uint16_t serverPort = uniform_int_distribution<uint16_t>(cfg.portStart, cfg.portEnd)(m_rng);
+    uint16_t serverPort;
+    {
+        lock_guard<mutex> lock(m_RngMutex);
+        serverPort = uniform_int_distribution<uint16_t>(cfg.portStart, cfg.portEnd)(m_rng);
+    }
 
     server.encryption.Encrypt(outgoingPacket.data(), outgoingPacket.size(), serverPort);
 
-    server.serverAddr.sin_port = htons(serverPort);
+    sockaddr_in serverAddr = server.serverAddr;
+    serverAddr.sin_port = htons(serverPort);
     int sent = sendto(server.udpSocket,
         (const char*)outgoingPacket.data(),
         static_cast<int>(outgoingPacket.size()),
         0,
-        (sockaddr*)&server.serverAddr,
-        sizeof(server.serverAddr));
+        (sockaddr*)&serverAddr,
+        sizeof(serverAddr));
 
     if (sent == SOCKET_ERROR) {
-        if (m_Logger->isEnabled())
-            m_Logger->log(LOGGER_LEVEL_ERROR, "Failed to send packet to server, error: " + to_string(WSAGetLastError()));
+        if (m_Logger->isEnabled(LOGGER_LEVEL_ERROR))
+            m_Logger->logLazy(LOGGER_LEVEL_ERROR, [&] { return "tunnel_send_failed direction=to_server wsa_error=" + to_string(WSAGetLastError()); });
         return;
     }
 }
 
-// remember a flow we decided to tunnel so continuation packets keep being redirected
-void PacketMonitor::RememberRedirectedFlow(const FlowKey& key, size_t serverIndex, uint32_t translatedDstIp) {
-    unique_lock lock(m_FlowMutex);
-    auto& flow = m_RedirectedFlows[key];
-    flow.serverIndex = serverIndex;
-    flow.translatedDstIp = translatedDstIp;
-    flow.lastSeen = chrono::steady_clock::now();
-}
-
-// find a tunneled flow and refresh its last-seen time
-bool PacketMonitor::FindRedirectedFlow(const FlowKey& key, size_t& serverIndex, uint32_t& translatedDstIp) {
-    unique_lock lock(m_FlowMutex);
-    auto it = m_RedirectedFlows.find(key);
-    if (it == m_RedirectedFlows.end())
-        return false;
-    it->second.lastSeen = chrono::steady_clock::now();
-    serverIndex = it->second.serverIndex;
-    translatedDstIp = it->second.translatedDstIp;
-    return true;
-}
-
 // getting process name by pid
-string PacketMonitor::GetProcessNameByPid(DWORD pid) {
-    HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ,
-        FALSE, pid);
-    if (!hProcess) {
-        return "unknown";
-    }
-
-    char path[MAX_PATH];
-    if (GetModuleFileNameExA(hProcess, NULL, path, MAX_PATH)) {
-        CloseHandle(hProcess);
-        string fullPath(path);
-        size_t pos = fullPath.find_last_of("\\/");
-        return (pos == string::npos) ? fullPath : fullPath.substr(pos + 1);
-    }
-
-    CloseHandle(hProcess);
-    return "unknown";
+ProcessOwner PacketMonitor::GetProcessByPid(DWORD pid) {
+    return m_ProcessNames.Get(pid, LoadWindowsProcessIdentity);
 }
 
 // checking rules for packet, returns first matching server or nullptr
@@ -1059,25 +1129,11 @@ const ServerConfig* PacketMonitor::CheckRules(const string& processName, UINT32 
         }
     }
 
-    for (const auto& server : m_Config->GetServers()) {
-        if (server.dynamicIPRule.matches(destIp)) {
-            return &server;
-        }
-    }
-
-    return nullptr;
+    return m_Config->FindServerByDynamicIP(destIp);
 }
 
-// find the first server whose process rule matches the given process name
 const ServerConfig* PacketMonitor::FindServerByProcessRule(const string& processName) const {
-    for (const auto& server : m_Config->GetServers()) {
-        for (const auto& rule : server.processRules) {
-            if (iequals(processName, rule)) {
-                return &server;
-            }
-        }
-    }
-    return nullptr;
+    return m_Config->FindServerByProcess(processName);
 }
 
 // redirect a dns query: send it to the "actual" server with the original query id and
@@ -1091,8 +1147,8 @@ void PacketMonitor::RedirectDNSQuery(const uint8_t* packet, UINT packetLen, cons
         m_DnsTimestamp[queryId] = chrono::steady_clock::now();
     }
 
-    m_Logger->log(LOGGER_LEVEL_INFO, "Redirecting DNS query (" + reason + ") " +
-        "to actual server #" + to_string(actual->configIndex) + " (qid=" + to_string(queryId) + ")");
+    m_Logger->logLazy(LOGGER_LEVEL_DEBUG, [&] { return "dns_query_redirected role=primary reason=" + LogValue(reason) +
+        " server_index=" + to_string(actual->configIndex) + " query_id=" + to_string(queryId); });
     RedirectPacket(packet, packetLen, addr, *actual);
 
     for (auto& other : m_Servers) {
@@ -1108,8 +1164,8 @@ void PacketMonitor::RedirectDNSQuery(const uint8_t* packet, UINT packetLen, cons
             m_DnsTimestamp[auxId] = chrono::steady_clock::now();
         }
 
-        m_Logger->log(LOGGER_LEVEL_DEBUG, "Sending aux DNS query (" + reason + ") " +
-            "to server #" + to_string(other.configIndex) + " (aux qid=" + to_string(auxId) + ")");
+        m_Logger->logLazy(LOGGER_LEVEL_DEBUG, [&] { return "dns_query_redirected role=auxiliary reason=" + LogValue(reason) +
+            " server_index=" + to_string(other.configIndex) + " query_id=" + to_string(auxId); });
         RedirectPacket(packet, packetLen, addr, other, 0, auxId);
     }
 }
@@ -1138,7 +1194,10 @@ uint16_t PacketMonitor::GenerateUniqueQueryId() {
     uint16_t candidate;
     const int MAX_ATTEMPTS = 100;
     for (int i = 0; i < MAX_ATTEMPTS; ++i) {
-        candidate = static_cast<uint16_t>(uniform_int_distribution<int>(1, 0xFFFF)(m_rng));
+        {
+            lock_guard<mutex> lock(m_RngMutex);
+            candidate = static_cast<uint16_t>(uniform_int_distribution<int>(1, 0xFFFF)(m_rng));
+        }
         if (m_ActualDns.count(candidate) == 0 && m_AuxiliaryDns.count(candidate) == 0)
             return candidate;
     }
@@ -1225,22 +1284,15 @@ bool PacketMonitor::HandleDNSResponse(const uint8_t* payload, size_t len, size_t
         }
 
         // 3.3.2 fill in previously received aux entries whose original ip was unknown
-        for (auto it = m_PendingDynamicIp.begin(); it != m_PendingDynamicIp.end();) {
-            uint64_t pendingQid = it->first >> 32;
-            if (pendingQid == queryId && ip != 0) {
-                size_t srv = static_cast<size_t>(it->first & 0xFFFFFFFF);
-                uint32_t auxIp = it->second;
+        auto pending = m_PendingDynamicIp.find(queryId);
+        if (pending != m_PendingDynamicIp.end() && ip != 0) {
+            for (const auto& [srv, auxIp] : pending->second) {
                 uint64_t fwdKey = ((uint64_t)ip << 32) | (uint64_t)(srv & 0xFFFFFFFF);
                 uint64_t revKey = ((uint64_t)auxIp << 32) | (uint64_t)(srv & 0xFFFFFFFF);
                 m_DynamicIpMap[fwdKey] = auxIp;
                 m_DynamicIpReverse[revKey] = ip;
-                it = m_PendingDynamicIp.erase(it);
-                if (m_Logger->isEnabled())
-                    m_Logger->log(LOGGER_LEVEL_DEBUG, "Filled dynamic IP: " + IpToString(ip) + " -> " + IpToString(auxIp));
             }
-            else {
-                ++it;
-            }
+            m_PendingDynamicIp.erase(pending);
         }
 
         // keep adding resolved ips to the actual server's dynamic rule set
@@ -1269,17 +1321,16 @@ bool PacketMonitor::HandleDNSResponse(const uint8_t* payload, size_t len, size_t
             uint64_t revKey = ((uint64_t)ip << 32) | (uint64_t)(serverIndex & 0xFFFFFFFF);
             m_DynamicIpMap[fwdKey] = ip;
             m_DynamicIpReverse[revKey] = origIp;
-            if (m_Logger->isEnabled())
-                m_Logger->log(LOGGER_LEVEL_DEBUG, "Aux dynamic IP: " + IpToString(origIp) + " -> " + IpToString(ip) +
-                    " for server #" + to_string(serverIndex));
+            if (m_Logger->isEnabled(LOGGER_LEVEL_DEBUG))
+                m_Logger->logLazy(LOGGER_LEVEL_DEBUG, [&] { return "dns_address_mapping_added original_ip=" + IpToString(origIp) + " translated_ip=" + IpToString(ip) +
+                    " server_index=" + to_string(serverIndex); });
         }
         else {
             // original response ip not yet known - keep pending by original query id
-            uint64_t pKey = ((uint64_t)origQid << 32) | (uint64_t)(serverIndex & 0xFFFFFFFF);
-            m_PendingDynamicIp[pKey] = ip;
-            if (m_Logger->isEnabled())
-                m_Logger->log(LOGGER_LEVEL_DEBUG, "Pending dynamic IP (waiting original): " + IpToString(ip) +
-                    " for server #" + to_string(serverIndex));
+            m_PendingDynamicIp[origQid][serverIndex] = ip;
+            if (m_Logger->isEnabled(LOGGER_LEVEL_DEBUG))
+                m_Logger->logLazy(LOGGER_LEVEL_DEBUG, [&] { return "dns_address_mapping_pending reason=awaiting_original translated_ip=" + IpToString(ip) +
+                    " server_index=" + to_string(serverIndex); });
         }
         return false; // 3.4.2.4 do not send packet to stack
     }
@@ -1302,15 +1353,10 @@ void PacketMonitor::CleanupDnsState() {
             m_AuxiliaryDns.erase(qid);
             m_ActualToAuxiliary.erase(qid);
             m_ActualIpByQuery.erase(qid);
-            for (auto p = m_PendingDynamicIp.begin(); p != m_PendingDynamicIp.end();) {
-                if ((p->first >> 32) == qid)
-                    p = m_PendingDynamicIp.erase(p);
-                else
-                    ++p;
-            }
+            m_PendingDynamicIp.erase(qid);
             it = m_DnsTimestamp.erase(it);
-            if (m_Logger->isEnabled())
-                m_Logger->log(LOGGER_LEVEL_DEBUG, "DNS state cleaned for qid=" + to_string(qid));
+            if (m_Logger->isEnabled(LOGGER_LEVEL_DEBUG))
+                m_Logger->logLazy(LOGGER_LEVEL_DEBUG, [&] { return "dns_state_expired query_id=" + to_string(qid); });
         }
         else {
             ++it;
@@ -1354,8 +1400,8 @@ void PacketMonitor::ProcessDNSResponse(const uint8_t* payload, size_t len, size_
             memcpy(&ip, payload + offset, 4);
             uint32_t ipHost = ntohl(ip);
             m_Config->AddDynamicIP(serverIndex, ipHost);
-            if (m_Logger->isEnabled())
-                m_Logger->log(LOGGER_LEVEL_DEBUG, "DNS response added dynamic IP: " + IpToString(ipHost) + " TTL=" + std::to_string(ttl));
+            if (m_Logger->isEnabled(LOGGER_LEVEL_DEBUG))
+                m_Logger->logLazy(LOGGER_LEVEL_DEBUG, [&] { return "dns_dynamic_ip_added ip=" + IpToString(ipHost) + " ttl_seconds=" + std::to_string(ttl); });
         }
         offset += rdlength;
     }

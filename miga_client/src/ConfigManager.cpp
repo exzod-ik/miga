@@ -34,7 +34,7 @@ bool ConfigManager::ParseProcessRules(const json& config, ServerConfig& server) 
             string procName = procJson.get<string>();
             transform(procName.begin(), procName.end(), procName.begin(), ::tolower);
             server.processRules.push_back(procName);
-            m_Logger->log(LOGGER_LEVEL_INFO, "Process rule: " + procName);
+            m_Logger->log(LOGGER_LEVEL_INFO, "process_rule_loaded process=" + LogValue(procName));
         }
     }
     return true;
@@ -55,17 +55,17 @@ bool ConfigManager::ParseIPRules(const json& config, ServerConfig& server) {
                     range.startIP = ntohl(addr.s_addr);
                 }
                 else {
-                    m_Logger->log(LOGGER_LEVEL_ERROR, "IP address " + startStr + " is incorect. ");
+                    m_Logger->log(LOGGER_LEVEL_ERROR, "config_invalid field=redirect_ips reason=invalid_ipv4 value=" + LogValue(startStr));
                     return false;
                 }
                 if (inet_pton(AF_INET, endStr.c_str(), &addr) == 1) {
                     range.endIP = ntohl(addr.s_addr);
                 }
                 else {
-                    m_Logger->log(LOGGER_LEVEL_ERROR, "IP address " + endStr + " is incorect. ");
+                    m_Logger->log(LOGGER_LEVEL_ERROR, "config_invalid field=redirect_ips reason=invalid_ipv4 value=" + LogValue(endStr));
                     return false;
                 }
-                m_Logger->log(LOGGER_LEVEL_INFO, "IP range: " + startStr + " - " + endStr);
+                m_Logger->log(LOGGER_LEVEL_INFO, "ip_range_loaded start=" + LogValue(startStr) + " end=" + LogValue(endStr));
             }
             else {
                 struct in_addr addr;
@@ -73,16 +73,17 @@ bool ConfigManager::ParseIPRules(const json& config, ServerConfig& server) {
                     range.startIP = ntohl(addr.s_addr);
                 }
                 else {
-                    m_Logger->log(LOGGER_LEVEL_ERROR, "IP address " + ipStr + " is incorect. ");
+                    m_Logger->log(LOGGER_LEVEL_ERROR, "config_invalid field=redirect_ips reason=invalid_ipv4 value=" + LogValue(ipStr));
                     return false;
                 }
                 range.endIP = range.startIP;
-                m_Logger->log(LOGGER_LEVEL_INFO, "IP rule: " + ipStr);
+                m_Logger->log(LOGGER_LEVEL_INFO, "ip_rule_loaded ip=" + LogValue(ipStr));
             }
 
             server.staticIPRule.ipRanges.push_back(range);
         }
     }
+    server.staticIPRule.Normalize();
     return true;
 }
 
@@ -95,11 +96,11 @@ bool ConfigManager::ParseDomainRules(const json& config, ServerConfig& server) {
             if (domain.size() > 2 && domain[0] == '*' && domain[1] == '.') {
                 string suffix = domain.substr(2); // remove "*."
                 server.wildcardDomainSuffixes.push_back(suffix);
-                m_Logger->log(LOGGER_LEVEL_INFO, "Wildcard domain rule: *." + suffix);
+                m_Logger->log(LOGGER_LEVEL_INFO, "domain_rule_loaded kind=wildcard suffix=" + LogValue(suffix));
             }
             else {
                 server.domainRules.push_back(domain);
-                m_Logger->log(LOGGER_LEVEL_INFO, "Domain rule: " + domain);
+                m_Logger->log(LOGGER_LEVEL_INFO, "domain_rule_loaded kind=exact domain=" + LogValue(domain));
             }
         }
     }
@@ -108,23 +109,23 @@ bool ConfigManager::ParseDomainRules(const json& config, ServerConfig& server) {
 
 bool ConfigManager::ParseServer(const json& serverJson, ServerConfig& server) {
     if (!serverJson.contains("server_ip")) {
-        m_Logger->log(LOGGER_LEVEL_ERROR, "\"server_ip\" is missing for one of the servers");
+        m_Logger->log(LOGGER_LEVEL_ERROR, "config_invalid reason=missing_field field=server_ip");
         return false;
     }
 
     server.serverIP = serverJson["server_ip"];
-    m_Logger->log(LOGGER_LEVEL_INFO, "Server IP: " + server.serverIP);
+    m_Logger->log(LOGGER_LEVEL_INFO, "server_address_loaded ip=" + LogValue(server.serverIP));
 
     if (serverJson.contains("server_ports")) {
         server.portStart = serverJson["server_ports"]["start"];
         server.portEnd = serverJson["server_ports"]["end"];
-        m_Logger->log(LOGGER_LEVEL_INFO, "Server ports: " + to_string(server.portStart) + "-" + to_string(server.portEnd));
+        m_Logger->log(LOGGER_LEVEL_INFO, "server_ports_loaded range=" + to_string(server.portStart) + "-" + to_string(server.portEnd));
     }
 
     if (serverJson.contains("encryption")) {
         server.xorKeyBase64 = serverJson["encryption"]["xor_key"];
         server.swapKeyBase64 = serverJson["encryption"]["swap_key"];
-        m_Logger->log(LOGGER_LEVEL_INFO, "Encryption keys loaded");
+        m_Logger->log(LOGGER_LEVEL_INFO, "transform_keys_loaded");
     }
 
     if (!ParseProcessRules(serverJson, server)) return false;
@@ -134,13 +135,15 @@ bool ConfigManager::ParseServer(const json& serverJson, ServerConfig& server) {
     return true;
 }
 
-bool ConfigManager::Load(const string& configPath, bool hotLoad) {
-    m_Logger->log(LOGGER_LEVEL_INFO, "Loading configuration from: " + configPath);
+bool ConfigManager::Load(const string& configPath, bool hotLoad,
+    const std::function<bool(const std::vector<ServerConfig>&)>& prepare) {
+    m_Logger->log(LOGGER_LEVEL_INFO, "config_loading path=" + LogValue(configPath));
 
+    int logLevel = LOGGER_LEVEL_NONE;
     try {
         ifstream configFile(configPath);
         if (!configFile.is_open()) {
-            m_Logger->log(LOGGER_LEVEL_ERROR, "Failed to open config file");
+            m_Logger->log(LOGGER_LEVEL_ERROR, "config_open_failed");
             return false;
         }
 
@@ -151,7 +154,7 @@ bool ConfigManager::Load(const string& configPath, bool hotLoad) {
         if (config.contains("tunnel_max_mss")) {
             const auto& value = config["tunnel_max_mss"];
             if (!value.is_number_integer() || value < 1 || value > 65535) {
-                m_Logger->log(LOGGER_LEVEL_ERROR, "tunnel_max_mss must be an integer between 1 and 65535");
+                m_Logger->log(LOGGER_LEVEL_ERROR, "config_invalid field=tunnel_max_mss expected=integer min=1 max=65535");
                 return false;
             }
             tunnelMaxMss = value.get<uint16_t>();
@@ -160,25 +163,28 @@ bool ConfigManager::Load(const string& configPath, bool hotLoad) {
         if (config.contains("log_level")) {
             string levelStr = config["log_level"];
             if (levelStr == "error") {
-                m_LogLevel = LOGGER_LEVEL_ERROR;
+                logLevel = LOGGER_LEVEL_ERROR;
+            }
+            else if (levelStr == "warning") {
+                logLevel = LOGGER_LEVEL_WARNING;
             }
             else if (levelStr == "info") {
-                m_LogLevel = LOGGER_LEVEL_INFO;
+                logLevel = LOGGER_LEVEL_INFO;
             }
             else if (levelStr == "debug") {
-                m_LogLevel = LOGGER_LEVEL_DEBUG;
+                logLevel = LOGGER_LEVEL_DEBUG;
             }
             else {
-                m_LogLevel = LOGGER_LEVEL_NONE;
+                logLevel = LOGGER_LEVEL_NONE;
             }
-            m_Logger->log(LOGGER_LEVEL_INFO, "Log level: " + levelStr);
+            m_Logger->log(LOGGER_LEVEL_INFO, "log_level_selected level=" + LogValue(levelStr));
         }
         else {
-            m_LogLevel = LOGGER_LEVEL_NONE;
+            logLevel = LOGGER_LEVEL_NONE;
         }
 
         if (!config.contains("servers") || !config["servers"].is_array()) {
-            m_Logger->log(LOGGER_LEVEL_ERROR, "\"servers\" array is missing in config");
+            m_Logger->log(LOGGER_LEVEL_ERROR, "config_invalid reason=missing_array field=servers");
             return false;
         }
 
@@ -193,27 +199,42 @@ bool ConfigManager::Load(const string& configPath, bool hotLoad) {
         }
 
         if (newServers.empty()) {
-            m_Logger->log(LOGGER_LEVEL_ERROR, "No servers configured");
+            m_Logger->log(LOGGER_LEVEL_ERROR, "config_invalid reason=no_servers");
             return false;
         }
 
-        if (hotLoad && newServers.size() == m_Servers.size()) {
-            for (size_t i = 0; i < newServers.size(); ++i) {
-                newServers[i].dynamicIPRule = m_Servers[i].dynamicIPRule;
+        unique_lock dynamicLock(m_DynamicIPMutex);
+        if (hotLoad) {
+            for (auto& server : newServers) {
+                auto previous = std::find_if(m_Servers.begin(), m_Servers.end(),
+                    [&](const ServerConfig& old) { return server.SameTransport(old); });
+                if (previous != m_Servers.end()) server.dynamicIPs = previous->dynamicIPs;
             }
         }
-
+        unordered_map<string, size_t> processIndex;
+        unordered_map<uint32_t, size_t> dynamicIndex;
+        for (size_t i = 0; i < newServers.size(); ++i) {
+            for (const auto& process : newServers[i].processRules)
+                processIndex.try_emplace(process, i);
+            for (uint32_t ip : newServers[i].dynamicIPs)
+                dynamicIndex.try_emplace(ip, i);
+        }
+        if (prepare && !prepare(newServers)) return false;
+        m_LogLevel = logLevel;
         m_Servers = move(newServers);
+        m_ProcessIndex = move(processIndex);
+        m_DynamicIPIndex = move(dynamicIndex);
         m_TunnelMaxMss = tunnelMaxMss;
+        dynamicLock.unlock();
 
-        m_Logger->log(LOGGER_LEVEL_INFO, "Configuration loaded: " +
-            to_string(m_Servers.size()) + " server(s)");
+        m_Logger->log(LOGGER_LEVEL_INFO, "config_loaded server_count=" +
+            to_string(m_Servers.size()));
 
         return true;
 
     }
     catch (const exception& e) {
-        m_Logger->log(LOGGER_LEVEL_ERROR, "Config parse error: " + string(e.what()));
+        m_Logger->log(LOGGER_LEVEL_ERROR, "config_parse_failed error=" + LogValue(e.what()));
         return false;
     }
 }
@@ -227,17 +248,25 @@ const ServerConfig* ConfigManager::FindServerByDomain(const string& domain) cons
 }
 
 void ConfigManager::AddDynamicIP(size_t serverIndex, uint32_t ip) {
+    unique_lock lock(m_DynamicIPMutex);
     if (serverIndex >= m_Servers.size())
         return;
 
-    IPRule& rule = m_Servers[serverIndex].dynamicIPRule;
-    for (const auto& range : rule.ipRanges) {
-        if (range.startIP == ip && range.endIP == ip) {
-            return;
-        }
-    }
-    IPRange newRange;
-    newRange.startIP = ip;
-    newRange.endIP = ip;
-    rule.ipRanges.push_back(newRange);
+    m_Servers[serverIndex].dynamicIPs.insert(ip);
+    auto [it, inserted] = m_DynamicIPIndex.try_emplace(ip, serverIndex);
+    if (!inserted && serverIndex < it->second)
+        it->second = serverIndex;
+}
+
+const ServerConfig* ConfigManager::FindServerByProcess(const string& processName) const {
+    string name = processName;
+    transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return static_cast<char>(tolower(c)); });
+    auto it = m_ProcessIndex.find(name);
+    return it == m_ProcessIndex.end() ? nullptr : &m_Servers[it->second];
+}
+
+const ServerConfig* ConfigManager::FindServerByDynamicIP(uint32_t ip) const {
+    shared_lock lock(m_DynamicIPMutex);
+    auto it = m_DynamicIPIndex.find(ip);
+    return it == m_DynamicIPIndex.end() ? nullptr : &m_Servers[it->second];
 }

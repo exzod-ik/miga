@@ -9,7 +9,7 @@
 #include <errno.h>
 #include <cstring>
 
-#define VERSION "1.2.1"
+#define VERSION "1.2.4"
 
 using namespace std;
 using json = nlohmann::json;
@@ -17,7 +17,7 @@ using json = nlohmann::json;
 atomic<bool> g_running(true);
 
 void signalHandler(int) {
-    cout << "Shutting down..." << endl;
+    cout << "server_stopping" << endl;
     g_running = false;
 }
 
@@ -47,12 +47,12 @@ static bool UpdateConfigFile(const string& configPath, bool generateKeys) {
             ifs >> currentJson;
         }
         catch (const exception& e) {
-            cerr << "Error parsing existing config: " << e.what() << endl;
+            cerr << "config_parse_failed error=" << LogValue(e.what()) << endl;
             return false;
         }
     }
     else {
-        cout << "No existing config file, will create a new one." << endl;
+        cout << "config_creating reason=missing_file" << endl;
     }
 
     ServerConfig defaultConfig = GetDefaultConfig();
@@ -76,6 +76,7 @@ static bool UpdateConfigFile(const string& configPath, bool generateKeys) {
     if (currentJson.contains("log_level")) {
         string levelStr = currentJson["log_level"];
         if (levelStr == "error") defaultConfig.log_level = LOGGER_LEVEL_ERROR;
+        else if (levelStr == "warning") defaultConfig.log_level = LOGGER_LEVEL_WARNING;
         else if (levelStr == "info") defaultConfig.log_level = LOGGER_LEVEL_INFO;
         else if (levelStr == "debug") defaultConfig.log_level = LOGGER_LEVEL_DEBUG;
         else defaultConfig.log_level = LOGGER_LEVEL_NONE;
@@ -88,6 +89,7 @@ static bool UpdateConfigFile(const string& configPath, bool generateKeys) {
     json newConfig;
     newConfig["log_level"] =
         (defaultConfig.log_level == LOGGER_LEVEL_ERROR) ? "error" :
+        (defaultConfig.log_level == LOGGER_LEVEL_WARNING) ? "warning" :
         (defaultConfig.log_level == LOGGER_LEVEL_INFO) ? "info" :
         (defaultConfig.log_level == LOGGER_LEVEL_DEBUG) ? "debug" : "none";
 
@@ -106,18 +108,18 @@ static bool UpdateConfigFile(const string& configPath, bool generateKeys) {
     if (lastSlash != string::npos) {
         string dir = configPath.substr(0, lastSlash);
         if (!CreateDirectory(dir)) {
-            cerr << "Failed to create directory: " << dir << endl;
+            cerr << "directory_create_failed path=" << LogValue(dir) << endl;
             return false;
         }
     }
 
     ofstream ofs(configPath);
     if (!ofs.is_open()) {
-        cerr << "Failed to open config file for writing: " << configPath << endl;
+        cerr << "config_write_failed path=" << LogValue(configPath) << endl;
         return false;
     }
     ofs << newConfig.dump(4, ' ', false, json::error_handler_t::ignore);
-    cout << "Configuration file updated at: " << configPath << endl;
+    cout << "config_written path=" << LogValue(configPath) << endl;
     return true;
 }
 
@@ -157,19 +159,19 @@ int main(int argc, char* argv[]) {
     ServerCore server;
 
     if (!server.Initialize(configPath)) {
-        cerr << "Failed to initialize server" << endl;
+        cerr << "server_init_failed" << endl;
         return 1;
     }
 
     server.Start();
-    cout << "Server started. Press Ctrl+C to stop..." << endl;
+    cout << "server_running stop_action=ctrl_c" << endl;
 
     while (g_running) {
         pause();
     }
 
     server.Stop();
-    cout << "Server stopped" << endl;
+    cout << "server_stopped" << endl;
 
     return 0;
 }

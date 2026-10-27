@@ -2,6 +2,15 @@
 
 #include <windivert.h>
 #include <memory>
+#include <mutex>
+#include <array>
+#include "BoundedQueue.h"
+#include "EventQueueDelay.h"
+#include "Ipv4Batch.h"
+#include "RoutingState.h"
+#include "PendingPackets.h"
+#include "PacketWarning.h"
+#include <future>
 #include <shared_mutex>
 #include <random>
 #include "ConfigManager.h"
@@ -9,58 +18,24 @@
 #include "Encryption.h"
 #include "UdpPacketAssembler.h"
 
-// entry for pid-port cache
-struct CacheEntry {
-    uint32_t pid;
-    std::chrono::steady_clock::time_point lastSeen;
-};
-
 // Queue of pending packets (port -> list of packets)
 struct PendingPacket {
     std::vector<uint8_t> packetData;
+    const char* ownerLookup = "not_recorded";
     WINDIVERT_ADDRESS addr;
     std::chrono::steady_clock::time_point timestamp;
 };
 
-// key identifying a single tcp/udp flow (host byte order)
-struct FlowKey {
-    uint8_t proto;
-    uint32_t srcIp;
-    uint16_t srcPort;
-    uint32_t dstIp;
-    uint16_t dstPort;
-
-    bool operator==(const FlowKey& o) const {
-        return proto == o.proto && srcIp == o.srcIp && srcPort == o.srcPort &&
-            dstIp == o.dstIp && dstPort == o.dstPort;
-    }
-};
-
-struct FlowKeyHash {
-    size_t operator()(const FlowKey& k) const {
-        size_t h = std::hash<uint8_t>()(k.proto);
-        h ^= std::hash<uint32_t>()(k.srcIp) + 0x9e3779b9 + (h << 6) + (h >> 2);
-        h ^= std::hash<uint16_t>()(k.srcPort) + 0x9e3779b9 + (h << 6) + (h >> 2);
-        h ^= std::hash<uint32_t>()(k.dstIp) + 0x9e3779b9 + (h << 6) + (h >> 2);
-        h ^= std::hash<uint16_t>()(k.dstPort) + 0x9e3779b9 + (h << 6) + (h >> 2);
-        return h;
-    }
-};
-
-// a flow we decided to tunnel: continuation packets keep being redirected
-// even if the volatile per-port pid cache entry is lost mid-connection
-struct RedirectedFlow {
-    size_t serverIndex;
-    uint32_t translatedDstIp; // 0 if identity
-    std::chrono::steady_clock::time_point lastSeen;
-};
-
 class PacketMonitor {
+    friend struct PacketMonitorTests;
 private:
     // runtime state of a single redirect server
     struct ServerContext {
-        size_t configIndex;          // index in ConfigManager::GetServers()
-        SOCKET udpSocket;
+        size_t configIndex = 0;
+        size_t id = 0;
+        ServerConfig transport;
+        uint16_t localPort = 0;
+        SOCKET udpSocket = INVALID_SOCKET;
         sockaddr_in serverAddr;
         std::unique_ptr<UdpPacketAssembler> assembler;
         Encryption encryption;
@@ -77,8 +52,7 @@ private:
     // aux translated ip -> original ip for reverse rewriting (inbound):
     // key: (uint64_t)translated_ip << 32 | serverIndex
     std::unordered_map<uint64_t, uint32_t> m_DynamicIpReverse;
-    // pending aux ip (original ip not yet known): (query_id << 32) | serverIndex -> translated ip
-    std::unordered_map<uint64_t, uint32_t> m_PendingDynamicIp;
+    std::unordered_map<uint16_t, std::unordered_map<size_t, uint32_t>> m_PendingDynamicIp;
     // actual dns query id -> ip received from the actual server (may be 0 until received)
     std::unordered_map<uint16_t, uint32_t> m_ActualIpByQuery;
     // timestamps for cleanup: query id -> creation time
@@ -91,22 +65,20 @@ public:
 
     bool Start();
     void Stop();
+    bool ReloadConfig(const std::string& path);
     bool IsRunning() const { return m_Running.load(); }
 
 private:
-    std::unordered_map<uint16_t, CacheEntry> tcpCache;
-    std::unordered_map<uint16_t, CacheEntry> udpCache;
-    std::shared_mutex cacheMutex;
-
-    std::unordered_map<uint16_t, std::vector<PendingPacket>> pendingTCP;
-    std::unordered_map<uint16_t, std::vector<PendingPacket>> pendingUDP;
-    std::shared_mutex pendingMutex;
-
-    // flows already tunneled: flow key -> target server (kept alive while active)
-    std::unordered_map<FlowKey, RedirectedFlow, FlowKeyHash> m_RedirectedFlows;
-    std::shared_mutex m_FlowMutex;
-
+    RoutingState m_Routing;
+    PendingPackets<PendingPacket> m_Pending;
+    std::vector<uint8_t> m_OutgoingPacket;
+    ProcessIdentityCache m_ProcessNames;
+    size_t m_NextServerId = 1;
+    std::array<PacketWarningSample, 32> m_WarningSamples{};
+    size_t m_WarningSampleCount = 0;
+    size_t m_OmittedWarnings = 0;
     std::mt19937 m_rng;
+    std::mutex m_RngMutex;
 
     std::vector<ServerContext> m_Servers;
     uint32_t m_ourPid;
@@ -119,34 +91,62 @@ private:
     HANDLE m_Network;
 
     std::thread m_SocketThread;
+    std::thread m_EventProcessThread;
     std::thread m_NetworkThread;
-    std::thread m_CleanupThread;
+
+
+    struct NetworkBatch {
+        std::vector<uint8_t> data = std::vector<uint8_t>(256 * 1024);
+        std::chrono::steady_clock::time_point receivedAt;
+        std::array<WINDIVERT_ADDRESS, 64> addresses;
+
+        UINT length = 0;
+        UINT addressLength = 0;
+    };
+    struct WorkItem {
+        std::chrono::steady_clock::time_point queuedAt;
+        std::unique_ptr<NetworkBatch> batch;
+        WINDIVERT_ADDRESS socket{};
+        std::shared_ptr<const SocketOwner> owner;
+        std::string reloadPath;
+        std::shared_ptr<std::promise<bool>> reload;
+    };
+    BoundedQueue<WorkItem, 256> m_Work;
+    EventQueueDelay m_EventQueueDelay;
+    static constexpr size_t NetworkBufferCount = 34;
+    BoundedQueue<std::unique_ptr<NetworkBatch>, NetworkBufferCount> m_FreeNetworkBatches;
 
     std::atomic<bool> m_Running;
+    std::mutex m_StopMutex;
+    std::condition_variable m_StopCondition;
 
-    bool InitWinDivert();
-    bool InitUdpSocket();
+
+    bool InitUdpSocket(const std::vector<ServerConfig>& servers);
     void CloseUdpSockets();
-    void CleanupWinDivert();
+
 
     bool OpenSocketHandle();
     bool OpenNetworkHandle();
 
-    void UpdateCache(uint16_t port, uint32_t pid, bool isTCP);
-
     void SocketThread();
+    void EventProcessThread();
     void NetworkThread();
-    void CacheCleanupThread();
-
+    void ProcessNetworkPacket(uint8_t* packet, UINT packetLen, WINDIVERT_ADDRESS addr);
+    void ProcessSocketEvent(const WorkItem& item);
+    bool ResolvePacket(const uint8_t* packet, UINT length, const WINDIVERT_ADDRESS& addr, bool deadline,
+        std::chrono::steady_clock::time_point receivedAt);
+    void DrainPending(uint32_t key = 0);
+    void MaintainState();
+    void RecordPacketWarning(const uint8_t* packet, UINT length, const char* reason,
+        std::chrono::steady_clock::time_point receivedAt, bool dropped, int64_t packetTimestampQpc);
+    void SendRoute(const uint8_t* packet, UINT length, const WINDIVERT_ADDRESS& addr, const FlowRoute& route);
+    void ClearDnsState();
+    void SeedExistingSockets();
     bool SendUdpPacketToMstcp(const UdpPacketInfo* pkt, WINDIVERT_ADDRESS* pAddr, ServerContext& server);
 
-    void ProcessPacket(const uint8_t* packet, UINT packetLen, const WINDIVERT_ADDRESS& addr, uint32_t pid);
+    void ProcessPacket(const uint8_t* packet, UINT packetLen, const WINDIVERT_ADDRESS& addr, const std::shared_ptr<const SocketOwner>& owner);
     void RedirectPacket(const uint8_t* packet, UINT packetLen, const WINDIVERT_ADDRESS& addr, ServerContext& server,
         uint32_t newDstIp = 0, uint16_t dnsQueryIdOverride = 0);
-
-    // helpers for tunneled-flow tracking
-    void RememberRedirectedFlow(const FlowKey& key, size_t serverIndex, uint32_t translatedDstIp);
-    bool FindRedirectedFlow(const FlowKey& key, size_t& serverIndex, uint32_t& translatedDstIp);
 
     // DNS parsing helpers
     bool ExtractDomainFromDNSQuery(const uint8_t* payload, size_t len, std::string& domain);
@@ -163,7 +163,7 @@ private:
     bool LookupIpReverse(uint32_t translatedIp, size_t serverIndex, uint32_t& originalIp);
     void CleanupDnsState();
 
-    std::string GetProcessNameByPid(DWORD pid);
+    ProcessOwner GetProcessByPid(DWORD pid);
 
     ServerContext* FindServerContext(const ServerConfig* config);
     const ServerConfig* FindServerByProcessRule(const std::string& processName) const;

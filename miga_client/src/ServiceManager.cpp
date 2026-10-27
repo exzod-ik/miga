@@ -27,7 +27,7 @@ extern CMigaClient* g_Client;
 bool ServiceManager::Install() {
     SC_HANDLE scm = OpenSCManager(nullptr, nullptr, SC_MANAGER_CREATE_SERVICE);
     if (!scm) {
-        cerr << "Failed to open SCM. Error: " << GetLastError() << endl;
+        cerr << "service_manager_open_failed win32_error=" << GetLastError() << endl;
         return false;
     }
 
@@ -56,11 +56,11 @@ bool ServiceManager::Install() {
         desc.lpDescription = (LPWSTR)DESCRIPTION;
         ChangeServiceConfig2W(service, SERVICE_CONFIG_DESCRIPTION, &desc);
 
-        cout << "Service installed successfully" << endl;
+        cout << "service_installed" << endl;
         CloseServiceHandle(service);
     }
     else {
-        cerr << "Failed to install service. Error: " << GetLastError() << endl;
+        cerr << "service_install_failed win32_error=" << GetLastError() << endl;
         CloseServiceHandle(scm);
         return false;
     }
@@ -72,20 +72,20 @@ bool ServiceManager::Install() {
 bool ServiceManager::Uninstall() {
     SC_HANDLE scm = OpenSCManager(nullptr, nullptr, SC_MANAGER_CONNECT);
     if (!scm) {
-        cerr << "Failed to open SCM" << endl;
+        cerr << "service_manager_open_failed" << endl;
         return false;
     }
 
     SC_HANDLE service = OpenServiceW(scm, SERVICE_NAME, SERVICE_ALL_ACCESS);
     if (!service) {
-        cerr << "Service not found" << endl;
+        cerr << "service_open_failed reason=not_found" << endl;
         CloseServiceHandle(scm);
         return false;
     }
 
     SERVICE_STATUS status;
     if (ControlService(service, SERVICE_CONTROL_STOP, &status)) {
-        cout << "Stopping service..." << endl;
+        cout << "service_stopping" << endl;
         int waitSeconds = 0;
         while (waitSeconds < 30) {
             if (!QueryServiceStatus(service, &status)) break;
@@ -94,18 +94,18 @@ bool ServiceManager::Uninstall() {
             waitSeconds++;
         }
         if (status.dwCurrentState != SERVICE_STOPPED) {
-            cerr << "Warning: Service did not stop within 30 seconds" << endl;
+            cerr << "service_stop_timeout timeout_seconds=30" << endl;
         }
         else {
-            cout << "Service stopped successfully" << endl;
+            cout << "service_stopped" << endl;
         }
     }
 
     if (DeleteService(service)) {
-        cout << "Service uninstalled successfully" << endl;
+        cout << "service_uninstalled" << endl;
     }
     else {
-        cerr << "Failed to delete service. Error: " << GetLastError() << endl;
+        cerr << "service_delete_failed win32_error=" << GetLastError() << endl;
         CloseServiceHandle(service);
         CloseServiceHandle(scm);
         return false;

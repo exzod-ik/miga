@@ -31,6 +31,8 @@ UdpPacketAssembler::UdpPacketAssembler(uint32_t timeoutMs)
 bool UdpPacketAssembler::AddIpPacket(const uint8_t* packet, size_t len) {
     lock_guard<mutex> lock(mtx_);
 
+    if (!packet || len < sizeof(IP_HEADER)) return false;
+    CleanupTimeoutFragments();
     const IP_HEADER* ip = reinterpret_cast<const IP_HEADER*>(packet);
     uint16_t ipTotalLen = ntohs(ip->total_len);
     if (ipTotalLen > len)
@@ -77,8 +79,6 @@ bool UdpPacketAssembler::AddIpPacket(const uint8_t* packet, size_t len) {
             }
         }
     }
-
-    CleanupTimeoutFragments();
 
     return result;
 }
@@ -139,10 +139,13 @@ bool UdpPacketAssembler::AddFragment(const uint8_t* ipData, uint16_t ipTotalLen,
 
         fragments_.emplace(key, move(fp));
         it = fragments_.find(key);
+        fragmentOrder_.push_back(key);
+        it->second.expiryPosition = std::prev(fragmentOrder_.end());
     }
 
     FragmentedPacket& fp = it->second;
     fp.lastUpdate = chrono::steady_clock::now();
+    fragmentOrder_.splice(fragmentOrder_.end(), fragmentOrder_, fp.expiryPosition);
 
     if (fp.completed)
         return false;
@@ -224,13 +227,16 @@ UdpPacketInfo* UdpPacketAssembler::CreateUdpPacketInfo(uint32_t srcIp, uint32_t 
 
 void UdpPacketAssembler::CleanupTimeoutFragments() {
     auto now = chrono::steady_clock::now();
-    for (auto it = fragments_.begin(); it != fragments_.end(); ) {
+    while (!fragmentOrder_.empty()) {
+        auto it = fragments_.find(fragmentOrder_.front());
         auto elapsed = chrono::duration_cast<chrono::milliseconds>(now - it->second.lastUpdate).count();
         if (elapsed > static_cast<int64_t>(timeoutMs_)) {
-            it = fragments_.erase(it);
+            if (!it->second.completed) expiredIncomplete_.fetch_add(1, std::memory_order_relaxed);
+            fragments_.erase(it);
+            fragmentOrder_.pop_front();
         }
         else {
-            ++it;
+            break;
         }
     }
 }

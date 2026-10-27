@@ -42,7 +42,7 @@ int main(int argc, char* argv[]) {
             return 0;
         }
         else {
-            cerr << "Unknown option: " << arg << endl;
+            cerr << "cli_invalid_option option=" << LogValue(arg) << endl;
             PrintHelp();
             return 1;
         }
@@ -52,15 +52,15 @@ int main(int argc, char* argv[]) {
     g_Client = &client;
 
     if (serviceMode) {
-        client.GetLogger().log(LOGGER_LEVEL_INFO, "Starting in service mode");
+        client.GetLogger().log(LOGGER_LEVEL_INFO, "client_starting mode=service");
         return ServiceManager::Run() ? 0 : 1;
     }
     else {
         if (!client.Initialize(configPath, !serviceMode)) {
-            cerr << "Failed to initialize application" << endl;
+            cerr << "client_init_failed" << endl;
             return 1;
         }
-        client.GetLogger().log(LOGGER_LEVEL_INFO, "Starting in console mode");
+        client.GetLogger().log(LOGGER_LEVEL_INFO, "client_starting mode=console");
         client.RunConsole();
     }
 

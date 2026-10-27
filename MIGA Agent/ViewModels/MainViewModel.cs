@@ -24,7 +24,7 @@ namespace MIGA_Agent.ViewModels
         private string _savedLogLevel = "none";
         private string _savedTunnelMaxMss = "1400";
 
-        public IReadOnlyList<string> LogLevels { get; } = new[] { "none", "error", "info", "debug" };
+        public IReadOnlyList<string> LogLevels { get; } = new[] { "none", "error", "warning", "info", "debug" };
 
         [ObservableProperty]
         [NotifyDataErrorInfo]

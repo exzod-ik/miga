@@ -1,4 +1,5 @@
 #include "ServerCore.h"
+#include "InternetChecksum.h"
 #include <fstream>
 #include <nlohmann/json.hpp>
 #include <unistd.h>
@@ -8,7 +9,6 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <sstream>
-#include <ifaddrs.h>
 #include <chrono>
 #include <thread>
 #include <poll.h>
@@ -94,11 +94,10 @@ uint16_t tcp_checksum(const struct iphdr* ip, const struct tcphdr* tcp) {
     pseudo.protocol = IPPROTO_TCP;
     pseudo.tcp_len = htons(tcp_len);
 
-    vector<uint8_t> buf(sizeof(pseudo) + tcp_len);
-    memcpy(buf.data(), &pseudo, sizeof(pseudo));
-    memcpy(buf.data() + sizeof(pseudo), tcp, tcp_len);
-
-    return in_cksum((uint16_t*)buf.data(), buf.size());
+    InternetChecksum checksum;
+    checksum.Add(&pseudo, sizeof(pseudo));
+    checksum.Add(tcp, tcp_len);
+    return checksum.Value();
 }
 
 // calculate udp checksum
@@ -117,11 +116,10 @@ uint16_t udp_checksum(const struct iphdr* ip, const struct udphdr* udp) {
     pseudo.protocol = IPPROTO_UDP;
     pseudo.udp_len = udp->len;
 
-    vector<uint8_t> buf(sizeof(pseudo) + udp_len);
-    memcpy(buf.data(), &pseudo, sizeof(pseudo));
-    memcpy(buf.data() + sizeof(pseudo), udp, udp_len);
-
-    return in_cksum((uint16_t*)buf.data(), buf.size());
+    InternetChecksum checksum;
+    checksum.Add(&pseudo, sizeof(pseudo));
+    checksum.Add(udp, udp_len);
+    return checksum.Value();
 }
 
 ServerCore::ServerCore()
@@ -137,33 +135,15 @@ ServerCore::~ServerCore() {
     if (m_socket >= 0) close(m_socket);
 }
 
-// get ip of interface
-uint32_t ServerCore::GetInterfaceIP() {
-    struct ifaddrs* ifaddr, * ifa;
-    uint32_t ip = 0;
-    if (getifaddrs(&ifaddr) == -1) return 0;
-    for (ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next) {
-        if (ifa->ifa_addr == NULL) continue;
-        if (ifa->ifa_addr->sa_family == AF_INET && !(ifa->ifa_flags & IFF_LOOPBACK)) {
-            if (m_config.interface.empty() || strcmp(ifa->ifa_name, m_config.interface.c_str()) == 0) {
-                ip = ((struct sockaddr_in*)ifa->ifa_addr)->sin_addr.s_addr;
-                break;
-            }
-        }
-    }
-    freeifaddrs(ifaddr);
-    return ip;
-}
-
 // send unpacked ip packet to tun
 void ServerCore::SendPacket(const uint8_t* packet, size_t len) {
     ssize_t n = write(m_tunfd, packet, len);
     if (n < 0) {
-        m_logger.log(LOGGER_LEVEL_ERROR, "SendPacket error: " + string(strerror(errno)));
+        m_logger.logLazy(LOGGER_LEVEL_ERROR, [&] { return "tun_write_failed" + LogErrno(errno); });
         return;
     }
     if ((size_t)n != len) {
-        m_logger.log(LOGGER_LEVEL_ERROR, "Partial write to tun");
+        m_logger.logLazy(LOGGER_LEVEL_ERROR, [&] { return "tun_write_failed reason=partial_write expected_bytes=" + to_string(len) + " written_bytes=" + to_string(n); });
         return;
     }
     return;
@@ -174,16 +154,16 @@ bool ServerCore::InitSocket() {
 
     m_socket = socket(AF_INET, SOCK_RAW, IPPROTO_UDP);
     if (m_socket < 0) {
-        m_logger.log(LOGGER_LEVEL_ERROR, "Failed to create RAW socket (need root)");
+        m_logger.logLazy(LOGGER_LEVEL_ERROR, [&] { return "socket_create_failed type=RAW protocol=UDP required_privilege=root_or_cap_net_raw" + LogErrno(errno); });
         return false;
     }
     int one = 1;
     if (setsockopt(m_socket, IPPROTO_IP, IP_HDRINCL, &one, sizeof(one)) < 0) {
-        m_logger.log(LOGGER_LEVEL_ERROR, "Failed to set sockopt IP_HDRINCL");
+        m_logger.logLazy(LOGGER_LEVEL_ERROR, [&] { return "socket_option_failed option=IP_HDRINCL" + LogErrno(errno); });
         return false;
     }
 
-    m_logger.log(LOGGER_LEVEL_INFO, "RAW socket created");
+    m_logger.logLazy(LOGGER_LEVEL_INFO, [&] { return "socket_created type=RAW protocol=UDP"; });
     return true;
 }
 
@@ -193,7 +173,7 @@ bool ServerCore::CreateTUN(const char* dev_name) {
 
     // Открываем клон-устройство TUN
     if ((m_tunfd = open("/dev/net/tun", O_RDWR)) < 0) {
-        m_logger.log(LOGGER_LEVEL_ERROR, "Error while creating tun: can't open /dev/net/tun");
+        m_logger.logLazy(LOGGER_LEVEL_ERROR, [&] { return "tun_create_failed operation=open path=/dev/net/tun" + LogErrno(errno); });
         return false;
     }
 
@@ -206,14 +186,14 @@ bool ServerCore::CreateTUN(const char* dev_name) {
     }
 
     if (ioctl(m_tunfd, TUNSETIFF, (void*)&ifr) < 0) {
-        m_logger.log(LOGGER_LEVEL_ERROR, "Error while creating tun: ioctl TUNSETIFF");
+        m_logger.logLazy(LOGGER_LEVEL_ERROR, [&] { return "tun_create_failed operation=ioctl request=TUNSETIFF" + LogErrno(errno); });
         close(m_tunfd);
         return false;
     }
     
-    string msg = "TUN interface created: ";
-    msg += ifr.ifr_name;
-    m_logger.log(LOGGER_LEVEL_INFO, msg);
+    string msg = "tun_created interface=";
+    msg += LogValue(ifr.ifr_name);
+    m_logger.logLazy(LOGGER_LEVEL_INFO, [&] { return msg; });
 
     int flags = fcntl(m_tunfd, F_GETFL, 0);
     fcntl(m_tunfd, F_SETFL, flags | O_NONBLOCK);
@@ -232,7 +212,7 @@ bool ServerCore::CreateTUN(const char* dev_name) {
                 ofs.close();
             }
             else {
-                m_logger.log(LOGGER_LEVEL_ERROR, "Failed to enable IP forwarding");
+                m_logger.logLazy(LOGGER_LEVEL_ERROR, [&] { return "ip_forwarding_enable_failed"; });
                 close(m_tunfd);
                 return false;
             }
@@ -291,14 +271,16 @@ void ServerCore::ProcessClientUdpPacket(UdpPacketInfo* pkt) {
     uint32_t original_src_ip = origIp->saddr;
     uint16_t original_src_port = 0;
     string proto, flags = "";
+    TcpSegment tcpSegment;
 
     if (origIp->protocol == IPPROTO_TCP) {
+        if (!TcpSegment::Parse(origIpPacket, origIpLen, tcpSegment)) return;
         struct tcphdr* tcp = (struct tcphdr*)(origIpPacket + origIpHeaderLen);
         original_src_port = ntohs(tcp->source);
         original_dst_port = ntohs(tcp->dest);
         proto = "TCP";
-        if (m_logger.isEnabled()) {
-            flags = " flags=" + tcpFlags(tcp);
+        if (m_logger.isEnabled(LOGGER_LEVEL_DEBUG)) {
+            flags = " tcp_flags_text=" + LogValue(tcpFlags(tcp));
         }
     }
     else if (origIp->protocol == IPPROTO_UDP) {
@@ -314,8 +296,8 @@ void ServerCore::ProcessClientUdpPacket(UdpPacketInfo* pkt) {
     if (m_config.dns_server && origIp->protocol == IPPROTO_UDP && original_dst_port == 53) {
         dnsRedirect = true;
         original_dst_ip = m_config.dns_server;
-        if (m_logger.isEnabled()) {
-            m_logger.log(LOGGER_LEVEL_INFO, "DNS redirect: " + IpToString(saved_dst_ip) + " -> " + IpToString(m_config.dns_server));
+        if (m_logger.isEnabled(LOGGER_LEVEL_DEBUG)) {
+            m_logger.logLazy(LOGGER_LEVEL_DEBUG, [&] { return "dns_query_redirected original_ip=" + IpToString(saved_dst_ip) + " server_ip=" + IpToString(m_config.dns_server); });
         }
     }
 
@@ -337,49 +319,65 @@ void ServerCore::ProcessClientUdpPacket(UdpPacketInfo* pkt) {
 
     {
         lock_guard<mutex> lock(m_connMutex);
+        lock_guard<mutex> lock_table(m_tableMutex);
+        const auto now = chrono::steady_clock::now();
         auto it = m_connPortMap.find(connKey);
-        if (it != m_connPortMap.end()) {
+        auto replaced = m_forwardTable.end();
+        if (it != m_connPortMap.end() && origIp->protocol == IPPROTO_TCP) {
+            auto forward = m_forwardTable.find((uint32_t(origIp->protocol) << 16) | it->second.port);
+            if (forward != m_forwardTable.end() && forward->second.tcpState.IsNewConnection(tcpSegment)) {
+                replaced = forward;
+            }
+        }
+        if (it != m_connPortMap.end() && replaced == m_forwardTable.end()) {
             chosen_src_port = it->second.port;
-            it->second.last_used = chrono::steady_clock::now();
-            if (m_logger.isEnabled())
-                m_logger.log(LOGGER_LEVEL_DEBUG, "  Using existing port=" + to_string(chosen_src_port));
+            if (m_logger.isEnabled(LOGGER_LEVEL_DEBUG))
+                m_logger.logLazy(LOGGER_LEVEL_DEBUG, [&] { return "source_port_selected reused=1 port=" + to_string(chosen_src_port); });
         }
         else if (isNewConnection) {
-            bool port_found = false;
-            for (int attempt = 0; attempt < 10; ++attempt) {
-                chosen_src_port = m_portDist(m_rng);
-                auto key = make_tuple(chosen_src_port, origIp->protocol);
-                lock_guard<mutex> lock_table(m_tableMutex);
-                if (m_forwardTable.find(key) == m_forwardTable.end()) {
-                    port_found = true;
-                    break;
-                }
-            }
-            if (!port_found) {
-                m_logger.log(LOGGER_LEVEL_ERROR, "No free source port for destination " + IpToString(original_dst_ip));
+            auto& ports = origIp->protocol == IPPROTO_TCP ? m_tcpPorts : m_udpPorts;
+            auto port = ports.Acquire(m_rng);
+            if (!port) {
+                m_logger.logLazy(LOGGER_LEVEL_ERROR, [&] { return "source_port_exhausted dst_ip=" + IpToString(original_dst_ip); });
                 return;
+            }
+            chosen_src_port = *port;
+            if (replaced != m_forwardTable.end()) {
+                replaced->second.tcpState.Retire();
+                replaced->second.last_used = now;
             }
             PortInfo info;
             info.port = chosen_src_port;
-            info.last_used = chrono::steady_clock::now();
             m_connPortMap[connKey] = info;
-            if (m_logger.isEnabled())
-                m_logger.log(LOGGER_LEVEL_DEBUG, "  Generated new port=" + to_string(chosen_src_port));
+            if (m_logger.isEnabled(LOGGER_LEVEL_DEBUG))
+                m_logger.logLazy(LOGGER_LEVEL_DEBUG, [&] { return "source_port_selected reused=0 port=" + to_string(chosen_src_port); });
         }
         else {
             if (origIp->protocol == IPPROTO_TCP) {
-                m_logger.log(LOGGER_LEVEL_INFO, "  Ignoring non-SYN TCP packet for unknown connection");
+                m_logger.logLazy(LOGGER_LEVEL_WARNING, [&] { return "server_packet_drop protocol=TCP reason=unknown_connection_non_syn"; });
             }
             else {
-                m_logger.log(LOGGER_LEVEL_INFO, "  Ignoring UDP packet for unknown connection (should not happen)");
+                m_logger.logLazy(LOGGER_LEVEL_WARNING, [&] { return "server_packet_drop protocol=UDP reason=unknown_connection"; });
             }
             return;
         }
+        auto& info = m_forwardTable[(uint32_t(origIp->protocol) << 16) | chosen_src_port];
+        info.local_udp_port = local_udp_port;
+        info.client_ip = client_ip;
+        info.client_udp_port = client_udp_port;
+        info.original_src_ip = original_src_ip;
+        info.original_src_port = original_src_port;
+        info.original_dst_ip = saved_dst_ip;
+        info.remote_ip = original_dst_ip;
+        info.remote_port = original_dst_port;
+        info.last_used = now;
+        if (origIp->protocol == IPPROTO_TCP)
+            info.tcpState.Observe(tcpSegment, true);
     }
 
-    if (m_logger.isEnabled()) {
-        m_logger.log(LOGGER_LEVEL_INFO, "CLIENT->SERVER: " + proto + " " + IpToString(origIp->saddr) + ":" + to_string(original_src_port) +
-            " to " + IpToString(origIp->daddr) + ":" + to_string(original_dst_port) + " (fwd_srv_port=" + to_string(chosen_src_port) + ")" + flags);
+    if (m_logger.isEnabled(LOGGER_LEVEL_DEBUG)) {
+        m_logger.logLazy(LOGGER_LEVEL_DEBUG, [&] { return "packet_forwarded direction=client_to_server protocol=" + proto + " src=" + IpToString(origIp->saddr) + ":" + to_string(original_src_port) +
+            " dst=" + IpToString(origIp->daddr) + ":" + to_string(original_dst_port) + " forwarded_port=" + to_string(chosen_src_port) + flags; });
     }
 
     vector<uint8_t> outPacket(origIpLen);
@@ -407,32 +405,11 @@ void ServerCore::ProcessClientUdpPacket(UdpPacketInfo* pkt) {
     }
 
     SendPacket(outPacket.data(), outPacket.size());
-
-    ClientInfo info;
-    info.local_udp_port = local_udp_port;
-    info.client_ip = client_ip;
-    info.client_udp_port = client_udp_port;
-    info.original_src_ip = original_src_ip;
-    info.original_src_port = original_src_port;
-    info.original_dst_ip = saved_dst_ip;
-    info.last_used = chrono::steady_clock::now();
-
-    auto key = make_tuple(chosen_src_port, origIp->protocol);
-    {
-        lock_guard<mutex> lock(m_tableMutex);
-        m_forwardTable[key] = info;
-        if (m_logger.isEnabled()) {
-            stringstream ss;
-            ss << "Adding forward entry: original_dst_ip=" << inet_ntoa(*(in_addr*)&original_dst_ip)
-                << " chosen_src_port=" << chosen_src_port;
-            m_logger.log(LOGGER_LEVEL_DEBUG, ss.str());
-        }
-    }
 }
 
 bool ServerCore::ValidateInnerIpPacket(const uint8_t* packet, size_t len, struct iphdr*& outIp, size_t& outIpHeaderLen) {
     if (len < sizeof(struct iphdr)) {
-        m_logger.log(LOGGER_LEVEL_ERROR, "Inner IP packet too short for IP header");
+        m_logger.logLazy(LOGGER_LEVEL_ERROR, [&] { return "inner_packet_invalid reason=ip_header_truncated"; });
         return false;
     }
 
@@ -440,37 +417,37 @@ bool ServerCore::ValidateInnerIpPacket(const uint8_t* packet, size_t len, struct
 
     // ip version
     if (ip->version != 4) {
-        m_logger.log(LOGGER_LEVEL_ERROR, "Inner IP packet has invalid version (must be 4)");
+        m_logger.logLazy(LOGGER_LEVEL_ERROR, [&] { return "inner_packet_invalid reason=ip_version expected=4"; });
         return false;
     }
 
     // header length
     uint8_t ihl = ip->ihl;
     if (ihl < 5 || ihl > 15) {
-        m_logger.log(LOGGER_LEVEL_ERROR, "Inner IP packet has invalid header length: " + to_string(ihl));
+        m_logger.logLazy(LOGGER_LEVEL_ERROR, [&] { return "inner_packet_invalid reason=ip_header_length header_length=" + to_string(ihl); });
         return false;
     }
 
     size_t ipHeaderLen = ihl * 4;
     if (len < ipHeaderLen) {
-        m_logger.log(LOGGER_LEVEL_ERROR, "Inner IP packet too short for claimed header length");
+        m_logger.logLazy(LOGGER_LEVEL_ERROR, [&] { return "inner_packet_invalid reason=claimed_ip_header_truncated"; });
         return false;
     }
 
     // packet length
     uint16_t totalLen = ntohs(ip->tot_len);
     if (totalLen < ipHeaderLen) {
-        m_logger.log(LOGGER_LEVEL_ERROR, "Inner IP total length less than header length");
+        m_logger.logLazy(LOGGER_LEVEL_ERROR, [&] { return "inner_packet_invalid reason=ip_total_length_below_header"; });
         return false;
     }
     if (totalLen > len) {
-        m_logger.log(LOGGER_LEVEL_ERROR, "Inner IP packet larger than available data");
+        m_logger.logLazy(LOGGER_LEVEL_ERROR, [&] { return "inner_packet_invalid reason=ip_total_length_exceeds_buffer"; });
         return false;
     }
 
     // protocol
     if (ip->protocol != IPPROTO_TCP && ip->protocol != IPPROTO_UDP) {
-        m_logger.log(LOGGER_LEVEL_ERROR, "Inner IP packet has unsupported protocol: " + to_string(ip->protocol));
+        m_logger.logLazy(LOGGER_LEVEL_ERROR, [&] { return "inner_packet_invalid reason=unsupported_protocol protocol=" + to_string(ip->protocol); });
         return false;
     }
 
@@ -478,33 +455,33 @@ bool ServerCore::ValidateInnerIpPacket(const uint8_t* packet, size_t len, struct
     size_t transportOffset = ipHeaderLen;
     if (ip->protocol == IPPROTO_TCP) {
         if (totalLen < transportOffset + sizeof(struct tcphdr)) {
-            m_logger.log(LOGGER_LEVEL_ERROR, "Inner TCP packet too short for TCP header");
+            m_logger.logLazy(LOGGER_LEVEL_ERROR, [&] { return "inner_packet_invalid protocol=TCP reason=header_truncated"; });
             return false;
         }
         struct tcphdr* tcp = (struct tcphdr*)(packet + transportOffset);
         uint8_t tcpHeaderLen = tcp->doff * 4;
         if (tcpHeaderLen < sizeof(struct tcphdr)) {
-            m_logger.log(LOGGER_LEVEL_ERROR, "Inner TCP header length too small");
+            m_logger.logLazy(LOGGER_LEVEL_ERROR, [&] { return "inner_packet_invalid protocol=TCP reason=header_length"; });
             return false;
         }
         if (transportOffset + tcpHeaderLen > totalLen) {
-            m_logger.log(LOGGER_LEVEL_ERROR, "Inner TCP packet truncated");
+            m_logger.logLazy(LOGGER_LEVEL_ERROR, [&] { return "inner_packet_invalid protocol=TCP reason=packet_truncated"; });
             return false;
         }
     }
     else if (ip->protocol == IPPROTO_UDP) {
         if (totalLen < transportOffset + sizeof(struct udphdr)) {
-            m_logger.log(LOGGER_LEVEL_ERROR, "Inner UDP packet too short for UDP header");
+            m_logger.logLazy(LOGGER_LEVEL_ERROR, [&] { return "inner_packet_invalid protocol=UDP reason=header_truncated"; });
             return false;
         }
         struct udphdr* udp = (struct udphdr*)(packet + transportOffset);
         uint16_t udpLen = ntohs(udp->len);
         if (udpLen < sizeof(struct udphdr)) {
-            m_logger.log(LOGGER_LEVEL_ERROR, "Inner UDP length field too small");
+            m_logger.logLazy(LOGGER_LEVEL_ERROR, [&] { return "inner_packet_invalid protocol=UDP reason=length_below_header"; });
             return false;
         }
         if (transportOffset + udpLen > totalLen) {
-            m_logger.log(LOGGER_LEVEL_ERROR, "Inner UDP packet truncated");
+            m_logger.logLazy(LOGGER_LEVEL_ERROR, [&] { return "inner_packet_invalid protocol=UDP reason=packet_truncated"; });
             return false;
         }
     }
@@ -515,13 +492,16 @@ bool ServerCore::ValidateInnerIpPacket(const uint8_t* packet, size_t len, struct
 }
 
 void ServerCore::HandleInternetPacket(const uint8_t* ipPacket, size_t ipLen, uint16_t dstPort) {
-    if (m_logger.isEnabled())
-        m_logger.log(LOGGER_LEVEL_DEBUG, "HandleInternetPacket called, dstPort=" + to_string(dstPort));
+    if (m_logger.isEnabled(LOGGER_LEVEL_DEBUG))
+        m_logger.logLazy(LOGGER_LEVEL_DEBUG, [&] { return "internet_packet_processing_started dst_port=" + to_string(dstPort); });
 
     if (dstPort < SRC_PORT_START || dstPort > SRC_PORT_END) return;
+    if (ipLen < sizeof(struct iphdr)) return;
 
     struct iphdr* ip = (struct iphdr*)ipPacket;
     if (ip->protocol != IPPROTO_TCP && ip->protocol != IPPROTO_UDP) return;
+    TcpSegment tcpSegment;
+    if (ip->protocol == IPPROTO_TCP && !TcpSegment::Parse(ipPacket, ipLen, tcpSegment)) return;
 
     size_t ipHeaderLen = ip->ihl * 4;
     if (ipLen < ipHeaderLen) return;
@@ -538,101 +518,92 @@ void ServerCore::HandleInternetPacket(const uint8_t* ipPacket, size_t ipLen, uin
         srcPort = ntohs(udp->source);
     }
 
-    char src_ip_str[INET_ADDRSTRLEN], dst_ip_str[INET_ADDRSTRLEN];
-    inet_ntop(AF_INET, &(ip->saddr), src_ip_str, INET_ADDRSTRLEN);
-    inet_ntop(AF_INET, &(ip->daddr), dst_ip_str, INET_ADDRSTRLEN);
-
-    auto key = make_tuple(dstPort, ip->protocol);
+    const uint32_t key = (uint32_t(ip->protocol) << 16) | dstPort;
     ClientInfo info;
     bool found = false;
     {
         lock_guard<mutex> lock(m_tableMutex);
         auto it = m_forwardTable.find(key);
         if (it != m_forwardTable.end()) {
+            if (ip->protocol == IPPROTO_TCP) {
+                if (ip->saddr != it->second.remote_ip || srcPort != it->second.remote_port) return;
+                it->second.tcpState.Observe(tcpSegment, false);
+            }
+            it->second.last_used = chrono::steady_clock::now();
             info = it->second;
             found = true;
-            it->second.last_used = chrono::steady_clock::now();
         }
     }
 
-    if (m_logger.isEnabled()) {
+    if (m_logger.isEnabled(LOGGER_LEVEL_DEBUG)) {
         stringstream ss;
-        ss << "Looking for key: src_ip=" << src_ip_str << " dst_port=" << dstPort;
-        m_logger.log(LOGGER_LEVEL_DEBUG, ss.str());
+        ss << "reverse_route_lookup src_ip=" << IpToString(ip->saddr) << " dst_port=" << dstPort;
+        m_logger.logLazy(LOGGER_LEVEL_DEBUG, [&] { return ss.str(); });
     }
 
     if (!found) {
-        m_logger.log(LOGGER_LEVEL_INFO, "No client found for packet");
+        m_logger.logLazy(LOGGER_LEVEL_WARNING, [&] { return "server_packet_drop reason=reverse_route_missing"; });
         return;
     }
 
-    if (m_logger.isEnabled()) {
+    if (m_logger.isEnabled(LOGGER_LEVEL_DEBUG)) {
         stringstream ss2;
-        ss2 << "Found client for " << src_ip_str << ":" << srcPort
-            << " -> " << dst_ip_str << ":" << dstPort
+        ss2 << "reverse_route_found src=" << IpToString(ip->saddr) << ":" << srcPort
+            << " dst=" << IpToString(ip->daddr) << ":" << dstPort
             << " client=" << inet_ntoa(*(in_addr*)&info.client_ip) << ":" << info.client_udp_port
-            << " original client = " << inet_ntoa(*(in_addr*)&info.original_src_ip) << ":" << info.original_src_port;
-        m_logger.log(LOGGER_LEVEL_DEBUG, ss2.str());
+            << " original_client=" << inet_ntoa(*(in_addr*)&info.original_src_ip) << ":" << info.original_src_port;
+        m_logger.logLazy(LOGGER_LEVEL_DEBUG, [&] { return ss2.str(); });
     }
 
-    bool shouldRemove = false;
-    if (ip->protocol == IPPROTO_TCP) {
-        struct tcphdr* tcp = (struct tcphdr*)(ipPacket + ipHeaderLen);
-        if (tcp->fin || tcp->rst) {
-            shouldRemove = true;
-        }
-    }
-
-    vector<uint8_t> outPacket(ipLen);
-    memcpy(outPacket.data(), ipPacket, ipLen);
-    struct iphdr* outIp = (struct iphdr*)outPacket.data();
+    const size_t outerHeaderLength = sizeof(iphdr) + sizeof(udphdr);
+    vector<uint8_t> udpPacket(outerHeaderLength + ipLen);
+    auto* innerPacket = udpPacket.data() + outerHeaderLength;
+    memcpy(innerPacket, ipPacket, ipLen);
+    struct iphdr* outIp = reinterpret_cast<iphdr*>(innerPacket);
     outIp->daddr = info.original_src_ip;
     outIp->saddr = info.original_dst_ip;
 
     if (outIp->protocol == IPPROTO_TCP) {
-        struct tcphdr* tcp = (struct tcphdr*)(outPacket.data() + outIp->ihl * 4);
+        struct tcphdr* tcp = (struct tcphdr*)(innerPacket + outIp->ihl * 4);
         tcp->dest = htons(info.original_src_port);
     }
     else if (outIp->protocol == IPPROTO_UDP) {
-        struct udphdr* udp = (struct udphdr*)(outPacket.data() + outIp->ihl * 4);
+        struct udphdr* udp = (struct udphdr*)(innerPacket + outIp->ihl * 4);
         udp->dest = htons(info.original_src_port);
     }
 
-    if (m_logger.isEnabled()) {
+    if (m_logger.isEnabled(LOGGER_LEVEL_DEBUG)) {
         string proto, flags = "";
         uint16_t logSrcPort = 0, logDestPort = 0;
         if (outIp->protocol == IPPROTO_TCP) {
-            struct tcphdr* tcp = (struct tcphdr*)(outPacket.data() + outIp->ihl * 4);
+            struct tcphdr* tcp = (struct tcphdr*)(innerPacket + outIp->ihl * 4);
             logSrcPort = ntohs(tcp->source);
             logDestPort = ntohs(tcp->dest);
             proto = "TCP";
-            flags = " flags=" + tcpFlags(tcp);
+            flags = " tcp_flags_text=" + LogValue(tcpFlags(tcp));
         }
         else if (outIp->protocol == IPPROTO_UDP) {
-            struct udphdr* udp = (struct udphdr*)(outPacket.data() + outIp->ihl * 4);
+            struct udphdr* udp = (struct udphdr*)(innerPacket + outIp->ihl * 4);
             logSrcPort = ntohs(udp->source);
             logDestPort = ntohs(udp->dest);
             proto = "UDP";
         }
 
-        m_logger.log(LOGGER_LEVEL_INFO, "SERVER->CLIENT: " + proto + " " + IpToString(outIp->saddr) + ":" + to_string(logSrcPort) +
-            " to " + IpToString(outIp->daddr) + ":" + to_string(logDestPort) + " (fwd_srv_port=" + to_string(dstPort) + ")" + flags);
+        m_logger.logLazy(LOGGER_LEVEL_DEBUG, [&] { return "packet_forwarded direction=server_to_client protocol=" + proto + " src=" + IpToString(outIp->saddr) + ":" + to_string(logSrcPort) +
+            " dst=" + IpToString(outIp->daddr) + ":" + to_string(logDestPort) + " forwarded_port=" + to_string(dstPort) + flags; });
     }
 
-    vector<uint8_t> responsePacket(outPacket.size());
-    memcpy(responsePacket.data(), outPacket.data(), outPacket.size());
-
-    m_encryption.Encrypt(responsePacket.data(), responsePacket.size(), info.local_udp_port);
+    m_encryption.Encrypt(innerPacket, ipLen, info.local_udp_port);
 
     struct iphdr udpIp;
     memset(&udpIp, 0, sizeof(udpIp));
     udpIp.version = 4;
     udpIp.ihl = 5;
-    udpIp.tot_len = htons(static_cast<uint16_t>(sizeof(udpIp) + sizeof(struct udphdr) + responsePacket.size()));
+    udpIp.tot_len = htons(static_cast<uint16_t>(sizeof(udpIp) + sizeof(struct udphdr) + ipLen));
     udpIp.id = htons(static_cast<uint16_t>(rand() & 0xFFFF));
     udpIp.ttl = 64;
     udpIp.protocol = IPPROTO_UDP;
-    udpIp.saddr = GetInterfaceIP();
+    udpIp.saddr = m_interfaceIp.Get();
     udpIp.daddr = info.client_ip;
     udpIp.check = 0;
     udpIp.check = in_cksum((uint16_t*)&udpIp, static_cast<int>(sizeof(udpIp)));
@@ -640,71 +611,61 @@ void ServerCore::HandleInternetPacket(const uint8_t* ipPacket, size_t ipLen, uin
     struct udphdr udpHeader;
     udpHeader.source = htons(info.local_udp_port);
     udpHeader.dest = htons(info.client_udp_port);
-    udpHeader.len = htons(static_cast<uint16_t>(sizeof(udphdr) + responsePacket.size()));
+    udpHeader.len = htons(static_cast<uint16_t>(sizeof(udphdr) + ipLen));
     udpHeader.check = 0;
 
-    vector<uint8_t> udpPacket(sizeof(udpIp) + sizeof(udpHeader) + responsePacket.size());
     memcpy(udpPacket.data(), &udpIp, sizeof(udpIp));
     memcpy(udpPacket.data() + sizeof(udpIp), &udpHeader, sizeof(udpHeader));
-    memcpy(udpPacket.data() + sizeof(udpIp) + sizeof(udpHeader), responsePacket.data(), responsePacket.size());
 
     struct sockaddr_in dummy;
     memset(&dummy, 0, sizeof(dummy));
     dummy.sin_family = AF_INET;  // или любой другой
     dummy.sin_addr.s_addr = udpIp.daddr;
     dummy.sin_port = udpHeader.dest;
+    if (udpPacket.size() > 1500)
+        m_logger.recordWarning(NetworkWarning::LargeTunnelPacket, udpPacket.size());
     ssize_t sent = sendto(m_socket, udpPacket.data(), udpPacket.size(), 0,
         (struct sockaddr*)&dummy, sizeof(dummy));
 
-    if (m_logger.isEnabled()) {
+    if (m_logger.isEnabled(LOGGER_LEVEL_ERROR)) {
         if (sent < 0) {
-            m_logger.log(LOGGER_LEVEL_ERROR, "Failed to send to client: " + string(strerror(errno)));
+            m_logger.logLazy(LOGGER_LEVEL_ERROR, [&] { return "tunnel_send_failed direction=to_client" + LogErrno(errno); });
         }
-        else {
+        else if (m_logger.isEnabled(LOGGER_LEVEL_DEBUG)) {
             stringstream ss3;
-            ss3 << "Sent response to client " << inet_ntoa(*(in_addr*)&info.client_ip) << ":" << info.client_udp_port << " (" << sent << " bytes)";
-            m_logger.log(LOGGER_LEVEL_DEBUG, ss3.str());
+            ss3 << "tunnel_packet_sent client=" << inet_ntoa(*(in_addr*)&info.client_ip) << ":" << info.client_udp_port << " size=" << sent;
+            m_logger.logLazy(LOGGER_LEVEL_DEBUG, [&] { return ss3.str(); });
         }
-    }
-
-    if (shouldRemove) {
-        lock_guard<mutex> lockForward(m_tableMutex);
-        auto itForward = m_forwardTable.find(key);
-        if (itForward != m_forwardTable.end()) {
-            m_forwardTable.erase(itForward);
-        }
-        lock_guard<mutex> lockConn(m_connMutex);
-        auto connKey = make_tuple(info.original_src_ip, info.original_src_port, ip->saddr, srcPort, ip->protocol);
-        m_connPortMap.erase(connKey);
-        m_logger.log(LOGGER_LEVEL_INFO, "Removed connection mapping for FIN/RST");
     }
 }
 
 // cleaning thread
 void ServerCore::CleanupLoop() {
-    const auto tcp_timeout = chrono::minutes(124); //  RFC 5382
     const auto udp_timeout = chrono::minutes(20);
+    auto lastWarningReport = chrono::steady_clock::now();
     while (m_running) {
         this_thread::sleep_for(chrono::seconds(1));
         auto now = chrono::steady_clock::now();
+        if (now - lastWarningReport >= chrono::seconds(5)) {
+            m_logger.recordWarning(NetworkWarning::IncompleteFragments, 0, m_assembler.TakeExpiredIncompleteCount());
+            m_logger.flushWarnings();
+            lastWarningReport = now;
+        }
         {
             lock_guard<mutex> lock(m_connMutex);
-            for (auto it = m_connPortMap.begin(); it != m_connPortMap.end(); ) {
-                auto timeout = (get<4>(it->first) == IPPROTO_TCP) ? tcp_timeout : udp_timeout;
-                if (now - it->second.last_used > timeout) {
-                    it = m_connPortMap.erase(it);
-                }
-                else {
-                    ++it;
-                }
-            }
-        }
-
-        {
-            lock_guard<mutex> lock(m_tableMutex);
+            lock_guard<mutex> lockTable(m_tableMutex);
             for (auto it = m_forwardTable.begin(); it != m_forwardTable.end(); ) {
-                auto timeout = (get<1>(it->first) == IPPROTO_TCP) ? tcp_timeout : udp_timeout;
+                const auto& info = it->second;
+                const auto protocol = static_cast<uint8_t>(it->first >> 16);
+                auto timeout = (protocol == IPPROTO_TCP) ? info.tcpState.IdleTimeout() : udp_timeout;
                 if (now - it->second.last_used > timeout) {
+                    auto connKey = make_tuple(info.original_src_ip, info.original_src_port,
+                        info.remote_ip, info.remote_port, protocol);
+                    auto connection = m_connPortMap.find(connKey);
+                    if (connection != m_connPortMap.end() && connection->second.port == static_cast<uint16_t>(it->first))
+                        m_connPortMap.erase(connection);
+                    auto& ports = protocol == IPPROTO_TCP ? m_tcpPorts : m_udpPorts;
+                    ports.Release(static_cast<uint16_t>(it->first));
                     it = m_forwardTable.erase(it);
                 }
                 else {
@@ -724,11 +685,11 @@ bool ServerCore::EnsureFirewallRules() {
 
     string add = "iptables -w -A POSTROUTING -t nat -s 10.0.0.0/24 ! -o tun_miga -j MASQUERADE";
     if (system(add.c_str()) != 0) {
-        m_logger.log(LOGGER_LEVEL_ERROR, "Failed to add MASQUERADE rule for tun_miga");
+        m_logger.logLazy(LOGGER_LEVEL_ERROR, [&] { return "nat_rule_restore_failed interface=tun_miga rule=MASQUERADE"; });
         return false;
     }
 
-    m_logger.log(LOGGER_LEVEL_INFO, "MASQUERADE rule for tun_miga was missing, re-added");
+    m_logger.logLazy(LOGGER_LEVEL_INFO, [&] { return "nat_rule_restored interface=tun_miga rule=MASQUERADE reason=missing"; });
     return true;
 }
 
@@ -742,7 +703,7 @@ void ServerCore::FirewallWatchdogLoop() {
 
 // client packet sniffing thread
 void ServerCore::ProcessPackets() {
-    m_logger.log(LOGGER_LEVEL_INFO, "Packet processing thread started");
+    m_logger.logLazy(LOGGER_LEVEL_INFO, [&] { return "worker_started worker=client_packets"; });
 
     int flags = fcntl(m_socket, F_GETFL, 0);
     fcntl(m_socket, F_SETFL, flags | O_NONBLOCK);
@@ -755,7 +716,7 @@ void ServerCore::ProcessPackets() {
         int ret = poll(&pfd, 1, 1000);
         if (ret < 0) {
             if (errno == EINTR) continue;
-            m_logger.log(LOGGER_LEVEL_ERROR, "poll error: " + string(strerror(errno)));
+            m_logger.logLazy(LOGGER_LEVEL_ERROR, [&] { return "io_failed operation=poll" + LogErrno(errno); });
             break;
         }
         if (ret == 0) continue;
@@ -766,8 +727,8 @@ void ServerCore::ProcessPackets() {
             ssize_t received = recvfrom(m_socket, m_recvBuffer.data(), m_recvBuffer.size(), 0,
                 (struct sockaddr*)&fromAddr, &addrLen);
             if (received < 0) {
-                if (errno != EAGAIN && errno != EWOULDBLOCK && m_logger.isEnabled()) {
-                    m_logger.log(LOGGER_LEVEL_ERROR, "recvfrom error: " + string(strerror(errno)));
+                if (errno != EAGAIN && errno != EWOULDBLOCK && m_logger.isEnabled(LOGGER_LEVEL_ERROR)) {
+                    m_logger.logLazy(LOGGER_LEVEL_ERROR, [&] { return "io_failed operation=recvfrom" + LogErrno(errno); });
                 }
                 continue;
             }
@@ -788,24 +749,26 @@ void ServerCore::ProcessPackets() {
                 dstPort = ntohs(udp->dest);
             }
             if (dstPort >= m_config.client_port_start && dstPort <= m_config.client_port_end) {
-                if (m_logger.isEnabled()) {
+                if (m_logger.isEnabled(LOGGER_LEVEL_DEBUG)) {
                     char src_ip[INET_ADDRSTRLEN], dst_ip[INET_ADDRSTRLEN];
                     inet_ntop(AF_INET, &(ip->saddr), src_ip, INET_ADDRSTRLEN);
                     inet_ntop(AF_INET, &(ip->daddr), dst_ip, INET_ADDRSTRLEN);
-                    m_logger.log(LOGGER_LEVEL_DEBUG, "Client packet from " + string(src_ip) + ":" + to_string(ntohs(udp->source)) +
-                        " to " + string(dst_ip) + ":" + to_string(dstPort));
+                    m_logger.logLazy(LOGGER_LEVEL_DEBUG, [&] { return "tunnel_packet_received src=" + string(src_ip) + ":" + to_string(ntohs(udp->source)) +
+                        " dst=" + string(dst_ip) + ":" + to_string(dstPort); });
                 }
+                const auto processingStarted = chrono::steady_clock::now();
                 HandleClientPacket(ipPacket, ipLen, dstPort);
+                m_logger.recordDelay(NetworkWarning::ClientPacketProcessing, processingStarted);
             }
         }
     }
 
-    m_logger.log(LOGGER_LEVEL_INFO, "Packet processing thread stopped");
+    m_logger.logLazy(LOGGER_LEVEL_INFO, [&] { return "worker_stopped worker=client_packets"; });
 }
 
 // target servers packet sniffing thread
 void ServerCore::ProcessTUN() {
-    m_logger.log(LOGGER_LEVEL_INFO, "Tun processing thread started");
+    m_logger.logLazy(LOGGER_LEVEL_INFO, [&] { return "worker_started worker=tun_packets"; });
 
     struct pollfd pfd;
     pfd.fd = m_tunfd;
@@ -816,7 +779,7 @@ void ServerCore::ProcessTUN() {
         int ret = poll(&pfd, 1, 1000);
         if (ret < 0) {
             if (errno == EINTR) continue;
-            m_logger.log(LOGGER_LEVEL_ERROR, "poll error: " + string(strerror(errno)));
+            m_logger.logLazy(LOGGER_LEVEL_ERROR, [&] { return "io_failed operation=poll" + LogErrno(errno); });
             break;
         }
         if (ret == 0) continue;
@@ -827,49 +790,51 @@ void ServerCore::ProcessTUN() {
                 if (errno == EAGAIN || errno == EWOULDBLOCK) {
                     continue;
                 }
-                m_logger.log(LOGGER_LEVEL_ERROR, "Error while reading from TUN");
+                m_logger.logLazy(LOGGER_LEVEL_ERROR, [&] { return "tun_read_failed" + LogErrno(errno); });
                 break;
             }
             if (ipLen == 0) {
-                m_logger.log(LOGGER_LEVEL_INFO, "TUN device closed");
+                m_logger.logLazy(LOGGER_LEVEL_INFO, [&] { return "tun_closed"; });
                 break;
             }
 
             struct iphdr* iph = (struct iphdr*)buffer;
-            if (m_logger.isEnabled()) {
+            if (m_logger.isEnabled(LOGGER_LEVEL_DEBUG)) {
                 stringstream ss;
-                ss << "Received " << ipLen << " bytes, "
-                    << "src: " << inet_ntoa(*(struct in_addr*)&iph->saddr)
-                    << " dst: " << inet_ntoa(*(struct in_addr*)&iph->daddr)
-                    << " proto: " << (int)iph->protocol;
-                m_logger.log(LOGGER_LEVEL_DEBUG, ss.str());
+                ss << "tun_packet_received size=" << ipLen
+                    << " src=" << inet_ntoa(*(struct in_addr*)&iph->saddr)
+                    << " dst=" << inet_ntoa(*(struct in_addr*)&iph->daddr)
+                    << " protocol=" << (int)iph->protocol;
+                m_logger.logLazy(LOGGER_LEVEL_DEBUG, [&] { return ss.str(); });
             }
 
             size_t ipHeaderLen = iph->ihl * 4;
             if (ipLen < ipHeaderLen + sizeof(struct udphdr)) continue;
             uint16_t dstPort = 0;
             if (iph->protocol == IPPROTO_UDP) {
-                m_logger.log(LOGGER_LEVEL_DEBUG, "Tun UDP received");
+                m_logger.logLazy(LOGGER_LEVEL_DEBUG, [&] { return "tun_packet_received protocol=UDP"; });
                 struct udphdr* udp = (struct udphdr*)(buffer + ipHeaderLen);
                 dstPort = ntohs(udp->dest);
             }
             else if (iph->protocol == IPPROTO_TCP) {
-                m_logger.log(LOGGER_LEVEL_DEBUG, "Tun TCP received");
+                m_logger.logLazy(LOGGER_LEVEL_DEBUG, [&] { return "tun_packet_received protocol=TCP"; });
                 struct tcphdr* tcp = (struct tcphdr*)(buffer + ipHeaderLen);
                 dstPort = ntohs(tcp->dest);
             }
+            const auto processingStarted = chrono::steady_clock::now();
             HandleInternetPacket(buffer, ipLen, dstPort);
+            m_logger.recordDelay(NetworkWarning::InternetPacketProcessing, processingStarted);
         }
     }
 
-    m_logger.log(LOGGER_LEVEL_INFO, "Tun processing thread stopped");
+    m_logger.logLazy(LOGGER_LEVEL_INFO, [&] { return "worker_stopped worker=tun_packets"; });
 }
 
 bool ServerCore::Initialize(const string& configPath) {
     try {
         ifstream configFile(configPath);
         if (!configFile.is_open()) {
-            cerr << "Failed to open config file: " << configPath << endl;
+            cerr << "config_open_failed path=" << LogValue(configPath) << endl;
             return false;
         }
         json config;
@@ -880,6 +845,9 @@ bool ServerCore::Initialize(const string& configPath) {
             if (levelStr == "error") {
                 m_config.log_level = LOGGER_LEVEL_ERROR;
             }
+            else if (levelStr == "warning") {
+                m_config.log_level = LOGGER_LEVEL_WARNING;
+            }
             else if (levelStr == "info") {
                 m_config.log_level = LOGGER_LEVEL_INFO;
             }
@@ -889,7 +857,7 @@ bool ServerCore::Initialize(const string& configPath) {
             else {
                 m_config.log_level = LOGGER_LEVEL_NONE;   // по умолчанию
             }
-            m_logger.log(LOGGER_LEVEL_INFO, "Log level: " + levelStr);
+            m_logger.logLazy(LOGGER_LEVEL_INFO, [&] { return "log_level_selected level=" + LogValue(levelStr); });
         }
         else {
             m_config.log_level = LOGGER_LEVEL_NONE;   // значение по умолчанию
@@ -897,11 +865,11 @@ bool ServerCore::Initialize(const string& configPath) {
 
         m_logger.enable(m_config.log_level, (isatty(STDOUT_FILENO) != 0));
 
-        m_logger.log(LOGGER_LEVEL_INFO, "Initializing server...");
+        m_logger.logLazy(LOGGER_LEVEL_INFO, [&] { return "server_initializing"; });
         if (config.contains("client_ports")) {
             m_config.client_port_start = config["client_ports"]["start"];
             m_config.client_port_end = config["client_ports"]["end"];
-            m_logger.log(LOGGER_LEVEL_INFO, "Client port range: " + to_string(m_config.client_port_start) + "-" + to_string(m_config.client_port_end));
+            m_logger.logLazy(LOGGER_LEVEL_INFO, [&] { return "client_ports_configured range=" + to_string(m_config.client_port_start) + "-" + to_string(m_config.client_port_end); });
         }
         else {
             m_config.client_port_start = 10000;
@@ -911,14 +879,14 @@ bool ServerCore::Initialize(const string& configPath) {
         if (config.contains("encryption")) {
             m_config.xorKeyBase64 = config["encryption"]["xor_key"];
             m_config.swapKeyBase64 = config["encryption"]["swap_key"];
-            m_logger.log(LOGGER_LEVEL_INFO, "Encryption keys loaded");
+            m_logger.logLazy(LOGGER_LEVEL_INFO, [&] { return "transform_keys_loaded"; });
             if (!m_encryption.Initialize(m_config.xorKeyBase64, m_config.swapKeyBase64)) {
-                m_logger.log(LOGGER_LEVEL_ERROR, "Failed to initialize encryption");
+                m_logger.logLazy(LOGGER_LEVEL_ERROR, [&] { return "transform_init_failed"; });
                 return false;
             }
         }
         else {
-            m_logger.log(LOGGER_LEVEL_ERROR, "Missing encryption section");
+            m_logger.logLazy(LOGGER_LEVEL_ERROR, [&] { return "config_invalid reason=missing_section section=encryption"; });
             return false;
         }
 
@@ -932,31 +900,34 @@ bool ServerCore::Initialize(const string& configPath) {
         if (config.contains("dns_server")) {
             string dns = config["dns_server"];
             m_config.dns_server = inet_addr(dns.c_str());
-            m_logger.log(LOGGER_LEVEL_INFO, "DNS redirect enabled: " + dns);
+            m_logger.logLazy(LOGGER_LEVEL_INFO, [&] { return "dns_redirect_configured enabled=1 server=" + LogValue(dns); });
         }
         else {
             m_config.dns_server = 0;
-            m_logger.log(LOGGER_LEVEL_INFO, "DNS redirect disabled (no dns_server in config)");
+            m_logger.logLazy(LOGGER_LEVEL_INFO, [&] { return "dns_redirect_configured enabled=0 reason=missing_dns_server"; });
         }
     }
     catch (const exception& e) {
-        m_logger.log(LOGGER_LEVEL_ERROR, "Config parse error: " + string(e.what()));
+        m_logger.logLazy(LOGGER_LEVEL_ERROR, [&] { return "config_parse_failed error=" + LogValue(e.what()); });
         return false;
     }
 
     random_device rd;
     m_rng.seed(rd());
-    m_portDist = uniform_int_distribution<uint16_t>(SRC_PORT_START, SRC_PORT_END);
 
     if (!InitSocket()) return false;
     if (!CreateTUN("tun_miga")) return false;
 
-    m_logger.log(LOGGER_LEVEL_INFO, "Server initialized successfully");
+    m_logger.logLazy(LOGGER_LEVEL_INFO, [&] { return "server_initialized"; });
     return true;
 }
 
 void ServerCore::Start() {
     if (m_running) return;
+    if (!m_interfaceIp.Start(m_config.interface)) {
+        m_logger.logLazy(LOGGER_LEVEL_ERROR, [&] { return "interface_monitor_start_failed"; });
+        return;
+    }
     m_running = true;
     system("iptables -I OUTPUT -p icmp --icmp-type destination-unreachable -j DROP"); // drop icmp "Port unreachable"
     EnsureFirewallRules();
@@ -964,17 +935,18 @@ void ServerCore::Start() {
     m_processTunThread = thread(&ServerCore::ProcessTUN, this);
     m_cleanupThread = thread(&ServerCore::CleanupLoop, this);
     m_firewallThread = thread(&ServerCore::FirewallWatchdogLoop, this);
-    m_logger.log(LOGGER_LEVEL_INFO, "Server started");
+    m_logger.logLazy(LOGGER_LEVEL_INFO, [&] { return "server_started"; });
 }
 
 void ServerCore::Stop() {
     if (m_running) {
         m_running = false;
+        m_interfaceIp.Stop();
         system("iptables -D OUTPUT -p icmp --icmp-type destination-unreachable -j DROP");
         if (m_processPacketsThread.joinable()) m_processPacketsThread.join();
         if (m_processTunThread.joinable()) m_processTunThread.join();
         if (m_cleanupThread.joinable()) m_cleanupThread.join();
         if (m_firewallThread.joinable()) m_firewallThread.join();
-        m_logger.log(LOGGER_LEVEL_INFO, "Server stopped");
+        m_logger.logLazy(LOGGER_LEVEL_INFO, [&] { return "server_stopped"; });
     }
 }

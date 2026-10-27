@@ -107,7 +107,7 @@
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>ws2_32.lib</AdditionalDependencies>
+      <AdditionalDependencies>ws2_32.lib;iphlpapi.lib</AdditionalDependencies>
       <AdditionalLibraryDirectories>$(ProjectDir)windivert\$(Platform);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <Version>
       </Version>
@@ -132,7 +132,7 @@
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>$(ProjectDir)windivert\$(Platform);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>ws2_32.lib</AdditionalDependencies>
+      <AdditionalDependencies>ws2_32.lib;iphlpapi.lib</AdditionalDependencies>
       <ProgramDatabaseFile>$(OutDir)$(TargetName).pdb</ProgramDatabaseFile>
       <Version>
       </Version>
@@ -156,7 +156,7 @@
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>ws2_32.lib</AdditionalDependencies>
+      <AdditionalDependencies>ws2_32.lib;iphlpapi.lib</AdditionalDependencies>
       <OptimizeReferences>false</OptimizeReferences>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <AdditionalLibraryDirectories>$(ProjectDir)windivert\$(Platform);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
@@ -183,7 +183,7 @@
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>$(ProjectDir)windivert\$(Platform);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>ws2_32.lib</AdditionalDependencies>
+      <AdditionalDependencies>ws2_32.lib;iphlpapi.lib</AdditionalDependencies>
       <ProgramDatabaseFile>$(OutDir)$(TargetName).pdb</ProgramDatabaseFile>
       <Version>
       </Version>
@@ -207,6 +207,14 @@
   <ItemGroup>
     <ClInclude Include="include\ConfigManager.h" />
     <ClInclude Include="include\PacketMonitor.h" />
+    <ClInclude Include="include\BoundedQueue.h" />
+    <ClInclude Include="include\Ipv4Batch.h" />
+    <ClInclude Include="include\ProcessIdentityCache.h" />
+    <ClInclude Include="include\SocketOwnerTable.h" />
+    <ClInclude Include="include\RoutingState.h" />
+    <ClInclude Include="include\PendingPackets.h" />
+    <ClInclude Include="include\EventQueueDelay.h" />
+    <ClInclude Include="include\WindowsProcessIdentity.h" />
     <ClInclude Include="include\MigaClient.h" />
     <ClInclude Include="include\ServiceManager.h" />
     <ClInclude Include="include\windivert.h" />
