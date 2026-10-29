@@ -1,10 +1,14 @@
 #pragma once
 
+#include <winsock2.h>
 #include <windivert.h>
 #include <memory>
 #include <mutex>
 #include <array>
 #include "BoundedQueue.h"
+#include "AsyncTunnelSender.h"
+#include "TunnelDatagram.h"
+#include "TunnelRouteCache.h"
 #include "EventQueueDelay.h"
 #include "Ipv4Batch.h"
 #include "RoutingState.h"
@@ -37,6 +41,7 @@ private:
         uint16_t localPort = 0;
         SOCKET udpSocket = INVALID_SOCKET;
         sockaddr_in serverAddr;
+        TunnelRouteCache::Route route;
         std::unique_ptr<UdpPacketAssembler> assembler;
         Encryption encryption;
     };
@@ -72,6 +77,11 @@ private:
     RoutingState m_Routing;
     PendingPackets<PendingPacket> m_Pending;
     std::vector<uint8_t> m_OutgoingPacket;
+    AsyncTunnelSender m_TunnelSender;
+    AsyncTunnelSender m_ReinjectSender;
+    TunnelDatagram m_TunnelDatagram;
+    TunnelRouteCache m_TunnelRoutes;
+    uint16_t m_OuterPacketId = 0;
     ProcessIdentityCache m_ProcessNames;
     size_t m_NextServerId = 1;
     std::array<PacketWarningSample, 32> m_WarningSamples{};

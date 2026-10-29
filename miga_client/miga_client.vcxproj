@@ -207,6 +207,9 @@
   <ItemGroup>
     <ClInclude Include="include\ConfigManager.h" />
     <ClInclude Include="include\PacketMonitor.h" />
+    <ClInclude Include="include\AsyncTunnelSender.h" />
+    <ClInclude Include="include\TunnelDatagram.h" />
+    <ClInclude Include="include\TunnelRouteCache.h" />
     <ClInclude Include="include\BoundedQueue.h" />
     <ClInclude Include="include\Ipv4Batch.h" />
     <ClInclude Include="include\ProcessIdentityCache.h" />

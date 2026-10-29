@@ -44,6 +44,9 @@
     <ClInclude Include="include\windivert.h">
       <Filter>Файлы заголовков</Filter>
     </ClInclude>
+    <ClInclude Include="include\AsyncTunnelSender.h" />
+    <ClInclude Include="include\TunnelDatagram.h" />
+    <ClInclude Include="include\TunnelRouteCache.h" />
     <ClInclude Include="include\BoundedQueue.h">
       <Filter>Файлы заголовков</Filter>
     </ClInclude>

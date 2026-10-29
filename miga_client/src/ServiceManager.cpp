@@ -1,5 +1,5 @@
-#include "ServiceManager.h"
 #include "MigaClient.h"
+#include "ServiceManager.h"
 
 #pragma comment(lib , "Advapi32.lib")
 

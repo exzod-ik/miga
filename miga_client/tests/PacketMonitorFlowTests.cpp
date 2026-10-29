@@ -7,7 +7,8 @@
 static std::vector<std::vector<uint8_t>> injected;
 static std::mutex injectedMutex;
 static std::condition_variable injectedChanged;
-extern "C" BOOL WinDivertSend(HANDLE, const VOID* packet, UINT length, UINT* sent, const WINDIVERT_ADDRESS*) {
+static BOOL ReinjectSendEx(HANDLE, const VOID* packet, UINT length, UINT* sent, UINT64,
+    const WINDIVERT_ADDRESS*, UINT, LPOVERLAPPED) {
     std::lock_guard lock(injectedMutex);
     const auto* bytes = static_cast<const uint8_t*>(packet);
     injected.emplace_back(bytes, bytes + length);
@@ -20,6 +21,34 @@ void Require(bool value, const char* message) {
     if (!value) { std::cerr << message << '\n'; std::exit(1); }
 }
 
+extern "C" BOOL WinDivertSendEx(HANDLE, const VOID* packet, UINT length, UINT* sent, UINT64,
+    const WINDIVERT_ADDRESS* addresses, UINT addressLength, LPOVERLAPPED) {
+    Require(addressLength == sizeof(WINDIVERT_ADDRESS), "fixture expects unfragmented tunnel");
+    Require(addresses[0].Outbound && addresses[0].IPChecksum && addresses[0].UDPChecksum, "outer injection flags");
+    const auto* bytes = static_cast<const uint8_t*>(packet);
+    Require(length >= 29 && bytes[0] == 0x45 && bytes[9] == 17, "outer IPv4 UDP headers");
+    Require(((UINT(bytes[2]) << 8) | bytes[3]) == length, "outer total length");
+    InternetChecksum ip;
+    ip.Add(bytes, 20);
+    Require(ip.Value() == 0, "outer IP checksum");
+    InternetChecksum udp;
+    udp.Add(bytes + 12, 8);
+    const uint8_t pseudo[] = {0, 17, bytes[24], bytes[25]};
+    udp.Add(pseudo, 4);
+    udp.Add(bytes + 20, length - 20);
+    Require(udp.Value() == 0, "outer UDP checksum");
+    sockaddr_in target{};
+    target.sin_family = AF_INET;
+    std::memcpy(&target.sin_addr, bytes + 16, 4);
+    std::memcpy(&target.sin_port, bytes + 22, 2);
+    SOCKET relay = socket(AF_INET, SOCK_DGRAM, 0);
+    const auto result = sendto(relay, reinterpret_cast<const char*>(bytes + 28), length - 28, 0,
+        reinterpret_cast<sockaddr*>(&target), sizeof(target));
+    closesocket(relay);
+    Require(result == static_cast<int>(length - 28), "relay injected payload to fixture server");
+    if (sent) *sent = length;
+    return TRUE;
+}
 struct Receiver {
     SOCKET socket = INVALID_SOCKET;
     uint16_t port = 0;
@@ -97,6 +126,11 @@ struct PacketMonitorTests {
         Require(config.Load(path), "fixture configuration");
         PacketMonitor monitor(&config, &logger);
         Require(monitor.InitUdpSocket(config.GetServers()), "prepare transports");
+        monitor.m_TunnelSender.SetErrorHandler([](DWORD) { Require(false, "unexpected async send error"); });
+        Require(monitor.m_TunnelSender.Reset(), "initialize test sender");
+        monitor.m_ReinjectSender.SetApi({&ReinjectSendEx, &GetOverlappedResult, &CancelIoEx});
+        monitor.m_ReinjectSender.SetErrorHandler([](DWORD) { Require(false, "unexpected reinject error"); });
+        Require(monitor.m_ReinjectSender.Reset(), "initialize reinject sender");
         const auto serverId = monitor.m_Servers[0].id;
         const auto localPort = monitor.m_Servers[0].localPort;
         auto game = std::make_shared<const ProcessIdentity>(123, [] { return true; }, [] { return "game.exe"; });
@@ -308,6 +342,7 @@ struct PacketMonitorTests {
         Require(monitor.ReloadConfig(path), "worker restart and reload");
         monitor.Stop();
 
+        Require(monitor.m_ReinjectSender.Reset(), "restart reinject sender for activity checks");
         Require(monitor.InitUdpSocket(config.GetServers()), "prepare activity transports");
         for (const bool tcp : { false, true }) {
             for (const bool tunnel : { false, true }) {
