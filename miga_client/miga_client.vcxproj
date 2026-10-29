@@ -207,6 +207,8 @@
   <ItemGroup>
     <ClInclude Include="include\ConfigManager.h" />
     <ClInclude Include="include\PacketMonitor.h" />
+    <ClInclude Include="include\DeadlineIndex.h" />
+    <ClInclude Include="include\TcpSocketMaintenance.h" />
     <ClInclude Include="include\AsyncTunnelSender.h" />
     <ClInclude Include="include\TunnelDatagram.h" />
     <ClInclude Include="include\TunnelRouteCache.h" />

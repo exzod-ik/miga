@@ -12,6 +12,7 @@
 #include "EventQueueDelay.h"
 #include "Ipv4Batch.h"
 #include "RoutingState.h"
+#include "TcpSocketMaintenance.h"
 #include "PendingPackets.h"
 #include "PacketWarning.h"
 #include <future>
@@ -75,6 +76,7 @@ public:
 
 private:
     RoutingState m_Routing;
+    TcpSocketMaintenance m_TcpMaintenance;
     PendingPackets<PendingPacket> m_Pending;
     std::vector<uint8_t> m_OutgoingPacket;
     AsyncTunnelSender m_TunnelSender;

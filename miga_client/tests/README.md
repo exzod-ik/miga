@@ -83,4 +83,12 @@ cl /nologo /std:c++20 /EHsc /W4 /WX /DWINDIVERTEXPORT=extern /I miga_client\incl
 Build\tests\tunnel-send-tests.exe
 ```
 
-Covers outer IPv4/UDP lengths, checksums, source/destination ports, odd payloads, maximum UDP size, MTUs 68/576/1500/65535, fragment offsets and reconstruction, batches of at most 64 fragments, invalid lengths, send failure, immediate/pending/error completions, immutable buffer/address ownership including inbound/outbound direction, IPv6, interface, timestamp and checksum flags, bounded pool backpressure, cancellation while full, draining and restart. Route notifications and loopback source selection use the real IP Helper API. Async completion/cancellation use substituted API functions; actual driver completion, firewall/NAT, route changes, packet ordering, tunnel traffic and latency remain live checks.
+Covers outer IPv4/UDP lengths, checksums, source/destination ports, odd payloads, maximum UDP size, MTUs 68/576/1500/65535, fragment offsets and reconstruction, batches of at most 64 fragments, invalid lengths, send failure, immediate/pending/error completions, immutable buffer/address ownership including inbound/outbound direction, IPv6, interface, timestamp and checksum flags, nonblocking pool saturation, reuse of any completed slot, cancellation while full, draining and restart. Route notifications and loopback source selection use the real IP Helper API. Async completion/cancellation use substituted API functions; actual driver completion, firewall/NAT, route changes, packet ordering, tunnel traffic and latency remain live checks.
+Connection lifecycle experiment (x64 Visual Studio developer prompt):
+
+```bat
+cl /nologo /std:c++20 /EHsc /W4 /WX /I miga_client\include miga_client\tests\ConnectionLifecycleTests.cpp /FoBuild\tests\ConnectionLifecycleTests.obj /FeBuild\tests\connection-lifecycle-tests.exe /link ws2_32.lib iphlpapi.lib
+Build\tests\connection-lifecycle-tests.exe
+```
+
+Covers retained idle TCP ownership and route, stale activity/probe results, removal after confirmed absence, failed snapshots, recreated entries, CLOSE, removed transport, bounded deadline cleanup, tuple/PID matching, dead process identity, background snapshot isolation and restart. Snapshot acquisition is injected in these tests; actual long-idle Windows sockets and driver traffic need live validation. Logger tests also cover opt-in asynchronous concurrent delivery, draining, restart and byte-limit overflow reporting. Linux remains on the synchronous logger path.

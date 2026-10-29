@@ -23,6 +23,7 @@ bool CMigaClient::Initialize(const string& configPath, bool consoleOutput) {
     }
 
     m_Logger.enable(m_Config.GetLogLevel(), consoleOutput);
+    m_Logger.startAsync();
 
     m_Logger.log(LOGGER_LEVEL_INFO, "client_initialized");
     return true;

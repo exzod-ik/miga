@@ -16,6 +16,9 @@ Logger::Logger() : m_level(LOGGER_LEVEL_INFO) {
 }
 
 Logger::~Logger() {
+#ifndef __linux__
+    stopAsync();
+#endif
     if (m_LogFile.is_open()) {
         m_LogFile.close();
     }
@@ -87,6 +90,67 @@ void Logger::enable(int level, bool consoleOutput) {
 
 void Logger::log(const int level, const string& message) {
     if (!isEnabled(level)) return;
+#ifndef __linux__
+    {
+        unique_lock lock(m_QueueMutex);
+        if (m_Async) {
+            if (m_Closing || m_Queue.size() >= 4096 || message.size() > 4 * 1024 * 1024 - m_QueueBytes) {
+                ++m_Dropped;
+                return;
+            }
+            m_Queue.emplace_back(level, message);
+            m_QueueBytes += message.size();
+            lock.unlock();
+            m_QueueChanged.notify_one();
+            return;
+        }
+    }
+#endif
+    write(level, message);
+}
+
+#ifndef __linux__
+void Logger::startAsync() {
+    lock_guard lock(m_QueueMutex);
+    if (m_Async) return;
+    m_Closing = false;
+    m_Writer = thread(&Logger::writerLoop, this);
+    m_Async = true;
+}
+
+void Logger::stopAsync() {
+    {
+        lock_guard lock(m_QueueMutex);
+        if (!m_Async) return;
+        m_Closing = true;
+    }
+    m_QueueChanged.notify_all();
+    if (m_Writer.joinable()) m_Writer.join();
+    lock_guard lock(m_QueueMutex);
+    m_Async = false;
+    m_Closing = false;
+}
+
+void Logger::writerLoop() {
+    for (;;) {
+        deque<pair<int, string>> batch;
+        uint64_t dropped;
+        {
+            unique_lock lock(m_QueueMutex);
+            m_QueueChanged.wait(lock, [&] { return m_Closing || !m_Queue.empty(); });
+            if (m_Closing && m_Queue.empty() && !m_Dropped) return;
+            batch.swap(m_Queue);
+            m_QueueBytes = 0;
+            dropped = m_Dropped;
+            m_Dropped = 0;
+        }
+        if (dropped) write(LOGGER_LEVEL_WARNING, "log_queue_overflow dropped=" + to_string(dropped));
+        for (const auto& item : batch) write(item.first, item.second);
+    }
+}
+#endif
+
+void Logger::write(int level, const string& message) {
     lock_guard<mutex> lock(m_Mutex);
 
     string lvlString;

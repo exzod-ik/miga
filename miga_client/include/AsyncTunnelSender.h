@@ -31,8 +31,14 @@ public:
     bool Send(HANDLE handle, const uint8_t* data, size_t size, const WINDIVERT_ADDRESS* addresses, size_t count) {
         if (!stop_ || WaitForSingleObject(stop_, 0) != WAIT_TIMEOUT) return false;
         if (size == 0 || size > 256 * 1024 || count == 0 || count > 64) return Fail(ERROR_INVALID_PARAMETER);
-        auto& slot = slots_[next_];
-        Complete(slot, true);
+        size_t available = slots_.size();
+        for (size_t i = 0; i < slots_.size(); ++i) {
+            const auto index = (next_ + i) % slots_.size();
+            Complete(slots_[index], false);
+            if (!slots_[index].pending) { available = index; break; }
+        }
+        if (available == slots_.size()) { ++overflows_; return false; }
+        auto& slot = slots_[available];
         if (WaitForSingleObject(stop_, 0) != WAIT_TIMEOUT) return false;
         if (!slot.operation.hEvent) slot.operation.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
         if (!slot.operation.hEvent) return Fail(GetLastError());
@@ -45,7 +51,7 @@ public:
         slot.handle = handle;
         slot.sent = 0;
         slot.submitted = 0;
-        next_ = (next_ + 1) % slots_.size();
+        next_ = (available + 1) % slots_.size();
         if (api_.send(handle, slot.data.data(), static_cast<UINT>(size), &slot.submitted, 0,
             slot.addresses.data(), static_cast<UINT>(count * sizeof(WINDIVERT_ADDRESS)), &slot.operation)) {
             return slot.submitted == size || Fail(ERROR_WRITE_FAULT);
@@ -55,6 +61,7 @@ public:
         slot.pending = true;
         return true;
     }
+    uint64_t TakeOverflows() { const auto value = overflows_; overflows_ = 0; return value; }
     void Reap() { for (auto& slot : slots_) Complete(slot, false); }
     void Drain() { for (auto& slot : slots_) Complete(slot, true); }
 private:
@@ -69,6 +76,7 @@ private:
     };
     std::array<Slot, 32> slots_;
     size_t next_ = 0;
+    uint64_t overflows_ = 0;
     HANDLE stop_;
     Api api_;
     ErrorHandler error_;

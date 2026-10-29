@@ -9,6 +9,7 @@
 #include <list>
 #include <limits>
 #include <unordered_map>
+#include "DeadlineIndex.h"
 
 struct SocketTuple {
     uint8_t protocol = 0;
@@ -60,6 +61,43 @@ public:
     };
     using Clock = std::chrono::steady_clock;
     using Owner = std::shared_ptr<const SocketOwner>;
+    struct Lifetime {
+        Clock::time_point lastSeen;
+        Clock::time_point retiredAt;
+        int64_t closedAt = 0;
+        int64_t cutoff = 0;
+        bool present = true;
+    };
+    struct Probe {
+        uint64_t id;
+        SocketTuple tuple;
+        Owner owner;
+        Clock::time_point activity;
+        uint64_t attempt = 0;
+    };
+    enum class ProbeResult { Present, Absent, Unknown };
+    using ProbeHandler = std::function<bool(const Probe&)>;
+    void SetProbeHandler(ProbeHandler handler) { probe_ = std::move(handler); }
+    std::shared_ptr<Lifetime> State(const SocketTuple& tuple, const Owner& owner) const {
+        const auto range = ports_.equal_range(Key(tuple));
+        for (auto it = range.first; it != range.second; ++it)
+            if (it->second->owner == owner && Matches(it->second->tuple, tuple)) return it->second->life;
+        return {};
+    }
+    void ApplyProbe(const Probe& request, ProbeResult result, Clock::time_point now) {
+        const auto found = ids_.find(request.id);
+        if (found == ids_.end()) return;
+        auto entry = found->second;
+        if (entry->attempt != request.attempt || entry->owner != request.owner || entry->life->closedAt || entry->life->cutoff ||
+            !SameTuple(entry->tuple, request.tuple) || entry->life->lastSeen != request.activity) return;
+        if (result == ProbeResult::Absent) {
+            Notify("socket_owner_removed", "tcp_snapshot_absent", *entry, now);
+            Erase(entry);
+        } else {
+            entry->checkAt = now + (result == ProbeResult::Present ? std::chrono::seconds(60) : std::chrono::seconds(30));
+            deadlines_.Set(entry->id, entry->checkAt);
+        }
+    }
 
     struct Eviction {
         SocketTuple tuple;
@@ -130,12 +168,12 @@ public:
         for (auto it = range.first; it != range.second; ++it) {
             auto& entry = *it->second;
             if (entry.owner->snapshot != owner->snapshot || entry.owner->endpointId != owner->endpointId) continue;
-            if (entry.lastEvent > owner->timestamp || entry.closedAt != 0) return nullptr;
+            if (entry.lastEvent > owner->timestamp || entry.life->closedAt != 0) return nullptr;
             if (entry.owner->process->pid != owner->process->pid) return nullptr;
             const auto previous = Snapshot(entry, now);
             if (tuple.protocol != 17) entry.tuple = tuple;
             entry.lastEvent = owner->timestamp;
-            entry.lastSeen = now;
+            entry.life->lastSeen = now;
             order_.splice(order_.end(), order_, it->second);
             Notify("socket_owner_updated", "socket_event", entry, now, previous);
             return entry.owner;
@@ -143,22 +181,24 @@ public:
         for (auto it = range.first; it != range.second; ++it) {
             auto& entry = *it->second;
             if (SameTuple(entry.tuple, tuple) && entry.owner->timestamp < owner->timestamp) {
-                if (entry.cutoff == 0 || owner->timestamp < entry.cutoff) {
+                if (entry.life->cutoff == 0 || owner->timestamp < entry.life->cutoff) {
                     const auto previous = Snapshot(entry, now);
-                    entry.cutoff = owner->timestamp;
+                    entry.life->cutoff = owner->timestamp;
                     Notify("socket_owner_updated", "generation_replaced", entry, now, previous);
                 }
             }
         }
         while (order_.size() >= capacity_) {
             const auto& entry = order_.front();
-            if (onEviction_) onEviction_({ entry.tuple, entry.owner, entry.lastEvent, entry.closedAt,
-                entry.cutoff, std::chrono::duration_cast<std::chrono::milliseconds>(now - entry.lastSeen).count(),
+            if (onEviction_) onEviction_({ entry.tuple, entry.owner, entry.lastEvent, entry.life->closedAt,
+                entry.life->cutoff, std::chrono::duration_cast<std::chrono::milliseconds>(now - entry.life->lastSeen).count(),
                 capacity_ });
             Erase(order_.begin());
         }
-        order_.push_back({ tuple, owner, owner->timestamp, 0, 0, now, {} });
+        order_.push_back({ tuple, owner, owner->timestamp, std::make_shared<Lifetime>(Lifetime{now, {}}), ++nextId_, now });
         ports_.emplace(Key(tuple), std::prev(order_.end()));
+        ids_.emplace(order_.back().id, std::prev(order_.end()));
+        deadlines_.Set(order_.back().id, Due(order_.back()));
         Notify("socket_owner_added", owner->snapshot ? "snapshot" : "socket_event", order_.back(), now);
         return owner;
     }
@@ -168,11 +208,12 @@ public:
         const auto range = ports_.equal_range((uint32_t(protocol) << 16) | port);
         for (auto it = range.first; it != range.second; ++it) {
             auto& entry = *it->second;
-            if (entry.owner->endpointId != endpoint || timestamp < entry.lastEvent || entry.closedAt != 0) continue;
+            if (entry.owner->endpointId != endpoint || timestamp < entry.lastEvent || entry.life->closedAt != 0) continue;
             const auto previous = Snapshot(entry, now);
-            entry.closedAt = timestamp;
+            entry.life->closedAt = timestamp;
             entry.lastEvent = timestamp;
-            entry.retiredAt = now;
+            entry.life->retiredAt = now;
+            deadlines_.Set(entry.id, Due(entry));
             Notify("socket_owner_closed", "socket_close", entry, now, previous);
         }
     }
@@ -183,14 +224,15 @@ public:
         for (auto it = range.first; it != range.second; ++it) {
             auto& entry = *it->second;
             if (!entry.owner->snapshot || entry.owner->process->pid != pid ||
-                timestamp < entry.lastEvent || entry.closedAt != 0) continue;
+                timestamp < entry.lastEvent || entry.life->closedAt != 0) continue;
             if (tuple.localIp && entry.tuple.localIp && tuple.localIp != entry.tuple.localIp) continue;
             if (tuple.protocol == 6 && tuple.remotePort &&
                 (tuple.remoteIp != entry.tuple.remoteIp || tuple.remotePort != entry.tuple.remotePort)) continue;
             const auto previous = Snapshot(entry, now);
-            entry.closedAt = timestamp;
+            entry.life->closedAt = timestamp;
             entry.lastEvent = timestamp;
-            entry.retiredAt = now;
+            entry.life->retiredAt = now;
+            deadlines_.Set(entry.id, Due(entry));
             Notify("socket_owner_closed", "snapshot_close", entry, now, previous);
         }
     }
@@ -201,10 +243,10 @@ public:
             timestamp >= cache->from && timestamp < cache->until && SameTuple(cache->tuple, tuple)) {
             auto entry = cache->entry;
             if (Key(entry->tuple) == Key(tuple) && Matches(entry->tuple, tuple) && !Expired(*entry, now) &&
-                (entry->cutoff == 0 || timestamp < entry->cutoff) &&
-                (entry->closedAt == 0 || timestamp <= entry->closedAt ||
+                (entry->life->cutoff == 0 || timestamp < entry->life->cutoff) &&
+                (entry->life->closedAt == 0 || timestamp <= entry->life->closedAt ||
                     (tuple.protocol == 6 && SameTuple(entry->tuple, tuple)))) {
-                entry->lastSeen = now;
+                entry->life->lastSeen = now;
                 order_.splice(order_.end(), order_, entry);
                 return entry->owner;
             }
@@ -220,12 +262,12 @@ public:
                 until = (std::min)(until, entry->owner->timestamp);
                 continue;
             }
-            if (Expired(*entry, now) || (entry->cutoff != 0 && timestamp >= entry->cutoff)) continue;
-            if (entry->closedAt != 0 && timestamp > entry->closedAt) {
+            if (Expired(*entry, now) || (entry->life->cutoff != 0 && timestamp >= entry->life->cutoff)) continue;
+            if (entry->life->closedAt != 0 && timestamp > entry->life->closedAt) {
                 if (syn) {
-                    if (entry->cutoff == 0 || timestamp < entry->cutoff) {
+                    if (entry->life->cutoff == 0 || timestamp < entry->life->cutoff) {
                         const auto previous = Snapshot(*entry, now);
-                        entry->cutoff = timestamp;
+                        entry->life->cutoff = timestamp;
                         Notify("socket_owner_updated", "syn_after_close", *entry, now, previous);
                         ++revision_;
                     }
@@ -237,7 +279,7 @@ public:
                 (entry->owner->timestamp == best->owner->timestamp && entry->tuple.remotePort != 0)) best = entry;
         }
         if (best == order_.end()) return nullptr;
-        if (tuple.protocol == 6 && best->tuple.localIp == 0 && best->closedAt == 0) {
+        if (tuple.protocol == 6 && best->tuple.localIp == 0 && best->life->closedAt == 0) {
             const auto previous = Snapshot(*best, now);
             best->tuple.localIp = tuple.localIp;
             Notify("socket_owner_updated", "local_address_resolved", *best, now, previous);
@@ -250,7 +292,7 @@ public:
             cache->from = timestamp;
             cache->until = until;
         }
-        best->lastSeen = now;
+        best->life->lastSeen = now;
         order_.splice(order_.end(), order_, best);
         return best->owner;
     }
@@ -260,10 +302,10 @@ public:
         for (auto it = range.first; it != range.second; ++it) {
             auto entry = it->second;
             if (entry->owner != owner || !Matches(entry->tuple, tuple) || Expired(*entry, now) ||
-                timestamp < owner->timestamp || (entry->cutoff != 0 && timestamp >= entry->cutoff)) continue;
-            if (entry->closedAt != 0 && timestamp > entry->closedAt &&
+                timestamp < owner->timestamp || (entry->life->cutoff != 0 && timestamp >= entry->life->cutoff)) continue;
+            if (entry->life->closedAt != 0 && timestamp > entry->life->closedAt &&
                 (tuple.protocol != 6 || !SameTuple(entry->tuple, tuple))) continue;
-            entry->lastSeen = now;
+            entry->life->lastSeen = now;
             order_.splice(order_.end(), order_, entry);
             return true;
         }
@@ -281,42 +323,59 @@ public:
         if (!latest) return "socket_tuple_mismatch";
         if (Expired(*latest, now)) return "socket_record_expired";
         if (timestamp < latest->owner->timestamp) return "packet_precedes_socket";
-        if (latest->cutoff != 0 && timestamp >= latest->cutoff) return "socket_generation_ended";
-        if (latest->closedAt != 0 && timestamp > latest->closedAt) return "socket_closed";
+        if (latest->life->cutoff != 0 && timestamp >= latest->life->cutoff) return "socket_generation_ended";
+        if (latest->life->closedAt != 0 && timestamp > latest->life->closedAt) return "socket_closed";
         return "no_eligible_socket_owner";
     }
 
-    void Cleanup(Clock::time_point now) {
-        for (auto it = order_.begin(); it != order_.end();) {
-            auto current = it++;
-            if (Expired(*current, now)) {
-                Notify("socket_owner_removed", current->closedAt != 0 ? "close_grace_expired" : "idle_timeout", *current, now);
-                Erase(current);
+    void Cleanup(Clock::time_point now, size_t budget = 128) {
+        uint64_t id = 0;
+        while (budget-- && deadlines_.PopDue(now, id)) {
+            auto found = ids_.find(id);
+            if (found == ids_.end()) continue;
+            auto current = found->second;
+            const auto due = Due(*current);
+            if (due > now) { deadlines_.Set(id, due); continue; }
+            if (probe_ && current->tuple.protocol == 6 && current->tuple.remotePort &&
+                !current->life->closedAt && !current->life->cutoff) {
+                probe_({id, current->tuple, current->owner, current->life->lastSeen, ++current->attempt});
+                current->checkAt = now + std::chrono::seconds(30);
+                deadlines_.Set(id, current->checkAt);
+                continue;
             }
+            Notify("socket_owner_removed", current->life->closedAt ? "close_grace_expired" : "idle_timeout", *current, now);
+            Erase(current);
         }
     }
-
     void Clear() {
         const auto now = Clock::now();
         for (const auto& entry : order_) Notify("socket_owner_removed", "clear", entry, now);
         ++revision_;
+        for (auto& entry : order_) entry.life->present = false;
+        deadlines_.Clear();
+        ids_.clear();
         ports_.clear();
         order_.clear();
     }
     size_t Size() const { return order_.size(); }
+    Clock::time_point NextDeadline(Clock::time_point otherwise) const { return deadlines_.Next(otherwise); }
 
 private:
     struct Entry {
         SocketTuple tuple;
         Owner owner;
         int64_t lastEvent;
-        int64_t closedAt;
-        int64_t cutoff;
-        Clock::time_point lastSeen;
-        Clock::time_point retiredAt;
+        std::shared_ptr<Lifetime> life;
+        uint64_t id;
+        Clock::time_point checkAt;
+        uint64_t attempt = 0;
     };
     std::list<Entry> order_;
     std::unordered_multimap<uint32_t, std::list<Entry>::iterator> ports_;
+    DeadlineIndex<uint64_t> deadlines_;
+    std::unordered_map<uint64_t, std::list<Entry>::iterator> ids_;
+    uint64_t nextId_ = 0;
+    ProbeHandler probe_;
     size_t capacity_;
     uint64_t revision_ = 1;
     EvictionHandler onEviction_;
@@ -324,8 +383,8 @@ private:
     uint64_t changeSequence_ = 0;
 
     Eviction Snapshot(const Entry& entry, Clock::time_point now) const {
-        return { entry.tuple, entry.owner, entry.lastEvent, entry.closedAt, entry.cutoff,
-            std::chrono::duration_cast<std::chrono::milliseconds>(now - entry.lastSeen).count(), capacity_ };
+        return { entry.tuple, entry.owner, entry.lastEvent, entry.life->closedAt, entry.life->cutoff,
+            std::chrono::duration_cast<std::chrono::milliseconds>(now - entry.life->lastSeen).count(), capacity_ };
     }
     void Notify(const char* event, const char* reason, const Entry& entry, Clock::time_point now,
         std::optional<Eviction> previous = std::nullopt) {
@@ -343,11 +402,19 @@ private:
         return (socket.remoteIp == 0 || socket.remoteIp == packet.remoteIp) &&
             (socket.remotePort == 0 || socket.remotePort == packet.remotePort);
     }
-    static bool Expired(const Entry& entry, Clock::time_point now) {
-        if (entry.closedAt != 0) return now - entry.retiredAt >= std::chrono::seconds(30);
-        return now - entry.lastSeen >= std::chrono::minutes(entry.tuple.protocol == 6 ? 124 : 20);
+    Clock::time_point Due(const Entry& entry) const {
+        if (entry.life->closedAt) return entry.life->retiredAt + std::chrono::seconds(30);
+        return (std::max)(entry.life->lastSeen + std::chrono::minutes(entry.tuple.protocol == 6 ? 124 : 20), entry.checkAt);
+    }
+    bool Expired(const Entry& entry, Clock::time_point now) const {
+        if (probe_ && entry.tuple.protocol == 6 && entry.tuple.remotePort && !entry.life->closedAt && !entry.life->cutoff) return false;
+        if (entry.life->closedAt != 0) return now - entry.life->retiredAt >= std::chrono::seconds(30);
+        return now - entry.life->lastSeen >= std::chrono::minutes(entry.tuple.protocol == 6 ? 124 : 20);
     }
     void Erase(std::list<Entry>::iterator entry) {
+        entry->life->present = false;
+        deadlines_.Erase(entry->id);
+        ids_.erase(entry->id);
         ++revision_;
         const auto range = ports_.equal_range(Key(entry->tuple));
         for (auto it = range.first; it != range.second; ++it) {

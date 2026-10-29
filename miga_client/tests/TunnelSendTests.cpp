@@ -140,9 +140,15 @@ static void AsyncTests() {
     Check(errors.back() == ERROR_INVALID_DATA, "immediate error recorded");
     mode = 0;
     for (int i = 0; i < 32; ++i) Check(sender.Send(handle, data.data(), data.size(), &address, 1), "fill pool");
-    std::thread stop([&] { Sleep(30); sender.RequestStop(); });
-    Check(!sender.Send(handle, data.data(), data.size(), &address, 1), "pool wait interrupted by stop");
-    stop.join();
+    const auto before = std::chrono::steady_clock::now();
+    Check(!sender.Send(handle, data.data(), data.size(), &address, 1), "full pool refuses without waiting");
+    Check(std::chrono::steady_clock::now() - before < std::chrono::seconds(1), "bounded submission latency");
+    Check(sender.TakeOverflows() == 1 && sender.TakeOverflows() == 0, "overflow aggregated once");
+    SetEvent(std::next(pending.begin(), 7)->first->hEvent);
+    Check(sender.Send(handle, data.data(), data.size(), &address, 1), "reuse any completed slot");
+    Check(pending.size() == 32, "slot reuse remains bounded");
+    sender.RequestStop();
+    Check(!sender.Send(handle, data.data(), data.size(), &address, 1), "stopped sender refuses new work");
     sender.Drain();
     Check(pending.empty() && errors.size() == 1, "cancel all pending without shutdown errors");
     Check(sender.Reset(), "restart sender");

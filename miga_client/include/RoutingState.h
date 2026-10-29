@@ -48,6 +48,13 @@ public:
     };
 
     explicit RoutingState(size_t capacity = 65536) : capacity_(capacity) {}
+    void SetProbeHandler(SocketOwnerTable::ProbeHandler handler) {
+        managedTcp_ = static_cast<bool>(handler);
+        sockets_.SetProbeHandler(std::move(handler));
+    }
+    void ApplyProbe(const SocketOwnerTable::Probe& probe, SocketOwnerTable::ProbeResult result, Clock::time_point now) {
+        sockets_.ApplyProbe(probe, result, now);
+    }
 
     void SetEvictionHandler(SocketOwnerTable::EvictionHandler handler) {
         sockets_.SetEvictionHandler(std::move(handler));
@@ -79,6 +86,7 @@ public:
             if (it != flows_.end() && !it->second.owner && tuple.protocol == 6 &&
                 owner->timestamp <= it->second.firstPacket) {
                 it->second.owner = owner;
+                it->second.life = sockets_.State(tuple, owner);
                 it->second.lastSeen = now;
                 return { Action::Send, owner, it->second.route, "committed_direct_route" };
             }
@@ -106,6 +114,7 @@ public:
             if (flows_.size() >= capacity_)
                 return { Action::Drop, {}, {}, "flow_capacity" };
             flows_.emplace(FlowKey::From(tuple), Flow{ {}, {}, timestamp, now, {} });
+            deadlines_.Set(FlowKey::From(tuple), now + std::chrono::minutes(tuple.protocol == 6 ? 124 : 20));
         }
         return { Action::Send, {}, {}, "owner_deadline_direct" };
     }
@@ -121,7 +130,8 @@ public:
         else if (flows_.size() >= capacity_) {
             return false;
         }
-        flows_[key] = { owner, route, timestamp, now, {} };
+        flows_[key] = { owner, route, timestamp, now, {}, sockets_.State(tuple, owner) };
+        deadlines_.Set(key, now + std::chrono::minutes(tuple.protocol == 6 ? 124 : 20));
         return true;
     }
 
@@ -136,7 +146,8 @@ public:
             (serverId == 0 && flow.route.kind != FlowRoute::Kind::Direct) ||
             (serverId != 0 && (flow.route.kind != FlowRoute::Kind::Tunnel || flow.route.serverId != serverId)) ||
             timestamp < (flow.owner ? flow.owner->timestamp : flow.firstPacket) ||
-            now - flow.lastSeen >= std::chrono::minutes(tuple.protocol == 6 ? 124 : 20)) return;
+            (!(managedTcp_ && tuple.protocol == 6 && flow.life && flow.life->present) &&
+                now - flow.lastSeen >= std::chrono::minutes(tuple.protocol == 6 ? 124 : 20))) return;
         if (flow.owner && !sockets_.Touch(tuple, flow.owner, timestamp, now)) return;
         flow.lastSeen = now;
     }
@@ -149,17 +160,29 @@ public:
         }
     }
 
-    void Cleanup(Clock::time_point now) {
-        sockets_.Cleanup(now);
-        for (auto it = flows_.begin(); it != flows_.end();) {
-            const auto ttl = std::chrono::minutes(it->first.proto == 6 ? 124 : 20);
-            if (now - it->second.lastSeen >= ttl) it = flows_.erase(it);
-            else ++it;
+    void Cleanup(Clock::time_point now, size_t budget = 128) {
+        sockets_.Cleanup(now, budget);
+        FlowKey key{};
+        while (budget-- && deadlines_.PopDue(now, key)) {
+            auto it = flows_.find(key);
+            if (it == flows_.end()) continue;
+            auto& flow = it->second;
+            const auto ttl = std::chrono::minutes(key.proto == 6 ? 124 : 20);
+            const auto activity = key.proto == 6 && flow.life ? flow.life->lastSeen : flow.lastSeen;
+            if (managedTcp_ && key.proto == 6 && flow.life && flow.life->present &&
+                !flow.life->closedAt && !flow.life->cutoff) {
+                deadlines_.Set(key, (std::max)(activity + ttl, now + std::chrono::seconds(60)));
+            } else if (now - activity >= ttl || (flow.life && !flow.life->present)) {
+                flows_.erase(it);
+            } else deadlines_.Set(key, activity + ttl);
         }
     }
 
-    void Clear() { sockets_.Clear(); flows_.clear(); }
+    void Clear() { sockets_.Clear(); flows_.clear(); deadlines_.Clear(); }
     size_t Size() const { return flows_.size(); }
+    Clock::time_point NextDeadline(Clock::time_point otherwise) const {
+        return sockets_.NextDeadline(deadlines_.Next(otherwise));
+    }
 
 private:
     struct Flow {
@@ -168,8 +191,11 @@ private:
         int64_t firstPacket;
         Clock::time_point lastSeen;
         SocketOwnerTable::LookupCache lookup;
+        std::shared_ptr<SocketOwnerTable::Lifetime> life;
     };
     SocketOwnerTable sockets_;
     std::unordered_map<FlowKey, Flow, FlowKeyHash> flows_;
+    DeadlineIndex<FlowKey, FlowKeyHash> deadlines_;
+    bool managedTcp_ = false;
     size_t capacity_;
 };

@@ -89,6 +89,36 @@ int main() {
         }
         assert(count == 400);
         file.close();
+#ifndef __linux__
+        logger.enable(LOGGER_LEVEL_INFO, false);
+        logger.startAsync();
+        threads.clear();
+        for (int i = 0; i < 4; ++i)
+            threads.emplace_back([&] {
+                for (int j = 0; j < 100; ++j) logger.log(LOGGER_LEVEL_INFO, "async_record value=complete");
+            });
+        for (auto& thread : threads) thread.join();
+        logger.stopAsync();
+        file.open("session.log");
+        count = 0;
+        while (std::getline(file, line)) {
+            assert(line.find("async_record value=complete") != std::string::npos);
+            ++count;
+        }
+        assert(count == 400);
+        file.close();
+        logger.startAsync();
+        logger.log(LOGGER_LEVEL_INFO, "async_restart value=complete");
+        logger.stopAsync();
+        logger.enable(LOGGER_LEVEL_INFO, false);
+        logger.startAsync();
+        logger.log(LOGGER_LEVEL_INFO, std::string(4 * 1024 * 1024 + 1, 'x'));
+        logger.stopAsync();
+        file.open("session.log");
+        assert(std::getline(file, line) && line.find("log_queue_overflow dropped=1") != std::string::npos);
+        assert(!std::getline(file, line));
+        file.close();
+#endif
         logger.enable(LOGGER_LEVEL_NONE);
         logger.logLazy(LOGGER_LEVEL_ERROR, [&] { ++evaluations; return "hidden-error"; });
         assert(evaluations == 1);

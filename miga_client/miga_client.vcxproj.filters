@@ -45,6 +45,8 @@
       <Filter>Файлы заголовков</Filter>
     </ClInclude>
     <ClInclude Include="include\AsyncTunnelSender.h" />
+    <ClInclude Include="include\DeadlineIndex.h" />
+    <ClInclude Include="include\TcpSocketMaintenance.h" />
     <ClInclude Include="include\TunnelDatagram.h" />
     <ClInclude Include="include\TunnelRouteCache.h" />
     <ClInclude Include="include\BoundedQueue.h">

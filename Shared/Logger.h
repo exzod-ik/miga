@@ -11,6 +11,11 @@
 #include <iomanip>
 #include <chrono>
 #include <ctime>
+#ifndef __linux__
+#include <condition_variable>
+#include <deque>
+#include <thread>
+#endif
 
 #ifdef __linux__
 #include <syslog.h>
@@ -44,6 +49,18 @@ private:
     std::array<std::atomic<uint64_t>, static_cast<size_t>(NetworkWarning::Count)> m_warningCounts{};
     std::array<std::atomic<uint64_t>, static_cast<size_t>(NetworkWarning::Count)> m_warningValues{};
     std::string getCurrentTime();
+    void write(int level, const std::string& message);
+#ifndef __linux__
+    std::mutex m_QueueMutex;
+    std::condition_variable m_QueueChanged;
+    std::deque<std::pair<int, std::string>> m_Queue;
+    std::thread m_Writer;
+    bool m_Async = false;
+    bool m_Closing = false;
+    size_t m_QueueBytes = 0;
+    uint64_t m_Dropped = 0;
+    void writerLoop();
+#endif
 
 public:
     Logger();
@@ -51,6 +68,10 @@ public:
 
     void enable(int level, bool consoleOutput = true);
     void log(const int level, const std::string& message);
+#ifndef __linux__
+    void startAsync();
+    void stopAsync();
+#endif
     void recordWarning(NetworkWarning event, uint64_t value = 0, uint64_t count = 1);
     void flushWarnings();
     void recordDelay(NetworkWarning event, std::chrono::steady_clock::time_point started);

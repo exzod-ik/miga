@@ -294,7 +294,7 @@ void PacketMonitor::EventProcessThread() {
     while (m_Running.load()) {
         WorkItem item;
         size_t queueDepth = 0;
-        const auto result = m_Work.PopUntil(item, m_Pending.Deadline(maintenance), &queueDepth);
+        const auto result = m_Work.PopUntil(item, m_Routing.NextDeadline(m_Pending.Deadline(maintenance)), &queueDepth);
         if (result == decltype(m_Work)::WaitResult::Closed || !m_Running.load()) break;
         if (result == decltype(m_Work)::WaitResult::Item) {
             if (m_Logger->isEnabled(LOGGER_LEVEL_WARNING))
@@ -338,6 +338,7 @@ void PacketMonitor::EventProcessThread() {
         }
         const auto now = chrono::steady_clock::now();
         if (now >= m_Pending.Deadline(maintenance)) DrainPending();
+        if (now >= m_Routing.NextDeadline(maintenance)) m_Routing.Cleanup(now);
         if (now >= maintenance) {
             MaintainState();
             maintenance = now + chrono::seconds(5);
@@ -646,8 +647,19 @@ void PacketMonitor::RecordPacketWarning(const uint8_t* packet, UINT length, cons
 void PacketMonitor::MaintainState() {
     m_TunnelSender.Reap();
     m_ReinjectSender.Reap();
-    m_Routing.Cleanup(chrono::steady_clock::now());
-    m_ProcessNames.Cleanup();
+    const auto tunnelOverflows = m_TunnelSender.TakeOverflows();
+    const auto reinjectOverflows = m_ReinjectSender.TakeOverflows();
+    if (tunnelOverflows) m_Logger->log(LOGGER_LEVEL_WARNING,
+        "send_pool_full type=TUNNEL rejected_submissions=" + to_string(tunnelOverflows));
+    if (reinjectOverflows) m_Logger->log(LOGGER_LEVEL_WARNING,
+        "send_pool_full type=REINJECT rejected_submissions=" + to_string(reinjectOverflows));
+    DWORD snapshotError = NO_ERROR;
+    for (const auto& result : m_TcpMaintenance.Take()) {
+        m_Routing.ApplyProbe(result.probe, result.status, chrono::steady_clock::now());
+        if (result.error != NO_ERROR) snapshotError = result.error;
+    }
+    if (snapshotError != NO_ERROR)
+        m_Logger->log(LOGGER_LEVEL_WARNING, "tcp_snapshot_failed win32_error=" + to_string(snapshotError));
     CleanupDnsState();
     for (size_t i = 0; i < m_WarningSampleCount; ++i)
         m_Logger->logLazy(LOGGER_LEVEL_WARNING, [&] {
@@ -765,6 +777,8 @@ bool PacketMonitor::Start() {
     }
 
     m_Running.store(true);
+    m_TcpMaintenance.Start();
+    m_Routing.SetProbeHandler([this](const SocketOwnerTable::Probe& probe) { return m_TcpMaintenance.Submit(probe); });
 
     random_device rd;
     m_rng.seed(rd());
@@ -833,6 +847,7 @@ void PacketMonitor::Stop() {
     if (m_NetworkThread.joinable()) m_NetworkThread.join();
     if (m_SocketThread.joinable()) m_SocketThread.join();
     if (m_EventProcessThread.joinable()) m_EventProcessThread.join();
+    m_TcpMaintenance.Stop();
 
 
     m_TunnelSender.Drain();
