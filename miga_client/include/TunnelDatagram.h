@@ -12,10 +12,12 @@ public:
     bool Build(const uint8_t* payload, size_t length, uint32_t source, uint32_t destination,
         uint16_t sourcePort, uint16_t destinationPort, uint16_t id, uint32_t mtu, Send send) {
         if (!payload || length == 0 || length > 65507 || mtu < 68 || source == 0 || destination == 0) return false;
-        datagram_.assign(28 + length, 0);
+        const auto datagramSize = 28 + length;
+        if (datagram_.size() < datagramSize) datagram_.resize(datagramSize);
         auto* ip = datagram_.data();
+        std::memset(ip, 0, 28);
         ip[0] = 0x45;
-        Write16(ip + 2, static_cast<uint16_t>(datagram_.size()));
+        Write16(ip + 2, static_cast<uint16_t>(datagramSize));
         Write16(ip + 4, id);
         ip[8] = 64;
         ip[9] = 17;
@@ -33,12 +35,12 @@ public:
         auto checksum = udp.Value();
         if (checksum == 0) checksum = 0xffff;
         std::memcpy(ip + 26, &checksum, 2);
-        if (datagram_.size() <= mtu) {
+        if (datagramSize <= mtu) {
             InternetChecksum header;
             header.Add(ip, 20);
             checksum = header.Value();
             std::memcpy(ip + 10, &checksum, 2);
-            return send(datagram_.data(), datagram_.size(), 1);
+            return send(datagram_.data(), datagramSize, 1);
         }
         const size_t fragmentSize = (std::min)(size_t(mtu), size_t(65535)) - 20;
         size_t offset = 0;
@@ -71,8 +73,5 @@ public:
 private:
     std::vector<uint8_t> datagram_;
     std::vector<uint8_t> batch_;
-    static void Write16(uint8_t* bytes, uint16_t value) {
-        bytes[0] = static_cast<uint8_t>(value >> 8);
-        bytes[1] = static_cast<uint8_t>(value);
-    }
+    static void Write16(uint8_t* bytes, uint16_t value);
 };

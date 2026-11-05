@@ -27,11 +27,20 @@
     <ClCompile Include="src\ServiceManager.cpp">
       <Filter>Исходные файлы</Filter>
     </ClCompile>
-    <ClCompile Include="src\PacketMonitor.cpp">
+    <ClCompile Include="src\NetworkRuntime.cpp">
       <Filter>Исходные файлы</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="include\NetworkRuntime.h" />
+    <ClInclude Include="include\runtime\DnsClassifier.h" />
+    <ClInclude Include="include\runtime\FlowTable.h" />
+    <ClInclude Include="include\runtime\RuntimeConfig.h" />
+    <ClInclude Include="include\runtime\RuntimeMailbox.h" />
+    <ClInclude Include="include\runtime\RuntimeTypes.h" />
+    <ClInclude Include="include\runtime\SocketDirectory.h" />
+    <ClInclude Include="include\runtime\WindowsSnapshot.h" />
+    <ClInclude Include="include\PacketTypes.h" />
     <ClInclude Include="include\ConfigManager.h">
       <Filter>Файлы заголовков</Filter>
     </ClInclude>
@@ -45,13 +54,10 @@
       <Filter>Файлы заголовков</Filter>
     </ClInclude>
     <ClInclude Include="include\AsyncTunnelSender.h" />
+    <ClInclude Include="include\PacketBufferPool.h" />
     <ClInclude Include="include\DeadlineIndex.h" />
-    <ClInclude Include="include\TcpSocketMaintenance.h" />
     <ClInclude Include="include\TunnelDatagram.h" />
     <ClInclude Include="include\TunnelRouteCache.h" />
-    <ClInclude Include="include\BoundedQueue.h">
-      <Filter>Файлы заголовков</Filter>
-    </ClInclude>
     <ClInclude Include="include\Ipv4Batch.h">
       <Filter>Файлы заголовков</Filter>
     </ClInclude>
@@ -59,24 +65,6 @@
       <Filter>Файлы заголовков</Filter>
     </ClInclude>
     <ClInclude Include="include\WindowsProcessIdentity.h">
-      <Filter>Файлы заголовков</Filter>
-    </ClInclude>
-    <ClInclude Include="include\PacketMonitor.h">
-      <Filter>Файлы заголовков</Filter>
-    </ClInclude>
-    <ClInclude Include="include\PacketWarning.h">
-      <Filter>Файлы заголовков</Filter>
-    </ClInclude>
-    <ClInclude Include="include\SocketOwnerTable.h">
-      <Filter>Файлы заголовков</Filter>
-    </ClInclude>
-    <ClInclude Include="include\RoutingState.h">
-      <Filter>Файлы заголовков</Filter>
-    </ClInclude>
-    <ClInclude Include="include\EventQueueDelay.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="include\PendingPackets.h">
       <Filter>Файлы заголовков</Filter>
     </ClInclude>
     <ClInclude Include="resource.h">
@@ -90,5 +78,22 @@
     <ResourceCompile Include="miga_client.rc">
       <Filter>Файлы ресурсов</Filter>
     </ResourceCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="src\AsyncTunnelSender.cpp" />
+    <ClCompile Include="src\Ipv4Batch.cpp" />
+    <ClCompile Include="src\PacketBufferPool.cpp" />
+    <ClCompile Include="src\PacketTypes.cpp" />
+    <ClCompile Include="src\ProcessIdentityCache.cpp" />
+    <ClCompile Include="src\TunnelDatagram.cpp" />
+    <ClCompile Include="src\TunnelRouteCache.cpp" />
+    <ClCompile Include="src\WindowsProcessIdentity.cpp" />
+    <ClCompile Include="src\runtime\DnsClassifier.cpp" />
+    <ClCompile Include="src\runtime\FlowTable.cpp" />
+    <ClCompile Include="src\runtime\RuntimeConfig.cpp" />
+    <ClCompile Include="src\runtime\RuntimeTypes.cpp" />
+    <ClCompile Include="src\runtime\SocketDirectory.cpp" />
+    <ClCompile Include="src\runtime\WindowsSnapshot.cpp" />
+    <ClInclude Include="src\NetworkRuntimeImpl.h" />
   </ItemGroup>
 </Project>

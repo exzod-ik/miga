@@ -9,7 +9,7 @@
 #include <errno.h>
 #include <cstring>
 
-#define VERSION "1.2.4"
+#define VERSION "1.2.5"
 
 using namespace std;
 using json = nlohmann::json;

@@ -20,11 +20,15 @@
     <ClInclude Include="$(MSBuildThisFileDirectory)InternetChecksum.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)NetworkStructures.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)nlohmann\json.hpp" />
-    <ClInclude Include="$(MSBuildThisFileDirectory)UdpPacketAssembler.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)LogTime.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="$(MSBuildThisFileDirectory)Encryption.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)Logger.cpp" />
-    <ClCompile Include="$(MSBuildThisFileDirectory)UdpPacketAssembler.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="$(MSBuildThisFileDirectory)InternetChecksum.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)LogFormat.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)LogTime.cpp" />
   </ItemGroup>
 </Project>

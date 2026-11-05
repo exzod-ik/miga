@@ -1,5 +1,5 @@
 #include "WindowsProcessIdentity.h"
-#include "BoundedQueue.h"
+#include "runtime/RuntimeMailbox.h"
 #include <atomic>
 #include <cassert>
 #include <iostream>
@@ -34,12 +34,16 @@ int main(int argc, char**) {
     for (auto& thread : threads) thread.join();
     assert(reads == 1 && loads == 1);
 
-    BoundedQueue<std::shared_ptr<const SocketOwner>, 1> queue;
+    for (int i = 0; i < 64; ++i) assert(cache.Get(1234, loader) == first);
+    assert(reads == 1 && loads == 1);
+
+    miga::runtime::Mailbox<std::shared_ptr<const SocketOwner>, 1> queue;
     auto socket = std::make_shared<const SocketOwner>(SocketOwner{ first, 10, 100 });
-    assert(socket->Matches(100) && socket->Matches(200) && !socket->Matches(99));
     assert(queue.Push(std::move(socket)));
     oldAlive = false;
     current = newProcess;
+    assert(cache.Get(1234, loader) == newProcess);
+    assert(first->Name() == "old.exe");
     const auto replacement = cache.Get(1234, loader);
     assert(replacement == newProcess && replacement->Name() == "new.exe");
     std::shared_ptr<const SocketOwner> queued;
@@ -47,7 +51,7 @@ int main(int argc, char**) {
     assert(queued->process->Name() == "old.exe");
     assert(queued->endpointId == 10);
     SocketOwner newSocket{ replacement, 11, 300 };
-    assert(!newSocket.Matches(200));
+    assert(newSocket.timestamp == 300 && newSocket.endpointId != queued->endpointId);
     cache.Clear();
     assert(queued->process->Name() == "old.exe");
 
@@ -59,6 +63,9 @@ int main(int argc, char**) {
     cache.Get(77, failure);
     cache.Get(77, failure);
     assert(failedLoads == 2);
+    cache.Get(77, failure);
+    cache.Get(77, failure);
+    assert(failedLoads == 4);
 
     int retryReads = 0;
     ProcessIdentity retry(78, [] { return true; }, [&]() -> std::string {

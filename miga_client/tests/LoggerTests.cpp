@@ -35,6 +35,12 @@ int main() {
         file.close();
         logger.logLazy(LOGGER_LEVEL_WARNING, [&] { ++evaluations; return "hidden-warning"; });
         assert(evaluations == 1);
+        logger.setLevel(LOGGER_LEVEL_INFO);
+        logger.log(LOGGER_LEVEL_INFO, "level_changed_preserves_file");
+        file.open("session.log");
+        assert(std::getline(file, line) && line.find("visible-error") != std::string::npos);
+        assert(std::getline(file, line) && line.find("level_changed_preserves_file") != std::string::npos);
+        file.close();
         logger.enable(LOGGER_LEVEL_WARNING);
         assert(logger.isEnabled(LOGGER_LEVEL_ERROR));
         assert(logger.isEnabled(LOGGER_LEVEL_WARNING));
@@ -49,27 +55,22 @@ int main() {
         for (int i = 0; i < 4; ++i)
             recorders.emplace_back([&] {
                 for (int j = 0; j < 1000; ++j)
-                    logger.recordWarning(NetworkWarning::BatchAge, 150);
+                    logger.recordWarning(NetworkWarning::BatchProcessing, 150);
             });
         for (auto& recorder : recorders) recorder.join();
         logger.flushWarnings();
         logger.flushWarnings();
         file.open("session.log");
         assert(std::getline(file, line));
-        assert(line.find("WARNING: batch_age_after_receive count=4000 total_value=600000") != std::string::npos);
+        assert(line.find("WARNING: batch_processing count=4000 total_value=600000") != std::string::npos);
         assert(line.find("value_unit=ms window=approximate") != std::string::npos);
         assert(!std::getline(file, line));
         file.close();
-        logger.recordWarning(NetworkWarning::ReceiveBufferWait, 182);
-        logger.recordWarning(NetworkWarning::ReceiveEventQueueWait, 125);
-        logger.flushWarnings();
-        assert(output.str().find("receive_buffer_wait count=1 total_value=182") != std::string::npos);
-        assert(output.str().find("receive_event_queue_wait count=1 total_value=125") != std::string::npos);
-        logger.recordWarning(NetworkWarning::LargeTunnelPacket, 1600);
+        logger.recordWarning(NetworkWarning::PendingPidFallback, 0, 3);
         logger.recordWarning(NetworkWarning::RoutingDrop);
         logger.flushWarnings();
-        assert(output.str().find("total_value=1600 value_unit=bytes window=approximate") != std::string::npos);
-        assert(output.str().find("routing_drop count=1 total_value=0 value_unit=none window=approximate") != std::string::npos);
+        assert(output.str().find("pending_pid_direct_fallback count=3 total_value=0 value_unit=none") != std::string::npos);
+        assert(output.str().find("routing_drop count=1 total_value=0 value_unit=none") != std::string::npos);
         logger.log(LOGGER_LEVEL_WARNING, "format_probe value=" + LogValue("name\nERROR: forged=1"));
         assert(output.str().find("format_probe value=\"name\\nERROR: forged=1\"") != std::string::npos);
         assert(output.str().find("\nERROR: forged=1") == std::string::npos);
@@ -108,8 +109,13 @@ int main() {
         assert(count == 400);
         file.close();
         logger.startAsync();
-        logger.log(LOGGER_LEVEL_INFO, "async_restart value=complete");
+        const auto recorded = std::chrono::system_clock::now() - std::chrono::hours(24);
+        logger.log(LOGGER_LEVEL_INFO, "async_restart value=complete", recorded);
         logger.stopAsync();
+        file.open("session.log");
+        while (std::getline(file, line) && line.find("async_restart") == std::string::npos) {}
+        assert(line.find("[" + FormatLogTime(recorded) + "]") == 0);
+        file.close();
         logger.enable(LOGGER_LEVEL_INFO, false);
         logger.startAsync();
         logger.log(LOGGER_LEVEL_INFO, std::string(4 * 1024 * 1024 + 1, 'x'));

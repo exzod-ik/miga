@@ -135,8 +135,7 @@ bool ConfigManager::ParseServer(const json& serverJson, ServerConfig& server) {
     return true;
 }
 
-bool ConfigManager::Load(const string& configPath, bool hotLoad,
-    const std::function<bool(const std::vector<ServerConfig>&)>& prepare) {
+bool ConfigManager::Load(const string& configPath) {
     m_Logger->log(LOGGER_LEVEL_INFO, "config_loading path=" + LogValue(configPath));
 
     int logLevel = LOGGER_LEVEL_NONE;
@@ -203,29 +202,9 @@ bool ConfigManager::Load(const string& configPath, bool hotLoad,
             return false;
         }
 
-        unique_lock dynamicLock(m_DynamicIPMutex);
-        if (hotLoad) {
-            for (auto& server : newServers) {
-                auto previous = std::find_if(m_Servers.begin(), m_Servers.end(),
-                    [&](const ServerConfig& old) { return server.SameTransport(old); });
-                if (previous != m_Servers.end()) server.dynamicIPs = previous->dynamicIPs;
-            }
-        }
-        unordered_map<string, size_t> processIndex;
-        unordered_map<uint32_t, size_t> dynamicIndex;
-        for (size_t i = 0; i < newServers.size(); ++i) {
-            for (const auto& process : newServers[i].processRules)
-                processIndex.try_emplace(process, i);
-            for (uint32_t ip : newServers[i].dynamicIPs)
-                dynamicIndex.try_emplace(ip, i);
-        }
-        if (prepare && !prepare(newServers)) return false;
         m_LogLevel = logLevel;
         m_Servers = move(newServers);
-        m_ProcessIndex = move(processIndex);
-        m_DynamicIPIndex = move(dynamicIndex);
         m_TunnelMaxMss = tunnelMaxMss;
-        dynamicLock.unlock();
 
         m_Logger->log(LOGGER_LEVEL_INFO, "config_loaded server_count=" +
             to_string(m_Servers.size()));
@@ -239,34 +218,40 @@ bool ConfigManager::Load(const string& configPath, bool hotLoad,
     }
 }
 
-const ServerConfig* ConfigManager::FindServerByDomain(const string& domain) const {
-    for (const auto& server : m_Servers) {
-        if (server.IsDomainRedirect(domain))
-            return &server;
+bool IPRange::contains(uint32_t ip) const {
+    return (ip >= startIP && ip <= endIP);
+}
+
+bool IPRule::matches(uint32_t ip) const {
+    auto it = std::upper_bound(ipRanges.begin(), ipRanges.end(), ip,
+        [](uint32_t value, const IPRange& range) { return value < range.startIP; });
+    return it != ipRanges.begin() && std::prev(it)->contains(ip);
+}
+
+void IPRule::Normalize() {
+    std::sort(ipRanges.begin(), ipRanges.end(), [](const IPRange& a, const IPRange& b) {
+        return a.startIP < b.startIP;
+    });
+    size_t count = 0;
+    for (const auto range : ipRanges) {
+        if (range.startIP > range.endIP) continue;
+        if (count && uint64_t(range.startIP) <= uint64_t(ipRanges[count - 1].endIP) + 1) {
+            ipRanges[count - 1].endIP = (std::max)(ipRanges[count - 1].endIP, range.endIP);
+        }
+        else {
+            ipRanges[count++] = range;
+        }
     }
-    return nullptr;
+    ipRanges.resize(count);
 }
 
-void ConfigManager::AddDynamicIP(size_t serverIndex, uint32_t ip) {
-    unique_lock lock(m_DynamicIPMutex);
-    if (serverIndex >= m_Servers.size())
-        return;
-
-    m_Servers[serverIndex].dynamicIPs.insert(ip);
-    auto [it, inserted] = m_DynamicIPIndex.try_emplace(ip, serverIndex);
-    if (!inserted && serverIndex < it->second)
-        it->second = serverIndex;
+bool ServerConfig::SameTransport(const ServerConfig& other) const {
+    return serverIP == other.serverIP && portStart == other.portStart && portEnd == other.portEnd &&
+        xorKeyBase64 == other.xorKeyBase64 && swapKeyBase64 == other.swapKeyBase64;
 }
 
-const ServerConfig* ConfigManager::FindServerByProcess(const string& processName) const {
-    string name = processName;
-    transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return static_cast<char>(tolower(c)); });
-    auto it = m_ProcessIndex.find(name);
-    return it == m_ProcessIndex.end() ? nullptr : &m_Servers[it->second];
-}
+const std::vector<ServerConfig>& ConfigManager::GetServers() const { return m_Servers; }
 
-const ServerConfig* ConfigManager::FindServerByDynamicIP(uint32_t ip) const {
-    shared_lock lock(m_DynamicIPMutex);
-    auto it = m_DynamicIPIndex.find(ip);
-    return it == m_DynamicIPIndex.end() ? nullptr : &m_Servers[it->second];
-}
+int ConfigManager::GetLogLevel() const { return m_LogLevel; }
+
+uint16_t ConfigManager::GetTunnelMaxMss() const { return m_TunnelMaxMss; }

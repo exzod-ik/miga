@@ -5,7 +5,7 @@ using namespace std;
 
 CMigaClient::CMigaClient()
     : m_Config(&m_Logger)
-    , m_PacketMonitor(&m_Config, &m_Logger) {
+    , m_NetworkRuntime(&m_Config, &m_Logger) {
     m_Logger.log(LOGGER_LEVEL_INFO, "client_created");
 }
 
@@ -32,7 +32,7 @@ bool CMigaClient::Initialize(const string& configPath, bool consoleOutput) {
 void CMigaClient::RunConsole() {
     m_Logger.log(LOGGER_LEVEL_INFO, "client_starting mode=console");
 
-    if (!m_PacketMonitor.Start())
+    if (!m_NetworkRuntime.Start())
         return;
 
     m_Logger.log(LOGGER_LEVEL_INFO, "client_running mode=console stop_action=press_enter");
@@ -46,14 +46,14 @@ void CMigaClient::RunService() {
     m_StopRequested = false;
     m_ReloadConfigRequested = false;
 
-    if (!m_PacketMonitor.Start()) {
-        m_Logger.log(LOGGER_LEVEL_ERROR, "packet_monitor_start_failed");
+    if (!m_NetworkRuntime.Start()) {
+        m_Logger.log(LOGGER_LEVEL_ERROR, "network_runtime_start_failed");
         return;
     }
 
     m_Logger.log(LOGGER_LEVEL_INFO, "client_running mode=service stop_action=signal");
 
-    while (!m_StopRequested) {
+    while (!m_StopRequested && m_NetworkRuntime.IsRunning()) {
         if (m_ReloadConfigRequested.exchange(false)) {
             ReloadConfig();
         }
@@ -65,11 +65,9 @@ void CMigaClient::RunService() {
 
 void CMigaClient::Stop() {
     m_StopRequested = true;
-    if (m_PacketMonitor.IsRunning()) {
-        m_Logger.log(LOGGER_LEVEL_INFO, "client_stopping");
-        m_PacketMonitor.Stop();
-        m_Logger.log(LOGGER_LEVEL_INFO, "client_stopped");
-    }
+    m_Logger.log(LOGGER_LEVEL_INFO, "client_stopping");
+    m_NetworkRuntime.Stop();
+    m_Logger.log(LOGGER_LEVEL_INFO, "client_stopped");
 }
 
 void CMigaClient::RequestStop() {
@@ -82,9 +80,11 @@ void CMigaClient::RequestReloadConfig() {
 
 void CMigaClient::ReloadConfig() {
     m_Logger.log(LOGGER_LEVEL_INFO, "config_reloading");
-    if (m_PacketMonitor.ReloadConfig(CONFIG_FILE_NAME))
+    if (m_NetworkRuntime.ReloadConfig(CONFIG_FILE_NAME))
         m_Logger.log(LOGGER_LEVEL_INFO, "config_reloaded");
     else
         m_Logger.log(LOGGER_LEVEL_ERROR, "config_reload_failed");
 }
 extern CMigaClient* g_Client;
+
+Logger& CMigaClient::GetLogger() { return m_Logger; }

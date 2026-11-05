@@ -16,18 +16,9 @@ public:
     const uint32_t pid;
     const std::function<bool()> isAlive;
 
-    ProcessIdentity(uint32_t id, std::function<bool()> alive, std::function<std::string()> readName)
-        : pid(id), isAlive(std::move(alive)), readName_(std::move(readName)) {}
+    ProcessIdentity(uint32_t id, std::function<bool()> alive, std::function<std::string()> readName);
 
-    std::string Name() const {
-        std::lock_guard lock(mutex_);
-        const auto now = std::chrono::steady_clock::now();
-        if (name_ == "unknown" && now >= retryAt_) {
-            name_ = readName_();
-            retryAt_ = now + std::chrono::seconds(1);
-        }
-        return name_;
-    }
+    std::string Name() const;
 
 private:
     std::function<std::string()> readName_;
@@ -38,15 +29,16 @@ private:
 
 using ProcessOwner = std::shared_ptr<const ProcessIdentity>;
 
+enum class SocketOrigin { Other, Bind, Connect };
+
 struct SocketOwner {
     ProcessOwner process;
     uint64_t endpointId;
     int64_t timestamp;
     bool snapshot = false;
+    SocketOrigin origin = SocketOrigin::Other;
+    uint64_t parentEndpointId = 0;
 
-    bool Matches(int64_t packetTimestamp) const {
-        return timestamp <= packetTimestamp;
-    }
 };
 
 class ProcessIdentityCache {
@@ -81,22 +73,9 @@ public:
         return process;
     }
 
-    void Cleanup() {
-        std::lock_guard lock(mutex_);
-        for (auto it = entries_.begin(); it != entries_.end();) {
-            if (!it->second.process->isAlive()) {
-                order_.erase(it->second.position);
-                it = entries_.erase(it);
-            }
-            else ++it;
-        }
-    }
+    void Cleanup();
 
-    void Clear() {
-        std::lock_guard lock(mutex_);
-        entries_.clear();
-        order_.clear();
-    }
+    void Clear();
 
 private:
     struct Entry {

@@ -1,12 +1,11 @@
 #pragma once
 
-#include "NetworkStructures.h"
+#include <cstdint>
+#include <string>
+#include <vector>
 #include "Logger.h"
 #include <nlohmann/json.hpp>
 #include <algorithm>
-#include <functional>
-#include <shared_mutex>
-#include <unordered_map>
 #include <unordered_set>
 
 using json = nlohmann::json;
@@ -15,40 +14,16 @@ struct IPRange {
     uint32_t startIP;
     uint32_t endIP;
 
-    bool contains(uint32_t ip) const {
-        return (ip >= startIP && ip <= endIP);
-    }
+    bool contains(uint32_t ip) const;
 };
 
 struct IPRule {
     std::vector<IPRange> ipRanges;
 
-    bool matches(uint32_t ip) const {
-        auto it = std::upper_bound(ipRanges.begin(), ipRanges.end(), ip,
-            [](uint32_t value, const IPRange& range) { return value < range.startIP; });
-        return it != ipRanges.begin() && std::prev(it)->contains(ip);
-    }
+    bool matches(uint32_t ip) const;
 
-    void Normalize() {
-        std::sort(ipRanges.begin(), ipRanges.end(), [](const IPRange& a, const IPRange& b) {
-            return a.startIP < b.startIP;
-        });
-        size_t count = 0;
-        for (const auto range : ipRanges) {
-            if (range.startIP > range.endIP) continue;
-            if (count && uint64_t(range.startIP) <= uint64_t(ipRanges[count - 1].endIP) + 1) {
-                ipRanges[count - 1].endIP = (std::max)(ipRanges[count - 1].endIP, range.endIP);
-            }
-            else {
-                ipRanges[count++] = range;
-            }
-        }
-        ipRanges.resize(count);
-    }
+    void Normalize();
 
-    bool isEmpty() const {
-        return ipRanges.empty();
-    }
 };
 
 struct ServerConfig {
@@ -61,23 +36,16 @@ struct ServerConfig {
 
     std::vector<std::string> processRules;
     IPRule staticIPRule;
-    std::unordered_set<uint32_t> dynamicIPs;
     std::vector<std::string> domainRules;
     std::vector<std::string> wildcardDomainSuffixes;
 
     bool IsDomainRedirect(std::string domain) const;
-    bool SameTransport(const ServerConfig& other) const {
-        return serverIP == other.serverIP && portStart == other.portStart && portEnd == other.portEnd &&
-            xorKeyBase64 == other.xorKeyBase64 && swapKeyBase64 == other.swapKeyBase64;
-    }
+    bool SameTransport(const ServerConfig& other) const;
 };
 
 class ConfigManager {
 private:
     std::vector<ServerConfig> m_Servers;
-    std::unordered_map<std::string, size_t> m_ProcessIndex;
-    std::unordered_map<uint32_t, size_t> m_DynamicIPIndex;
-    mutable std::shared_mutex m_DynamicIPMutex;
 
     Logger* m_Logger;
     int m_LogLevel;
@@ -91,16 +59,11 @@ private:
 public:
     ConfigManager(Logger* logger);
 
-    bool Load(const std::string& configPath, bool hotLoad = false,
-        const std::function<bool(const std::vector<ServerConfig>&)>& prepare = {});
+    bool Load(const std::string& configPath);
 
-    const std::vector<ServerConfig>& GetServers() const { return m_Servers; }
+    const std::vector<ServerConfig>& GetServers() const;
 
-    const ServerConfig* FindServerByDomain(const std::string& domain) const;
-    const ServerConfig* FindServerByProcess(const std::string& processName) const;
-    const ServerConfig* FindServerByDynamicIP(uint32_t ip) const;
-    void AddDynamicIP(size_t serverIndex, uint32_t ip);
 
-    int GetLogLevel() const { return m_LogLevel; }
-    uint16_t GetTunnelMaxMss() const { return m_TunnelMaxMss; }
+    int GetLogLevel() const;
+    uint16_t GetTunnelMaxMss() const;
 };

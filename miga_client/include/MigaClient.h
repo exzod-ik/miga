@@ -2,13 +2,13 @@
 
 #include "Logger.h"
 #include "ConfigManager.h"
-#include "PacketMonitor.h"
+#include "NetworkRuntime.h"
 
 class CMigaClient {
 private:
     Logger m_Logger;
     ConfigManager m_Config;
-    PacketMonitor m_PacketMonitor;
+    NetworkRuntime m_NetworkRuntime;
     std::atomic<bool> m_StopRequested;
     std::atomic<bool> m_ReloadConfigRequested;
 
@@ -25,7 +25,7 @@ public:
     void RequestReloadConfig();
     void ReloadConfig();
 
-    Logger& GetLogger() { return m_Logger; }
+    Logger& GetLogger();
 };
 
 extern CMigaClient* g_Client;

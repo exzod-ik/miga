@@ -107,7 +107,7 @@
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>ws2_32.lib;iphlpapi.lib</AdditionalDependencies>
+      <AdditionalDependencies>ws2_32.lib;iphlpapi.lib;WinDivert.lib</AdditionalDependencies>
       <AdditionalLibraryDirectories>$(ProjectDir)windivert\$(Platform);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <Version>
       </Version>
@@ -132,7 +132,7 @@
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>$(ProjectDir)windivert\$(Platform);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>ws2_32.lib;iphlpapi.lib</AdditionalDependencies>
+      <AdditionalDependencies>ws2_32.lib;iphlpapi.lib;WinDivert.lib</AdditionalDependencies>
       <ProgramDatabaseFile>$(OutDir)$(TargetName).pdb</ProgramDatabaseFile>
       <Version>
       </Version>
@@ -156,7 +156,7 @@
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>ws2_32.lib;iphlpapi.lib</AdditionalDependencies>
+      <AdditionalDependencies>ws2_32.lib;iphlpapi.lib;WinDivert.lib</AdditionalDependencies>
       <OptimizeReferences>false</OptimizeReferences>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <AdditionalLibraryDirectories>$(ProjectDir)windivert\$(Platform);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
@@ -183,7 +183,7 @@
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>$(ProjectDir)windivert\$(Platform);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>ws2_32.lib;iphlpapi.lib</AdditionalDependencies>
+      <AdditionalDependencies>ws2_32.lib;iphlpapi.lib;WinDivert.lib</AdditionalDependencies>
       <ProgramDatabaseFile>$(OutDir)$(TargetName).pdb</ProgramDatabaseFile>
       <Version>
       </Version>
@@ -200,25 +200,28 @@
   <ItemGroup>
     <ClCompile Include="src\ConfigManager.cpp" />
     <ClCompile Include="src\main.cpp" />
-    <ClCompile Include="src\PacketMonitor.cpp" />
+    <ClCompile Include="src\NetworkRuntime.cpp" />
     <ClCompile Include="src\MigaClient.cpp" />
     <ClCompile Include="src\ServiceManager.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="include\NetworkRuntime.h" />
+    <ClInclude Include="include\runtime\DnsClassifier.h" />
+    <ClInclude Include="include\runtime\FlowTable.h" />
+    <ClInclude Include="include\runtime\RuntimeConfig.h" />
+    <ClInclude Include="include\runtime\RuntimeMailbox.h" />
+    <ClInclude Include="include\runtime\RuntimeTypes.h" />
+    <ClInclude Include="include\runtime\SocketDirectory.h" />
+    <ClInclude Include="include\runtime\WindowsSnapshot.h" />
+    <ClInclude Include="include\PacketTypes.h" />
     <ClInclude Include="include\ConfigManager.h" />
-    <ClInclude Include="include\PacketMonitor.h" />
     <ClInclude Include="include\DeadlineIndex.h" />
-    <ClInclude Include="include\TcpSocketMaintenance.h" />
     <ClInclude Include="include\AsyncTunnelSender.h" />
+    <ClInclude Include="include\PacketBufferPool.h" />
     <ClInclude Include="include\TunnelDatagram.h" />
     <ClInclude Include="include\TunnelRouteCache.h" />
-    <ClInclude Include="include\BoundedQueue.h" />
     <ClInclude Include="include\Ipv4Batch.h" />
     <ClInclude Include="include\ProcessIdentityCache.h" />
-    <ClInclude Include="include\SocketOwnerTable.h" />
-    <ClInclude Include="include\RoutingState.h" />
-    <ClInclude Include="include\PendingPackets.h" />
-    <ClInclude Include="include\EventQueueDelay.h" />
     <ClInclude Include="include\WindowsProcessIdentity.h" />
     <ClInclude Include="include\MigaClient.h" />
     <ClInclude Include="include\ServiceManager.h" />
@@ -228,7 +231,28 @@
   <ItemGroup>
     <ResourceCompile Include="miga_client.rc" />
   </ItemGroup>
+  <ItemGroup>
+    <ClCompile Remove="..\Shared\UdpPacketAssembler.cpp;$(MSBuildProjectDirectory)\..\Shared\UdpPacketAssembler.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="src\AsyncTunnelSender.cpp" />
+    <ClCompile Include="src\Ipv4Batch.cpp" />
+    <ClCompile Include="src\PacketBufferPool.cpp" />
+    <ClCompile Include="src\PacketTypes.cpp" />
+    <ClCompile Include="src\ProcessIdentityCache.cpp" />
+    <ClCompile Include="src\TunnelDatagram.cpp" />
+    <ClCompile Include="src\TunnelRouteCache.cpp" />
+    <ClCompile Include="src\WindowsProcessIdentity.cpp" />
+    <ClCompile Include="src\runtime\DnsClassifier.cpp" />
+    <ClCompile Include="src\runtime\FlowTable.cpp" />
+    <ClCompile Include="src\runtime\RuntimeConfig.cpp" />
+    <ClCompile Include="src\runtime\RuntimeTypes.cpp" />
+    <ClCompile Include="src\runtime\SocketDirectory.cpp" />
+    <ClCompile Include="src\runtime\WindowsSnapshot.cpp" />
+    <ClInclude Include="src\NetworkRuntimeImpl.h" />
+  </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
+
 </Project>

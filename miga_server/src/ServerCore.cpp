@@ -1,5 +1,6 @@
 #include "ServerCore.h"
 #include "InternetChecksum.h"
+#include "TunnelIngress.h"
 #include <fstream>
 #include <nlohmann/json.hpp>
 #include <unistd.h>
@@ -12,7 +13,8 @@
 #include <chrono>
 #include <thread>
 #include <poll.h>
-#include <linux/if.h>
+#include <array>
+#include <linux/filter.h>
 #include <linux/if_tun.h>
 #include <sys/ioctl.h>
 #include <arpa/inet.h>
@@ -119,12 +121,13 @@ uint16_t udp_checksum(const struct iphdr* ip, const struct udphdr* udp) {
     InternetChecksum checksum;
     checksum.Add(&pseudo, sizeof(pseudo));
     checksum.Add(udp, udp_len);
-    return checksum.Value();
+    const uint16_t value = checksum.Value();
+    return value ? value : 0xffff;
 }
 
 ServerCore::ServerCore()
     : m_socket(-1)
-    , m_recvBuffer(65536)
+    , m_tunfd(-1)
     , m_logger()
     , m_running(false) {
     m_config.log_level = LOGGER_LEVEL_NONE;
@@ -133,6 +136,7 @@ ServerCore::ServerCore()
 ServerCore::~ServerCore() {
     Stop();
     if (m_socket >= 0) close(m_socket);
+    if (m_tunfd >= 0) close(m_tunfd);
 }
 
 // send unpacked ip packet to tun
@@ -157,11 +161,22 @@ bool ServerCore::InitSocket() {
         m_logger.logLazy(LOGGER_LEVEL_ERROR, [&] { return "socket_create_failed type=RAW protocol=UDP required_privilege=root_or_cap_net_raw" + LogErrno(errno); });
         return false;
     }
-    int one = 1;
-    if (setsockopt(m_socket, IPPROTO_IP, IP_HDRINCL, &one, sizeof(one)) < 0) {
-        m_logger.logLazy(LOGGER_LEVEL_ERROR, [&] { return "socket_option_failed option=IP_HDRINCL" + LogErrno(errno); });
+    const int discovery = IP_PMTUDISC_DONT;
+    if (setsockopt(m_socket, IPPROTO_IP, IP_MTU_DISCOVER, &discovery, sizeof(discovery)) < 0) {
+        m_logger.logLazy(LOGGER_LEVEL_ERROR, [&] { return "socket_option_failed option=IP_MTU_DISCOVER" + LogErrno(errno); });
         return false;
     }
+    sock_filter instructions[] = {
+        BPF_STMT(BPF_LDX | BPF_B | BPF_MSH, 0),
+        BPF_STMT(BPF_LD | BPF_H | BPF_IND, 2),
+        BPF_JUMP(BPF_JMP | BPF_JGE | BPF_K, m_config.client_port_start, 0, 2),
+        BPF_JUMP(BPF_JMP | BPF_JGT | BPF_K, m_config.client_port_end, 1, 0),
+        BPF_STMT(BPF_RET | BPF_K, 0xffffffff),
+        BPF_STMT(BPF_RET | BPF_K, 0)
+    };
+    sock_fprog filter{static_cast<unsigned short>(std::size(instructions)), instructions};
+    if (setsockopt(m_socket, SOL_SOCKET, SO_ATTACH_FILTER, &filter, sizeof(filter)) < 0)
+        m_logger.logLazy(LOGGER_LEVEL_WARNING, [&] { return "socket_filter_unavailable" + LogErrno(errno); });
 
     m_logger.logLazy(LOGGER_LEVEL_INFO, [&] { return "socket_created type=RAW protocol=UDP"; });
     return true;
@@ -172,7 +187,7 @@ bool ServerCore::CreateTUN(const char* dev_name) {
     struct ifreq ifr;
 
     // Открываем клон-устройство TUN
-    if ((m_tunfd = open("/dev/net/tun", O_RDWR)) < 0) {
+    if ((m_tunfd = open("/dev/net/tun", O_RDWR | O_NONBLOCK | O_CLOEXEC)) < 0) {
         m_logger.logLazy(LOGGER_LEVEL_ERROR, [&] { return "tun_create_failed operation=open path=/dev/net/tun" + LogErrno(errno); });
         return false;
     }
@@ -188,15 +203,13 @@ bool ServerCore::CreateTUN(const char* dev_name) {
     if (ioctl(m_tunfd, TUNSETIFF, (void*)&ifr) < 0) {
         m_logger.logLazy(LOGGER_LEVEL_ERROR, [&] { return "tun_create_failed operation=ioctl request=TUNSETIFF" + LogErrno(errno); });
         close(m_tunfd);
+        m_tunfd = -1;
         return false;
     }
     
     string msg = "tun_created interface=";
     msg += LogValue(ifr.ifr_name);
     m_logger.logLazy(LOGGER_LEVEL_INFO, [&] { return msg; });
-
-    int flags = fcntl(m_tunfd, F_GETFL, 0);
-    fcntl(m_tunfd, F_SETFL, flags | O_NONBLOCK);
 
     //enable ip-forward
     const char* ip_forward_path = "/proc/sys/net/ipv4/ip_forward";
@@ -214,6 +227,7 @@ bool ServerCore::CreateTUN(const char* dev_name) {
             else {
                 m_logger.logLazy(LOGGER_LEVEL_ERROR, [&] { return "ip_forwarding_enable_failed"; });
                 close(m_tunfd);
+                m_tunfd = -1;
                 return false;
             }
         }
@@ -227,39 +241,19 @@ bool ServerCore::CreateTUN(const char* dev_name) {
 }
 
 // procces packet from client
-void ServerCore::HandleClientPacket(const uint8_t* ipPacket, size_t ipLen, uint16_t dstPort) {
-
-    if (dstPort < m_config.client_port_start || dstPort > m_config.client_port_end) {
-        return;
-    }
-
-    struct iphdr* ip = (struct iphdr*)ipPacket;
-    if (ip->protocol != IPPROTO_UDP) {
-        return;
-    }
-
-    // add ip-packet to udp assembler
-    if (m_assembler.AddIpPacket(ipPacket, ipLen)) {
-        // we have at least 1 ready-made udp package - process it and release
-        UdpPacketInfo* pkt;
-        while ((pkt = m_assembler.GetCompleteUdpPacket()) != nullptr) {
-            ProcessClientUdpPacket(pkt);
-            m_assembler.ReleaseUdpPacket(pkt);
-        }
-    }
+void ServerCore::HandleClientPacket(uint8_t* packet, size_t length) {
+    TunnelIngress datagram;
+    if (!TunnelIngress::Parse(packet, length, m_config.client_port_start, m_config.client_port_end, datagram)) return;
+    m_logger.logLazy(LOGGER_LEVEL_DEBUG, [&] { return "tunnel_packet_received src=" + IpToString(datagram.clientAddress) +
+        ":" + to_string(datagram.clientPort) + " dst_port=" + to_string(datagram.serverPort); });
+    const auto started = chrono::steady_clock::now();
+    ProcessClientUdpPacket(datagram.payload, datagram.length, datagram.clientAddress, datagram.clientPort, datagram.serverPort);
+    m_logger.recordDelay(NetworkWarning::ClientPacketProcessing, started);
 }
 
-// process udp packet from client
-void ServerCore::ProcessClientUdpPacket(UdpPacketInfo* pkt) {
-    uint8_t* udpPayload = pkt->payload;
-    size_t payloadLen = pkt->payloadSize;
-
-    vector<uint8_t> decrypted(udpPayload, udpPayload + payloadLen);
-    m_encryption.Decrypt(decrypted.data(), decrypted.size(), htons(pkt->dstPort));
-
-    const uint8_t* origIpPacket = decrypted.data();
-    size_t origIpLen = decrypted.size();
-
+void ServerCore::ProcessClientUdpPacket(uint8_t* origIpPacket, size_t origIpLen,
+    uint32_t client_ip, uint16_t client_udp_port, uint16_t local_udp_port) {
+    m_encryption.Decrypt(origIpPacket, origIpLen, local_udp_port);
     struct iphdr* origIp = nullptr;
     size_t origIpHeaderLen = 0;
     if (!ValidateInnerIpPacket(origIpPacket, origIpLen, origIp, origIpHeaderLen)) {
@@ -290,20 +284,15 @@ void ServerCore::ProcessClientUdpPacket(UdpPacketInfo* pkt) {
         proto = "UDP";
     }
 
-    bool dnsRedirect = false;
     uint32_t saved_dst_ip = original_dst_ip;
 
     if (m_config.dns_server && origIp->protocol == IPPROTO_UDP && original_dst_port == 53) {
-        dnsRedirect = true;
         original_dst_ip = m_config.dns_server;
         if (m_logger.isEnabled(LOGGER_LEVEL_DEBUG)) {
             m_logger.logLazy(LOGGER_LEVEL_DEBUG, [&] { return "dns_query_redirected original_ip=" + IpToString(saved_dst_ip) + " server_ip=" + IpToString(m_config.dns_server); });
         }
     }
 
-    uint32_t client_ip = pkt->srcIp;
-    uint16_t client_udp_port = ntohs(pkt->srcPort);
-    uint16_t local_udp_port = ntohs(pkt->dstPort);
     auto connKey = make_tuple(original_src_ip, original_src_port, original_dst_ip, original_dst_port, origIp->protocol);
 
     uint16_t chosen_src_port = 0;
@@ -322,14 +311,12 @@ void ServerCore::ProcessClientUdpPacket(UdpPacketInfo* pkt) {
         lock_guard<mutex> lock_table(m_tableMutex);
         const auto now = chrono::steady_clock::now();
         auto it = m_connPortMap.find(connKey);
-        auto replaced = m_forwardTable.end();
-        if (it != m_connPortMap.end() && origIp->protocol == IPPROTO_TCP) {
-            auto forward = m_forwardTable.find((uint32_t(origIp->protocol) << 16) | it->second.port);
-            if (forward != m_forwardTable.end() && forward->second.tcpState.IsNewConnection(tcpSegment)) {
-                replaced = forward;
-            }
-        }
-        if (it != m_connPortMap.end() && replaced == m_forwardTable.end()) {
+        auto& routes = origIp->protocol == IPPROTO_TCP ? m_tcpRoutes : m_udpRoutes;
+        ClientInfo* replaced = nullptr;
+        if (it != m_connPortMap.end() && origIp->protocol == IPPROTO_TCP &&
+            routes[it->second.port]->tcpState.IsNewConnection(tcpSegment))
+            replaced = routes[it->second.port].get();
+        if (it != m_connPortMap.end() && !replaced) {
             chosen_src_port = it->second.port;
             if (m_logger.isEnabled(LOGGER_LEVEL_DEBUG))
                 m_logger.logLazy(LOGGER_LEVEL_DEBUG, [&] { return "source_port_selected reused=1 port=" + to_string(chosen_src_port); });
@@ -342,10 +329,17 @@ void ServerCore::ProcessClientUdpPacket(UdpPacketInfo* pkt) {
                 return;
             }
             chosen_src_port = *port;
-            if (replaced != m_forwardTable.end()) {
-                replaced->second.tcpState.Retire();
-                replaced->second.last_used = now;
+            if (replaced) {
+                replaced->tcpState.Retire();
+                replaced->last_used = now;
             }
+            routes[chosen_src_port] = make_unique<ClientInfo>();
+            auto& route = *routes[chosen_src_port];
+            route.original_src_ip = original_src_ip;
+            route.original_src_port = original_src_port;
+            route.remote_ip = original_dst_ip;
+            route.remote_port = original_dst_port;
+            m_cleanupKeys.push_back((uint32_t(origIp->protocol) << 16) | chosen_src_port);
             PortInfo info;
             info.port = chosen_src_port;
             m_connPortMap[connKey] = info;
@@ -361,15 +355,11 @@ void ServerCore::ProcessClientUdpPacket(UdpPacketInfo* pkt) {
             }
             return;
         }
-        auto& info = m_forwardTable[(uint32_t(origIp->protocol) << 16) | chosen_src_port];
+        auto& info = *routes[chosen_src_port];
         info.local_udp_port = local_udp_port;
         info.client_ip = client_ip;
         info.client_udp_port = client_udp_port;
-        info.original_src_ip = original_src_ip;
-        info.original_src_port = original_src_port;
         info.original_dst_ip = saved_dst_ip;
-        info.remote_ip = original_dst_ip;
-        info.remote_port = original_dst_port;
         info.last_used = now;
         if (origIp->protocol == IPPROTO_TCP)
             info.tcpState.Observe(tcpSegment, true);
@@ -380,31 +370,27 @@ void ServerCore::ProcessClientUdpPacket(UdpPacketInfo* pkt) {
             " dst=" + IpToString(origIp->daddr) + ":" + to_string(original_dst_port) + " forwarded_port=" + to_string(chosen_src_port) + flags; });
     }
 
-    vector<uint8_t> outPacket(origIpLen);
-    memcpy(outPacket.data(), origIpPacket, origIpLen);
-    struct iphdr* outIp = (struct iphdr*)outPacket.data();
-
+    auto* outIp = origIp;
     outIp->daddr = original_dst_ip;
 
-    uint32_t server_ip = inet_addr("10.0.0.2");
-    outIp->saddr = server_ip;
+    outIp->saddr = htonl(0x0a000002);
     outIp->check = 0;
     outIp->check = in_cksum((uint16_t*)outIp, outIp->ihl * 4);
 
     if (outIp->protocol == IPPROTO_TCP) {
-        struct tcphdr* tcp = (struct tcphdr*)(outPacket.data() + outIp->ihl * 4);
+        struct tcphdr* tcp = (struct tcphdr*)(origIpPacket + origIpHeaderLen);
         tcp->source = htons(chosen_src_port);
         tcp->check = 0;
         tcp->check = tcp_checksum(outIp, tcp);
     }
     else if (outIp->protocol == IPPROTO_UDP) {
-        struct udphdr* udpOut = (struct udphdr*)(outPacket.data() + outIp->ihl * 4);
+        struct udphdr* udpOut = (struct udphdr*)(origIpPacket + origIpHeaderLen);
         udpOut->source = htons(chosen_src_port);
         udpOut->check = 0;
         udpOut->check = udp_checksum(outIp, udpOut);
     }
 
-    SendPacket(outPacket.data(), outPacket.size());
+    SendPacket(origIpPacket, ntohs(outIp->tot_len));
 }
 
 bool ServerCore::ValidateInnerIpPacket(const uint8_t* packet, size_t len, struct iphdr*& outIp, size_t& outIpHeaderLen) {
@@ -444,6 +430,8 @@ bool ServerCore::ValidateInnerIpPacket(const uint8_t* packet, size_t len, struct
         m_logger.logLazy(LOGGER_LEVEL_ERROR, [&] { return "inner_packet_invalid reason=ip_total_length_exceeds_buffer"; });
         return false;
     }
+
+    if (ntohs(ip->frag_off) & 0x3fff) return false;
 
     // protocol
     if (ip->protocol != IPPROTO_TCP && ip->protocol != IPPROTO_UDP) {
@@ -491,46 +479,34 @@ bool ServerCore::ValidateInnerIpPacket(const uint8_t* packet, size_t len, struct
     return true;
 }
 
-void ServerCore::HandleInternetPacket(const uint8_t* ipPacket, size_t ipLen, uint16_t dstPort) {
-    if (m_logger.isEnabled(LOGGER_LEVEL_DEBUG))
-        m_logger.logLazy(LOGGER_LEVEL_DEBUG, [&] { return "internet_packet_processing_started dst_port=" + to_string(dstPort); });
-
-    if (dstPort < SRC_PORT_START || dstPort > SRC_PORT_END) return;
-    if (ipLen < sizeof(struct iphdr)) return;
-
-    struct iphdr* ip = (struct iphdr*)ipPacket;
-    if (ip->protocol != IPPROTO_TCP && ip->protocol != IPPROTO_UDP) return;
+void ServerCore::HandleInternetPacket(uint8_t* innerPacket, size_t ipLen) {
+    iphdr* ip = nullptr;
+    size_t ipHeaderLen = 0;
+    if (!ValidateInnerIpPacket(innerPacket, ipLen, ip, ipHeaderLen)) return;
+    ipLen = ntohs(ip->tot_len);
+    if (ipLen > 65507) {
+        m_logger.recordWarning(NetworkWarning::LargeTunnelPacket, ipLen);
+        return;
+    }
     TcpSegment tcpSegment;
-    if (ip->protocol == IPPROTO_TCP && !TcpSegment::Parse(ipPacket, ipLen, tcpSegment)) return;
-
-    size_t ipHeaderLen = ip->ihl * 4;
-    if (ipLen < ipHeaderLen) return;
-
-    uint16_t srcPort = 0;
-    if (ip->protocol == IPPROTO_TCP) {
-        if (ipLen < ipHeaderLen + sizeof(struct tcphdr)) return;
-        struct tcphdr* tcp = (struct tcphdr*)(ipPacket + ipHeaderLen);
-        srcPort = ntohs(tcp->source);
-    }
-    else if (ip->protocol == IPPROTO_UDP) {
-        if (ipLen < ipHeaderLen + sizeof(struct udphdr)) return;
-        struct udphdr* udp = (struct udphdr*)(ipPacket + ipHeaderLen);
-        srcPort = ntohs(udp->source);
-    }
-
-    const uint32_t key = (uint32_t(ip->protocol) << 16) | dstPort;
-    ClientInfo info;
+    if (ip->protocol == IPPROTO_TCP && !TcpSegment::Parse(innerPacket, ipLen, tcpSegment)) return;
+    uint16_t ports[2];
+    memcpy(ports, innerPacket + ipHeaderLen, sizeof(ports));
+    const uint16_t srcPort = ntohs(ports[0]);
+    const uint16_t dstPort = ntohs(ports[1]);
+    if (dstPort < SRC_PORT_START) return;
+    ClientInfo info{};
     bool found = false;
     {
         lock_guard<mutex> lock(m_tableMutex);
-        auto it = m_forwardTable.find(key);
-        if (it != m_forwardTable.end()) {
+        auto& route = (ip->protocol == IPPROTO_TCP ? m_tcpRoutes : m_udpRoutes)[dstPort];
+        if (route) {
             if (ip->protocol == IPPROTO_TCP) {
-                if (ip->saddr != it->second.remote_ip || srcPort != it->second.remote_port) return;
-                it->second.tcpState.Observe(tcpSegment, false);
+                if (ip->saddr != route->remote_ip || srcPort != route->remote_port) return;
+                route->tcpState.Observe(tcpSegment, false);
             }
-            it->second.last_used = chrono::steady_clock::now();
-            info = it->second;
+            route->last_used = chrono::steady_clock::now();
+            info = *route;
             found = true;
         }
     }
@@ -555,11 +531,7 @@ void ServerCore::HandleInternetPacket(const uint8_t* ipPacket, size_t ipLen, uin
         m_logger.logLazy(LOGGER_LEVEL_DEBUG, [&] { return ss2.str(); });
     }
 
-    const size_t outerHeaderLength = sizeof(iphdr) + sizeof(udphdr);
-    vector<uint8_t> udpPacket(outerHeaderLength + ipLen);
-    auto* innerPacket = udpPacket.data() + outerHeaderLength;
-    memcpy(innerPacket, ipPacket, ipLen);
-    struct iphdr* outIp = reinterpret_cast<iphdr*>(innerPacket);
+    auto* outIp = ip;
     outIp->daddr = info.original_src_ip;
     outIp->saddr = info.original_dst_ip;
 
@@ -595,37 +567,33 @@ void ServerCore::HandleInternetPacket(const uint8_t* ipPacket, size_t ipLen, uin
 
     m_encryption.Encrypt(innerPacket, ipLen, info.local_udp_port);
 
-    struct iphdr udpIp;
-    memset(&udpIp, 0, sizeof(udpIp));
-    udpIp.version = 4;
-    udpIp.ihl = 5;
-    udpIp.tot_len = htons(static_cast<uint16_t>(sizeof(udpIp) + sizeof(struct udphdr) + ipLen));
-    udpIp.id = htons(static_cast<uint16_t>(rand() & 0xFFFF));
-    udpIp.ttl = 64;
-    udpIp.protocol = IPPROTO_UDP;
-    udpIp.saddr = m_interfaceIp.Get();
-    udpIp.daddr = info.client_ip;
-    udpIp.check = 0;
-    udpIp.check = in_cksum((uint16_t*)&udpIp, static_cast<int>(sizeof(udpIp)));
-
-    struct udphdr udpHeader;
+    udphdr udpHeader{};
     udpHeader.source = htons(info.local_udp_port);
     udpHeader.dest = htons(info.client_udp_port);
     udpHeader.len = htons(static_cast<uint16_t>(sizeof(udphdr) + ipLen));
-    udpHeader.check = 0;
-
-    memcpy(udpPacket.data(), &udpIp, sizeof(udpIp));
-    memcpy(udpPacket.data() + sizeof(udpIp), &udpHeader, sizeof(udpHeader));
-
-    struct sockaddr_in dummy;
-    memset(&dummy, 0, sizeof(dummy));
-    dummy.sin_family = AF_INET;  // или любой другой
-    dummy.sin_addr.s_addr = udpIp.daddr;
-    dummy.sin_port = udpHeader.dest;
-    if (udpPacket.size() > 1500)
-        m_logger.recordWarning(NetworkWarning::LargeTunnelPacket, udpPacket.size());
-    ssize_t sent = sendto(m_socket, udpPacket.data(), udpPacket.size(), 0,
-        (struct sockaddr*)&dummy, sizeof(dummy));
+    sockaddr_in destination{};
+    destination.sin_family = AF_INET;
+    destination.sin_addr.s_addr = info.client_ip;
+    iovec parts[] = {{&udpHeader, sizeof(udpHeader)}, {innerPacket, ipLen}};
+    msghdr message{};
+    message.msg_name = &destination;
+    message.msg_namelen = sizeof(destination);
+    message.msg_iov = parts;
+    message.msg_iovlen = std::size(parts);
+    alignas(cmsghdr) unsigned char control[CMSG_SPACE(sizeof(in_pktinfo))]{};
+    message.msg_control = control;
+    message.msg_controllen = sizeof(control);
+    auto* header = CMSG_FIRSTHDR(&message);
+    header->cmsg_level = IPPROTO_IP;
+    header->cmsg_type = IP_PKTINFO;
+    header->cmsg_len = CMSG_LEN(sizeof(in_pktinfo));
+    in_pktinfo source{};
+    source.ipi_spec_dst.s_addr = m_interfaceIp.Get();
+    memcpy(CMSG_DATA(header), &source, sizeof(source));
+    ssize_t sent;
+    do {
+        sent = sendmsg(m_socket, &message, MSG_DONTWAIT);
+    } while (sent < 0 && errno == EINTR);
 
     if (m_logger.isEnabled(LOGGER_LEVEL_ERROR)) {
         if (sent < 0) {
@@ -647,30 +615,36 @@ void ServerCore::CleanupLoop() {
         this_thread::sleep_for(chrono::seconds(1));
         auto now = chrono::steady_clock::now();
         if (now - lastWarningReport >= chrono::seconds(5)) {
-            m_logger.recordWarning(NetworkWarning::IncompleteFragments, 0, m_assembler.TakeExpiredIncompleteCount());
             m_logger.flushWarnings();
             lastWarningReport = now;
         }
+        size_t remaining;
         {
             lock_guard<mutex> lock(m_connMutex);
+            remaining = m_cleanupKeys.size();
+        }
+        while (remaining && m_running) {
+            lock_guard<mutex> lock(m_connMutex);
             lock_guard<mutex> lockTable(m_tableMutex);
-            for (auto it = m_forwardTable.begin(); it != m_forwardTable.end(); ) {
-                const auto& info = it->second;
-                const auto protocol = static_cast<uint8_t>(it->first >> 16);
-                auto timeout = (protocol == IPPROTO_TCP) ? info.tcpState.IdleTimeout() : udp_timeout;
-                if (now - it->second.last_used > timeout) {
-                    auto connKey = make_tuple(info.original_src_ip, info.original_src_port,
-                        info.remote_ip, info.remote_port, protocol);
-                    auto connection = m_connPortMap.find(connKey);
-                    if (connection != m_connPortMap.end() && connection->second.port == static_cast<uint16_t>(it->first))
-                        m_connPortMap.erase(connection);
-                    auto& ports = protocol == IPPROTO_TCP ? m_tcpPorts : m_udpPorts;
-                    ports.Release(static_cast<uint16_t>(it->first));
-                    it = m_forwardTable.erase(it);
+            const size_t count = min<size_t>(remaining, 128);
+            remaining -= count;
+            for (size_t i = 0; i < count; ++i) {
+                const auto key = m_cleanupKeys.front();
+                m_cleanupKeys.pop_front();
+                const auto port = static_cast<uint16_t>(key);
+                const auto protocol = static_cast<uint8_t>(key >> 16);
+                auto& route = (protocol == IPPROTO_TCP ? m_tcpRoutes : m_udpRoutes)[port];
+                auto timeout = protocol == IPPROTO_TCP ? route->tcpState.IdleTimeout() : udp_timeout;
+                if (now - route->last_used <= timeout) {
+                    m_cleanupKeys.push_back(key);
+                    continue;
                 }
-                else {
-                    ++it;
-                }
+                auto connection = m_connPortMap.find(make_tuple(route->original_src_ip, route->original_src_port,
+                    route->remote_ip, route->remote_port, protocol));
+                if (connection != m_connPortMap.end() && connection->second.port == port)
+                    m_connPortMap.erase(connection);
+                (protocol == IPPROTO_TCP ? m_tcpPorts : m_udpPorts).Release(port);
+                route.reset();
             }
         }
     }
@@ -705,8 +679,15 @@ void ServerCore::FirewallWatchdogLoop() {
 void ServerCore::ProcessPackets() {
     m_logger.logLazy(LOGGER_LEVEL_INFO, [&] { return "worker_started worker=client_packets"; });
 
-    int flags = fcntl(m_socket, F_GETFL, 0);
-    fcntl(m_socket, F_SETFL, flags | O_NONBLOCK);
+    constexpr size_t batch = 16;
+    vector<array<uint8_t, 65536>> buffers(batch);
+    array<mmsghdr, batch> messages{};
+    array<iovec, batch> parts{};
+    for (size_t i = 0; i < batch; ++i) {
+        parts[i] = {buffers[i].data(), buffers[i].size()};
+        messages[i].msg_hdr.msg_iov = &parts[i];
+        messages[i].msg_hdr.msg_iovlen = 1;
+    }
 
     struct pollfd pfd;
     pfd.fd = m_socket;
@@ -722,44 +703,14 @@ void ServerCore::ProcessPackets() {
         if (ret == 0) continue;
 
         if (pfd.revents & POLLIN) {
-            struct sockaddr_in fromAddr;
-            socklen_t addrLen = sizeof(fromAddr);
-            ssize_t received = recvfrom(m_socket, m_recvBuffer.data(), m_recvBuffer.size(), 0,
-                (struct sockaddr*)&fromAddr, &addrLen);
-            if (received < 0) {
-                if (errno != EAGAIN && errno != EWOULDBLOCK && m_logger.isEnabled(LOGGER_LEVEL_ERROR)) {
-                    m_logger.logLazy(LOGGER_LEVEL_ERROR, [&] { return "io_failed operation=recvfrom" + LogErrno(errno); });
-                }
+            int count = recvmmsg(m_socket, messages.data(), batch, MSG_DONTWAIT, nullptr);
+            if (count < 0) {
+                if (errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK)
+                    m_logger.logLazy(LOGGER_LEVEL_ERROR, [&] { return "io_failed operation=recvmmsg" + LogErrno(errno); });
                 continue;
             }
-
-            const uint8_t* ipPacket = m_recvBuffer.data();
-            size_t ipLen = received;
-            struct iphdr* ip = (struct iphdr*)ipPacket;
-
-            uint32_t server_ip = inet_addr("10.0.0.2");
-            if (ip->daddr == server_ip || ip->saddr == server_ip)
-                continue; // inbound packet from target server - process in other place
-
-            size_t ipHeaderLen = ip->ihl * 4;
-            if (ipLen < ipHeaderLen + sizeof(struct udphdr)) continue;
-            uint16_t dstPort = 0;
-            struct udphdr* udp = (struct udphdr*)(ipPacket + ipHeaderLen);
-            if (ipLen >= ipHeaderLen + sizeof(struct udphdr)) {
-                dstPort = ntohs(udp->dest);
-            }
-            if (dstPort >= m_config.client_port_start && dstPort <= m_config.client_port_end) {
-                if (m_logger.isEnabled(LOGGER_LEVEL_DEBUG)) {
-                    char src_ip[INET_ADDRSTRLEN], dst_ip[INET_ADDRSTRLEN];
-                    inet_ntop(AF_INET, &(ip->saddr), src_ip, INET_ADDRSTRLEN);
-                    inet_ntop(AF_INET, &(ip->daddr), dst_ip, INET_ADDRSTRLEN);
-                    m_logger.logLazy(LOGGER_LEVEL_DEBUG, [&] { return "tunnel_packet_received src=" + string(src_ip) + ":" + to_string(ntohs(udp->source)) +
-                        " dst=" + string(dst_ip) + ":" + to_string(dstPort); });
-                }
-                const auto processingStarted = chrono::steady_clock::now();
-                HandleClientPacket(ipPacket, ipLen, dstPort);
-                m_logger.recordDelay(NetworkWarning::ClientPacketProcessing, processingStarted);
-            }
+            for (int i = 0; i < count; ++i)
+                HandleClientPacket(buffers[i].data(), messages[i].msg_len);
         }
     }
 
@@ -784,45 +735,22 @@ void ServerCore::ProcessTUN() {
         }
         if (ret == 0) continue;
 
-        if (pfd.revents & POLLIN) {
+        if (!(pfd.revents & POLLIN)) continue;
+        for (size_t i = 0; i < 16 && m_running; ++i) {
             ssize_t ipLen = read(m_tunfd, buffer, sizeof(buffer));
             if (ipLen < 0) {
-                if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                    continue;
-                }
+                if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+                if (errno == EINTR) continue;
                 m_logger.logLazy(LOGGER_LEVEL_ERROR, [&] { return "tun_read_failed" + LogErrno(errno); });
-                break;
+                return;
             }
             if (ipLen == 0) {
                 m_logger.logLazy(LOGGER_LEVEL_INFO, [&] { return "tun_closed"; });
-                break;
+                return;
             }
 
-            struct iphdr* iph = (struct iphdr*)buffer;
-            if (m_logger.isEnabled(LOGGER_LEVEL_DEBUG)) {
-                stringstream ss;
-                ss << "tun_packet_received size=" << ipLen
-                    << " src=" << inet_ntoa(*(struct in_addr*)&iph->saddr)
-                    << " dst=" << inet_ntoa(*(struct in_addr*)&iph->daddr)
-                    << " protocol=" << (int)iph->protocol;
-                m_logger.logLazy(LOGGER_LEVEL_DEBUG, [&] { return ss.str(); });
-            }
-
-            size_t ipHeaderLen = iph->ihl * 4;
-            if (ipLen < ipHeaderLen + sizeof(struct udphdr)) continue;
-            uint16_t dstPort = 0;
-            if (iph->protocol == IPPROTO_UDP) {
-                m_logger.logLazy(LOGGER_LEVEL_DEBUG, [&] { return "tun_packet_received protocol=UDP"; });
-                struct udphdr* udp = (struct udphdr*)(buffer + ipHeaderLen);
-                dstPort = ntohs(udp->dest);
-            }
-            else if (iph->protocol == IPPROTO_TCP) {
-                m_logger.logLazy(LOGGER_LEVEL_DEBUG, [&] { return "tun_packet_received protocol=TCP"; });
-                struct tcphdr* tcp = (struct tcphdr*)(buffer + ipHeaderLen);
-                dstPort = ntohs(tcp->dest);
-            }
             const auto processingStarted = chrono::steady_clock::now();
-            HandleInternetPacket(buffer, ipLen, dstPort);
+            HandleInternetPacket(buffer, ipLen);
             m_logger.recordDelay(NetworkWarning::InternetPacketProcessing, processingStarted);
         }
     }

@@ -29,12 +29,12 @@ namespace MIGA_Agent.ViewModels
         private readonly ISshManager _sshManager;
 
         /// <summary>Перезапуск локальной службы с предупреждением (реализует MainViewModel).</summary>
-        private readonly Func<Task<bool>> _restartLocalServiceAsync;
+        private readonly Func<Task<bool>> _reloadLocalServiceAsync;
 
         /// <summary>Сохранение всего клиентского конфига (реализует MainViewModel).</summary>
         private readonly Func<Task> _persistConfigAsync;
 
-        private const string RequiredServerVersion = "1.2.4";
+        private const string RequiredServerVersion = "1.2.5";
 
         /// <summary>Вкладка просит удалить сервер (вкладку).</summary>
         public event EventHandler? RemoveRequested;
@@ -53,13 +53,13 @@ namespace MIGA_Agent.ViewModels
             ILocalServiceManager localService,
             IDialogService dialogService,
             ISshManager sshManager,
-            Func<Task<bool>> restartLocalServiceAsync,
+            Func<Task<bool>> reloadLocalServiceAsync,
             Func<Task> persistConfigAsync)
         {
             _localService = localService;
             _dialogService = dialogService;
             _sshManager = sshManager;
-            _restartLocalServiceAsync = restartLocalServiceAsync;
+            _reloadLocalServiceAsync = reloadLocalServiceAsync;
             _persistConfigAsync = persistConfigAsync;
 
             LogLevels = new List<string> { "none", "error", "warning", "info", "debug" };
@@ -629,8 +629,7 @@ namespace MIGA_Agent.ViewModels
 
                 _dialogService.ClosePersistent(notification, "Генерация ключей", "Ключи успешно сгенерированы и синхронизированы.");
 
-                // Предлагаем перезапустить локальную службу
-                await _restartLocalServiceAsync();
+                await _reloadLocalServiceAsync();
             }
             catch (Exception ex)
             {
@@ -688,7 +687,7 @@ namespace MIGA_Agent.ViewModels
 
                     if (showSyncInfo)
                     {
-                        await _restartLocalServiceAsync();
+                        await _reloadLocalServiceAsync();
                         _dialogService.ShowInfo("Настройки клиента синхронизированы с сервером.");
                     }
                 }
@@ -717,10 +716,15 @@ namespace MIGA_Agent.ViewModels
                     DnsServer = DnsServer
                 };
 
-                string json = JsonSerializer.Serialize(serverConfig, JsonOptions.Default);
+                string currentJson = await ExecuteConfigCommandAsync("if test -f /etc/miga/config.json; then cat /etc/miga/config.json; else printf '{}'; fi");
+                string? json = ServerConfigUpdate.Prepare(currentJson, serverConfig);
+                if (json == null)
+                    return;
                 string escapedJson = json.Replace("'", "'\\''");
-                await _sshManager.ExecuteCommandAsync($"echo '{escapedJson}' > /etc/miga/config.json");
-                await _sshManager.ExecuteCommandAsync("systemctl restart miga_server");
+                await ExecuteConfigCommandAsync("umask 077; tmp=$(mktemp /etc/miga/config.json.XXXXXX) || exit 1; " +
+                    $"if printf '%s' '{escapedJson}' > \"$tmp\" && mv -f -- \"$tmp\" /etc/miga/config.json; " +
+                    "then :; else rm -f -- \"$tmp\"; exit 1; fi");
+                await ExecuteConfigCommandAsync("systemctl restart miga_server");
                 await UpdateServerDemoStatusAsync();
                 _dialogService.ShowInfo($"Конфигурация применена на сервере {DisplayName}, демон перезапущен.");
             }
@@ -728,6 +732,16 @@ namespace MIGA_Agent.ViewModels
             {
                 _dialogService.ShowError($"Ошибка применения серверной конфигурации ({DisplayName}): {ex.Message}");
             }
+        }
+
+        private async Task<string> ExecuteConfigCommandAsync(string command)
+        {
+            const string marker = "\nMIGA_CONFIG_EXIT=";
+            string output = await _sshManager.ExecuteCommandAsync(command + "; result=$?; printf '\\nMIGA_CONFIG_EXIT=%s\\n' \"$result\"");
+            int index = output.LastIndexOf(marker, StringComparison.Ordinal);
+            if (index < 0 || output[(index + marker.Length)..].Trim() != "0")
+                throw new InvalidOperationException("Команда применения серверной конфигурации завершилась с ошибкой.");
+            return output[..index];
         }
 
         /// <summary>Разрывает SSH-соединение (при закрытии вкладки или приложения).</summary>

@@ -2,6 +2,7 @@
 
 #include <string>
 #include "LogFormat.h"
+#include "LogTime.h"
 #include <array>
 #include <cstdint>
 #include <atomic>
@@ -28,9 +29,7 @@
 #define LOGGER_LEVEL_DEBUG 4
 
 enum class NetworkWarning {
-    ReceiveBufferWait, ReceiveEventQueueWait, BatchAge, BatchProcessing, PendingPidFallback,
-    LargeTunnelPacket, IncompleteFragments, ClientPacketProcessing,
-    InternetPacketProcessing, RoutingDrop, Count
+    BatchProcessing, PendingPidFallback, RoutingDrop, ClientPacketProcessing, InternetPacketProcessing, LargeTunnelPacket, Count
 };
 
 class Logger {
@@ -48,12 +47,12 @@ private:
 
     std::array<std::atomic<uint64_t>, static_cast<size_t>(NetworkWarning::Count)> m_warningCounts{};
     std::array<std::atomic<uint64_t>, static_cast<size_t>(NetworkWarning::Count)> m_warningValues{};
-    std::string getCurrentTime();
-    void write(int level, const std::string& message);
+    struct LogEntry { int level; std::string message; std::chrono::system_clock::time_point time; };
+    void write(int level, const std::string& message, std::chrono::system_clock::time_point time);
 #ifndef __linux__
     std::mutex m_QueueMutex;
     std::condition_variable m_QueueChanged;
-    std::deque<std::pair<int, std::string>> m_Queue;
+    std::deque<LogEntry> m_Queue;
     std::thread m_Writer;
     bool m_Async = false;
     bool m_Closing = false;
@@ -67,7 +66,9 @@ public:
     ~Logger();
 
     void enable(int level, bool consoleOutput = true);
-    void log(const int level, const std::string& message);
+    void setLevel(int level);
+    void log(const int level, const std::string& message,
+        std::chrono::system_clock::time_point time = std::chrono::system_clock::now());
 #ifndef __linux__
     void startAsync();
     void stopAsync();
@@ -75,9 +76,7 @@ public:
     void recordWarning(NetworkWarning event, uint64_t value = 0, uint64_t count = 1);
     void flushWarnings();
     void recordDelay(NetworkWarning event, std::chrono::steady_clock::time_point started);
-    bool isEnabled(int level = LOGGER_LEVEL_ERROR) const {
-        return level > LOGGER_LEVEL_NONE && level <= m_level.load(std::memory_order_relaxed);
-    }
+    bool isEnabled(int level = LOGGER_LEVEL_ERROR) const;
 
     template<class Factory>
     void logLazy(int level, Factory&& message) {

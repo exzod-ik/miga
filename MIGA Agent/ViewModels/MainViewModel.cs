@@ -236,7 +236,7 @@ namespace MIGA_Agent.ViewModels
                 _localService,
                 _dialogService,
                 _sshFactory(),
-                RestartLocalServiceWithWarningAsync,
+                ReloadLocalServiceAsync,
                 SaveClientConfigAsync);
 
             tab.RemoveRequested += OnTabRemoveRequested;
@@ -398,8 +398,7 @@ namespace MIGA_Agent.ViewModels
                 _dialogService.ShowInfo("Конфигурация клиента сохранена. Для применения на сервере установите SSH-подключение на нужной вкладке.");
             }
 
-            // Предлагаем перезапустить локальную службу
-            await RestartLocalServiceWithWarningAsync();
+            await ReloadLocalServiceAsync();
         }
 
         private bool ValidateClientSettings()
@@ -581,35 +580,23 @@ namespace MIGA_Agent.ViewModels
             }
         }
 
-        private async Task<bool> RestartLocalServiceWithWarningAsync()
+        private async Task<bool> ReloadLocalServiceAsync()
         {
-            var status = _localService.GetStatus();
-            if (status != System.ServiceProcess.ServiceControllerStatus.Running)
-            {
-                return false;
-            }
-
-            if (!_dialogService.ShowYesNo(
-                "Применение изменений потребует перезапуска локальной службы MigaClient.\n\n" +
-                "Все активные соединения будут сброшены. Продолжить?",
-                "Подтверждение перезапуска"))
-            {
-                return false;
-            }
-
             try
             {
-                _dialogService.ShowInfo("Перезапуск локальной службы...");
-                _localService.Stop();
-                await Task.Delay(2000); // Даём время корректно остановиться
-                _localService.Start();
-                await UpdateServiceStatusAsync();
-                _dialogService.ShowInfo("Локальная служба успешно перезапущена.");
+                if (await Task.Run(() => _localService.GetStatus()) != System.ServiceProcess.ServiceControllerStatus.Running)
+                {
+                    _dialogService.ShowInfo("Конфигурация сохранена и будет прочитана при запуске службы.");
+                    return false;
+                }
+
+                await Task.Run(() => _localService.ReloadConfig());
+                _dialogService.ShowInfo("Службе отправлен запрос на применение конфигурации без перезапуска. Результат применения записывается в журнал клиента.");
                 return true;
             }
             catch (Exception ex)
             {
-                _dialogService.ShowError($"Ошибка при перезапуске службы: {ex.Message}");
+                _dialogService.ShowError($"Не удалось отправить запрос на применение конфигурации: {ex.Message}");
                 return false;
             }
         }

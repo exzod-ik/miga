@@ -1,72 +1,16 @@
-#include "BoundedQueue.h"
+#include "runtime/RuntimeMailbox.h"
 #include "Ipv4Batch.h"
-#include "EventQueueDelay.h"
-#include <chrono>
-#include <cstdlib>
+#include "PacketTypes.h"
+#include <cassert>
 #include <future>
 #include <iostream>
 #include <memory>
 #include <vector>
+#include <thread>
 
 using namespace std::chrono_literals;
-
 void Require(bool condition, const char* message) {
-    if (!condition) {
-        std::cerr << message << '\n';
-        std::exit(1);
-    }
-}
-
-void TestBackpressure() {
-    BoundedQueue<std::unique_ptr<int>, 1> queue;
-    Require(queue.Push(std::make_unique<int>(1)), "first push");
-    auto second = std::make_unique<int>(2);
-    auto* identity = second.get();
-    auto producer = std::async(std::launch::async, [&] { return queue.Push(std::move(second)); });
-    Require(producer.wait_for(50ms) == std::future_status::timeout, "full queue must block producer");
-    std::unique_ptr<int> item;
-    Require(queue.Pop(item) && *item == 1, "FIFO first packet");
-    Require(producer.wait_for(2s) == std::future_status::ready && producer.get(), "producer wakes after pop");
-    Require(queue.Pop(item) && *item == 2 && item.get() == identity, "batch ownership transferred without copying");
-    queue.Close();
-}
-
-void TestStopAndRestart() {
-    BoundedQueue<int, 1> queue;
-    auto consumer = std::async(std::launch::async, [&] { int item; return queue.Pop(item); });
-    Require(consumer.wait_for(50ms) == std::future_status::timeout, "empty queue blocks consumer");
-    queue.Close();
-    Require(consumer.wait_for(2s) == std::future_status::ready && !consumer.get(), "stop wakes consumer");
-    queue.Reset();
-    Require(queue.Push(1), "reset opens queue");
-    auto producer = std::async(std::launch::async, [&] { return queue.Push(2); });
-    Require(producer.wait_for(50ms) == std::future_status::timeout, "producer waiting on full queue");
-    queue.Close();
-    Require(producer.wait_for(2s) == std::future_status::ready && !producer.get(), "stop wakes producer");
-    int item = 0;
-    Require(!queue.Pop(item) && !queue.Push(3), "closed queue refuses operations");
-    queue.Reset();
-    Require(queue.Push(4) && queue.Pop(item) && item == 4, "restart clears stale packets");
-    queue.Close();
-}
-
-void TestConcurrentOrder() {
-    BoundedQueue<int, 16> queue;
-    auto producer = std::async(std::launch::async, [&] {
-        for (int i = 0; i < 10000; ++i)
-            if (!queue.Push(int(i))) return false;
-        return true;
-    });
-    auto consumer = std::async(std::launch::async, [&] {
-        for (int i = 0; i < 10000; ++i) {
-            int value;
-            if (!queue.Pop(value) || value != i) return false;
-        }
-        return true;
-    });
-    Require(consumer.wait_for(10s) == std::future_status::ready && consumer.get(), "concurrent transfer preserves order without loss");
-    Require(producer.wait_for(2s) == std::future_status::ready && producer.get(), "producer completed");
-    queue.Close();
+    if (!condition) { std::cerr << message << '\n'; std::abort(); }
 }
 
 void TestBatchBoundaries() {
@@ -97,59 +41,47 @@ void TestBatchBoundaries() {
     Require(Ipv4BatchPacketLength(nullptr, 20, 0) == 0, "null buffer");
 }
 
-void TestQueueDelay() {
-    using Clock = std::chrono::steady_clock;
-    struct Item { Clock::time_point queuedAt; int value = 0; };
-    BoundedQueue<Item, 1> queue;
-    Item first{{}, 1};
-    Require(queue.Push(std::move(first), &first.queuedAt), "timestamped first push");
-    Item second{{}, 2};
-    auto producer = std::async(std::launch::async, [&] {
-        return queue.Push(std::move(second), &second.queuedAt);
-    });
-    Require(producer.wait_for(50ms) == std::future_status::timeout, "timestamped push waits for space");
-    const auto releasedAt = Clock::now();
-    Item received;
-    size_t depth = 99;
-    Require(queue.PopUntil(received, Clock::now() + 2s, &depth) == decltype(queue)::WaitResult::Item &&
-        depth == 1 && received.value == 1, "depth includes removed event");
-    Require(producer.get(), "timestamped producer succeeds");
-    Require(queue.PopUntil(received, Clock::now() + 2s, &depth) == decltype(queue)::WaitResult::Item &&
-        received.value == 2 && received.queuedAt >= releasedAt, "queue age excludes producer backpressure");
-    Require(queue.PopUntil(received, Clock::now(), &depth) == decltype(queue)::WaitResult::Timeout &&
-        depth == 0, "timeout clears depth");
-    queue.Close();
-    Require(queue.PopUntil(received, Clock::now(), &depth) == decltype(queue)::WaitResult::Closed &&
-        depth == 0, "closed queue clears depth");
-    EventQueueDelay delays;
-    std::vector<std::string> messages;
-    const auto write = [&](const std::string& message) { messages.push_back(message); };
-    delays.Record(EventQueueDelay::Type::Network, 99ms, 256);
-    delays.Flush(write);
-    Require(messages.empty(), "subthreshold events omitted");
-    delays.Record(EventQueueDelay::Type::Network, 100ms, 2);
-    delays.Record(EventQueueDelay::Type::Network, 350ms, 1);
-    delays.Record(EventQueueDelay::Type::Socket, 200ms, 3);
-    delays.Record(EventQueueDelay::Type::Control, 150ms, 4);
-    delays.Flush(write);
-    Require(messages.size() == 3 && messages[0] ==
-        "event_queue_delay type=NETWORK count=2 max_wait_ms=350 max_queue_depth_at_pop=2 threshold_ms=100",
-        "delay counts and maxima aggregate by type");
-    Require(messages[1].find("type=SOCKET count=1") != std::string::npos &&
-        messages[2].find("type=CONTROL count=1") != std::string::npos, "socket and control categories");
-    delays.Flush(write);
-    Require(messages.size() == 3, "flush resets counters");
-    delays.Record(EventQueueDelay::Type::Socket, 500ms, 1);
-    delays.Clear();
-    delays.Flush(write);
-    Require(messages.size() == 3, "restart clears counters");
-}
 
 int main() {
-    TestQueueDelay();
-    TestBackpressure();
-    TestStopAndRestart();
-    TestConcurrentOrder();
     TestBatchBoundaries();
-    std::cout << "Network queue tests passed\n";
+    miga::runtime::Mailbox<std::unique_ptr<int>, 1> queue;
+    assert(queue.Push(std::make_unique<int>(1)));
+    auto next = std::make_unique<int>(2); auto* identity = next.get();
+    auto producer = std::async(std::launch::async, [&] { return queue.Push(std::move(next)); });
+    assert(producer.wait_for(20ms) == std::future_status::timeout);
+    std::unique_ptr<int> item;
+    assert(queue.Pop(item) && *item == 1);
+    assert(producer.wait_for(2s) == std::future_status::ready && producer.get());
+    assert(queue.Pop(item) && *item == 2 && item.get() == identity);
+    assert(queue.Push(std::make_unique<int>(3)));
+    std::this_thread::sleep_for(120ms);
+    assert(queue.Pop(item));
+    const auto delay = queue.TakeDelay();
+    assert(delay.count >= 1 && delay.maxMs >= 100 && delay.maxDepth == 1);
+    assert(queue.TakeDelay().count == 0);
+    assert(queue.Push(std::make_unique<int>(4)));
+    queue.Close(); assert(!queue.Pop(item) && !queue.Push(std::make_unique<int>(5)));
+    queue.Reset(); assert(!queue.Pop(item));
+    assert(WaitForSingleObject(queue.Event(), 0) == WAIT_TIMEOUT);
+    miga::runtime::Mailbox<int, 16> transfer;
+    auto sending = std::async(std::launch::async, [&] {
+        for (int i = 0; i < 10000; ++i) assert(transfer.Push(i));
+    });
+    for (int expected = 0; expected < 10000; ++expected) {
+        int received = -1;
+        while (!transfer.Pop(received)) assert(WaitForSingleObject(transfer.Event(), 2000) == WAIT_OBJECT_0);
+        assert(received == expected);
+    }
+    assert(sending.wait_for(2s) == std::future_status::ready); sending.get();
+    std::vector<uint8_t> packet(44, 0);
+    packet[0] = 0x46; packet[3] = 44; packet[9] = 6; packet[36] = 0x50; packet[37] = 2;
+    packet[25] = 42; packet[27] = 80; packet[31] = 17; packet[35] = 19;
+    SocketTuple tuple; TcpPacketState tcp; bool syn = false;
+    assert(ReadSocketPacket(packet.data(), packet.size(), tuple, syn, &tcp));
+    assert(syn && tuple.localPort == 42 && tuple.remotePort == 80 && tcp.sequence == 17 && tcp.acknowledgment == 19);
+    for (size_t length = 0; length < packet.size(); ++length) assert(!ReadSocketPacket(packet.data(), length, tuple, syn));
+    packet[36] = 0x40; assert(!ReadSocketPacket(packet.data(), packet.size(), tuple, syn));
+    packet[36] = 0x60; assert(!ReadSocketPacket(packet.data(), packet.size(), tuple, syn));
+    assert(!ReadSocketPacket(nullptr, 44, tuple, syn));
+    std::cout << "Runtime mailbox, packet parsing and batch tests passed\n";
 }

@@ -38,6 +38,7 @@ int main() {
     auto last = Fragment(1, false);
     Require(!assembler.AddIpPacket(first.data(), first.size()), "incomplete fragment");
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    assembler.CleanupExpired();
     Require(!assembler.AddIpPacket(last.data(), last.size()), "expired first fragment cannot complete datagram");
     Require(assembler.TakeExpiredIncompleteCount() == 1, "expired incomplete datagram counted");
     Require(assembler.TakeExpiredIncompleteCount() == 0, "expiry counter drained");

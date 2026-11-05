@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <vector>
 #include <functional>
+#include <atomic>
 
 class AsyncTunnelSender {
 public:
@@ -15,56 +16,30 @@ public:
         decltype(&CancelIoEx) cancel = &CancelIoEx;
     };
     using ErrorHandler = std::function<void(DWORD)>;
-    AsyncTunnelSender() : stop_(CreateEventW(nullptr, TRUE, FALSE, nullptr)) {}
-    ~AsyncTunnelSender() {
-        RequestStop();
-        Drain();
-        for (auto& slot : slots_) if (slot.operation.hEvent) CloseHandle(slot.operation.hEvent);
-        if (stop_) CloseHandle(stop_);
-    }
+    AsyncTunnelSender();
+    ~AsyncTunnelSender();
     AsyncTunnelSender(const AsyncTunnelSender&) = delete;
     AsyncTunnelSender& operator=(const AsyncTunnelSender&) = delete;
-    void SetApi(Api api) { api_ = api; }
-    void SetErrorHandler(ErrorHandler handler) { error_ = std::move(handler); }
-    bool Reset() { return stop_ && ResetEvent(stop_); }
-    void RequestStop() { if (stop_) SetEvent(stop_); }
-    bool Send(HANDLE handle, const uint8_t* data, size_t size, const WINDIVERT_ADDRESS* addresses, size_t count) {
-        if (!stop_ || WaitForSingleObject(stop_, 0) != WAIT_TIMEOUT) return false;
-        if (size == 0 || size > 256 * 1024 || count == 0 || count > 64) return Fail(ERROR_INVALID_PARAMETER);
-        size_t available = slots_.size();
-        for (size_t i = 0; i < slots_.size(); ++i) {
-            const auto index = (next_ + i) % slots_.size();
-            Complete(slots_[index], false);
-            if (!slots_[index].pending) { available = index; break; }
-        }
-        if (available == slots_.size()) { ++overflows_; return false; }
-        auto& slot = slots_[available];
-        if (WaitForSingleObject(stop_, 0) != WAIT_TIMEOUT) return false;
-        if (!slot.operation.hEvent) slot.operation.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-        if (!slot.operation.hEvent) return Fail(GetLastError());
-        const auto event = slot.operation.hEvent;
-        slot.operation = {};
-        slot.operation.hEvent = event;
-        ResetEvent(event);
-        slot.data.assign(data, data + size);
-        std::copy_n(addresses, count, slot.addresses.begin());
-        slot.handle = handle;
-        slot.sent = 0;
-        slot.submitted = 0;
-        next_ = (available + 1) % slots_.size();
-        if (api_.send(handle, slot.data.data(), static_cast<UINT>(size), &slot.submitted, 0,
-            slot.addresses.data(), static_cast<UINT>(count * sizeof(WINDIVERT_ADDRESS)), &slot.operation)) {
-            return slot.submitted == size || Fail(ERROR_WRITE_FAULT);
-        }
-        const DWORD code = GetLastError();
-        if (code != ERROR_IO_PENDING) return Fail(code);
-        slot.pending = true;
-        return true;
-    }
-    uint64_t TakeOverflows() { const auto value = overflows_; overflows_ = 0; return value; }
-    void Reap() { for (auto& slot : slots_) Complete(slot, false); }
-    void Drain() { for (auto& slot : slots_) Complete(slot, true); }
+    void SetApi(Api api);
+    void SetErrorHandler(ErrorHandler handler);
+    bool Reset();
+    void RequestStop();
+    bool Send(HANDLE handle, const uint8_t* data, size_t size, const WINDIVERT_ADDRESS* addresses, size_t count);
+    void BeginBatch();
+    bool EndBatch();
+    uint64_t TakeOverflows();
+    void Reap();
+    bool Busy() const;
+    void Drain();
 private:
+    bool Submit(HANDLE handle, const uint8_t* data, size_t size, const WINDIVERT_ADDRESS* addresses,
+        size_t count, std::vector<uint8_t>* owned);
+    bool Flush();
+    bool batching_ = false;
+    std::vector<uint8_t> batchData_;
+    std::array<WINDIVERT_ADDRESS, 64> batchAddresses_{};
+    size_t batchCount_ = 0;
+    HANDLE batchHandle_ = INVALID_HANDLE_VALUE;
     struct Slot {
         OVERLAPPED operation{};
         std::vector<uint8_t> data;
@@ -76,24 +51,10 @@ private:
     };
     std::array<Slot, 32> slots_;
     size_t next_ = 0;
-    uint64_t overflows_ = 0;
+    std::atomic<uint64_t> overflows_{0};
     HANDLE stop_;
     Api api_;
     ErrorHandler error_;
-    bool Fail(DWORD code) { if (error_) error_(code); return false; }
-    void Complete(Slot& slot, bool wait) {
-        if (!slot.pending) return;
-        if (!wait && WaitForSingleObject(slot.operation.hEvent, 0) == WAIT_TIMEOUT) return;
-        if (wait) {
-            HANDLE events[] = { slot.operation.hEvent, stop_ };
-            const auto result = WaitForMultipleObjects(2, events, FALSE, INFINITE);
-            if (result != WAIT_OBJECT_0) api_.cancel(slot.handle, &slot.operation);
-        }
-        if (!api_.result(slot.handle, &slot.operation, &slot.sent, wait ? TRUE : FALSE)) {
-            const DWORD code = GetLastError();
-            if (code == ERROR_IO_INCOMPLETE) return;
-            if (code != ERROR_OPERATION_ABORTED) Fail(code);
-        } else if (slot.sent != slot.data.size()) Fail(ERROR_WRITE_FAULT);
-        slot.pending = false;
-    }
+    bool Fail(DWORD code);
+    void Complete(Slot& slot, bool wait);
 };

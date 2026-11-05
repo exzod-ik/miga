@@ -50,36 +50,20 @@ int main() {
     writeFixture(false);
     Require(config.Load(path), "load fixture");
     Require(config.GetLogLevel() == LOGGER_LEVEL_WARNING, "warning configuration level");
-    auto first = &config.GetServers()[0];
-    auto second = &config.GetServers()[1];
-    Require(config.FindServerByProcess("aPP.eXe") == first, "process case and first-server priority");
-    Require(config.FindServerByProcess("OTHER.EXE") == second, "second process rule");
-    Require(config.FindServerByProcess("missing.exe") == nullptr, "unknown process");
-    Require(first->staticIPRule.ipRanges.size() == 1 && first->staticIPRule.matches(0xCB00710Au), "loaded static range normalization");
-    config.AddDynamicIP(1, 123);
-    Require(config.FindServerByDynamicIP(123) == second, "dynamic lookup");
-    config.AddDynamicIP(0, 123);
-    config.AddDynamicIP(1, 123);
-    Require(config.FindServerByDynamicIP(123) == first && first->dynamicIPs.size() == 1, "dynamic first-server priority independent of arrival order");
-    std::thread writer([&] { for (uint32_t i = 1000; i < 11000; ++i) config.AddDynamicIP(1, i); });
-    std::thread reader([&] { for (uint32_t i = 1000; i < 11000; ++i) config.FindServerByDynamicIP(i); });
-    writer.join();
-    reader.join();
-    for (uint32_t i = 1000; i < 11000; ++i)
-        Require(config.FindServerByDynamicIP(i) == second, "dynamic index after concurrent inserts");
+    const auto& first = config.GetServers()[0];
+    Require(first.processRules[0] == "app.exe", "process names normalized while loading");
+    Require(first.staticIPRule.ipRanges.size() == 1 && first.staticIPRule.matches(0xCB00710Au), "loaded static range normalization");
     writeFixture(true);
-    Require(config.Load(path, true), "hot reload");
-    Require(config.FindServerByProcess("app.exe") == &config.GetServers()[1], "process index rebuilt on reload");
-    Require(config.FindServerByProcess("NEW.EXE") == &config.GetServers()[0], "new process indexed");
-    Require(config.FindServerByDynamicIP(123) == &config.GetServers()[0], "hot reload retains existing dynamic behavior");
+    Require(config.Load(path), "replacement configuration loads");
+    Require(config.GetServers()[0].processRules[0] == "new.exe", "new process rules replace old rules");
     {
         std::ofstream file(path);
         file << R"({"log_level":"warning","servers":[]})";
     }
-    Require(!config.Load(path, true), "invalid reload rejected");
-    Require(config.FindServerByProcess("new.exe") == &config.GetServers()[0], "failed reload preserves index");
+    Require(!config.Load(path), "invalid configuration rejected");
+    Require(config.GetServers()[0].processRules[0] == "new.exe", "failed load preserves previous configuration");
     writeFixture(false);
-    Require(config.Load(path, false) && config.FindServerByDynamicIP(123) == nullptr, "cold load clears dynamic index");
+    Require(config.Load(path) && config.GetServers()[0].processRules[0] == "app.exe", "configuration can be loaded again");
     std::filesystem::remove(path);
     std::cout << "Routing index tests passed\n";
 }

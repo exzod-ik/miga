@@ -46,7 +46,7 @@ namespace MIGA_Agent.Services
             using var sc = new ServiceController(ServiceName);
             if (sc.Status != ServiceControllerStatus.Running)
             {
-                return;
+                throw new InvalidOperationException("Служба MigaClient не запущена.");
             }
             const int reloadCommand = 128;
             sc.ExecuteCommand(reloadCommand);

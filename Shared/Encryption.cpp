@@ -76,6 +76,9 @@ bool Encryption::Initialize(const string& xorKeyBase64, const string& swapKeyBas
             m_swapKey.resize(SWAP_KEY_SIZE, 0);
         }
 
+        m_swapBits = 0;
+        for (size_t i = 0; i < SWAP_KEY_SIZE; ++i)
+            m_swapBits |= uint64_t(m_swapKey[i]) << (8 * i);
         return true;
     }
     catch (...) {
@@ -85,17 +88,16 @@ bool Encryption::Initialize(const string& xorKeyBase64, const string& swapKeyBas
 
 // apply xor key to data
 void Encryption::XorTransform(uint8_t* data, size_t length) {
-    if (m_xorKey.empty()) {
+    if (m_xorKey.size() != XOR_KEY_SIZE) {
         throw runtime_error("XorTransform: xor key empty");
     }
 
-    for (size_t i = 0; i < length; i++) {
-        size_t keyIndex = i % m_xorKey.size();
-        if (keyIndex >= m_xorKey.size()) {
-            throw runtime_error("XorTransform: index out of range");
-        }
-        data[i] ^= m_xorKey[keyIndex];
+    while (length >= XOR_KEY_SIZE) {
+        for (size_t i = 0; i < XOR_KEY_SIZE; ++i) data[i] ^= m_xorKey[i];
+        data += XOR_KEY_SIZE;
+        length -= XOR_KEY_SIZE;
     }
+    for (size_t i = 0; i < length; ++i) data[i] ^= m_xorKey[i];
 }
 
 // apply swap key to encrypt data
@@ -108,17 +110,7 @@ void Encryption::SwapTransform(uint8_t* data, size_t length, uint16_t nonce) {
         return;
     }
 
-    uint64_t key = 0;
-    for (size_t i = 0; i < m_swapKey.size() && i < 8; i++) {
-        key |= (static_cast<uint64_t>(m_swapKey[i]) << (i * 8));
-    }
-
-    uint64_t nonce_64 = 0;
-    for (size_t i = 0; i < 4; i++) {
-        nonce_64 |= (static_cast<uint64_t>(nonce) << (i * 16));
-    }
-
-    uint64_t keyBits = key ^ nonce_64;
+    const uint64_t keyBits = m_swapBits ^ (uint64_t(nonce) * 0x0001000100010001ULL);
     size_t keyBitPos = 0;
 
     for (size_t i = 0; i < length - 1; i++) {
@@ -132,17 +124,7 @@ void Encryption::SwapTransform(uint8_t* data, size_t length, uint16_t nonce) {
 
 // apply swap key to decrypt data
 void Encryption::ReverseSwapTransform(uint8_t* data, size_t length, uint16_t nonce) {
-    uint64_t key = 0;
-    for (size_t i = 0; i < SWAP_KEY_SIZE; i++) {
-        key |= (static_cast<uint64_t>(m_swapKey[i]) << (i * 8));
-    }
-
-    uint64_t nonce_64 = 0;
-    for (size_t i = 0; i < 4; i++) {
-        nonce_64 |= (static_cast<uint64_t>(nonce) << (i * 16));
-    }
-
-    key ^= nonce_64;
+    const uint64_t key = m_swapBits ^ (uint64_t(nonce) * 0x0001000100010001ULL);
 
     // go from the end to the beginning, using the same key bits
     for (size_t i = length - 1; i > 0; i--) {
@@ -173,6 +155,8 @@ void Encryption::Encrypt(uint8_t* data, size_t length, uint16_t nonce) {
 }
 
 void Encryption::Decrypt(uint8_t* data, size_t length, uint16_t nonce) {
+    if (length == 0) return;
+    if (!data || !IsInitialized()) throw runtime_error("Decrypt: invalid input or uninitialized keys");
     ReverseSwapTransform(data, length, nonce);
     XorTransform(data, length);
 }
@@ -198,3 +182,5 @@ string Encryption::GenerateSwapKeyBase64() {
     }
     return Base64Encode(key);
 }
+
+bool Encryption::IsInitialized() const { return !m_xorKey.empty() && !m_swapKey.empty(); }

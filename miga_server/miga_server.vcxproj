@@ -128,6 +128,7 @@
   <ItemGroup>
     <ClInclude Include="include\ServerCore.h" />
     <ClInclude Include="include\TcpConnectionState.h" />
+    <ClInclude Include="include\TunnelIngress.h" />
     <ClInclude Include="include\PortPool.h" />
     <ClInclude Include="include\ConnectionKey.h" />
     <ClInclude Include="include\InterfaceIpCache.h" />
@@ -277,6 +278,14 @@
       <Command>copy /Y "$(ProjectDir)install.sh" "$(OutDir)"</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="src\ConnectionKey.cpp" />
+    <ClCompile Include="src\InterfaceIpCache.cpp" />
+    <ClCompile Include="src\PortPool.cpp" />
+    <ClCompile Include="src\TcpConnectionState.cpp" />
+    <ClCompile Include="src\TunnelIngress.cpp" />
+  </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets" />
+
 </Project>

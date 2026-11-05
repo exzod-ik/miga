@@ -13,7 +13,7 @@ struct Pending {
     UINT size;
     const WINDIVERT_ADDRESS* address;
     std::vector<uint8_t> expected;
-    WINDIVERT_ADDRESS expectedAddress{};
+    std::vector<WINDIVERT_ADDRESS> expectedAddresses;
     bool cancelled = false;
 };
 static std::map<OVERLAPPED*, Pending> pending;
@@ -21,12 +21,13 @@ static int mode = 0;
 static DWORD completionError = 0;
 extern "C" BOOL WinDivertSendEx(HANDLE, const VOID* data, UINT size, UINT* sent, UINT64,
     const WINDIVERT_ADDRESS* address, UINT addressSize, LPOVERLAPPED operation) {
-    Check(addressSize == sizeof(WINDIVERT_ADDRESS), "async address count");
+    Check(addressSize >= sizeof(WINDIVERT_ADDRESS) && addressSize <= 64 * sizeof(WINDIVERT_ADDRESS), "async address count");
     if (mode == 1) { *sent = size; return TRUE; }
     if (mode == 2) { SetLastError(ERROR_INVALID_DATA); return FALSE; }
     const auto* bytes = static_cast<const uint8_t*>(data);
     Check(!pending.count(operation), "overlapped reused before completion");
-    pending.emplace(operation, Pending{bytes, size, address, {bytes, bytes + size}, *address});
+    pending.emplace(operation, Pending{bytes, size, address, {bytes, bytes + size},
+        {address, address + addressSize / sizeof(WINDIVERT_ADDRESS)}});
     SetLastError(ERROR_IO_PENDING);
     return FALSE;
 }
@@ -37,7 +38,8 @@ static BOOL WINAPI Result(HANDLE, LPOVERLAPPED operation, LPDWORD sent, BOOL wai
         SetLastError(ERROR_IO_INCOMPLETE); return FALSE;
     }
     Check(std::equal(it->second.expected.begin(), it->second.expected.end(), it->second.data), "buffer alive and unchanged");
-    Check(std::memcmp(it->second.address, &it->second.expectedAddress, sizeof(WINDIVERT_ADDRESS)) == 0,
+    Check(std::memcmp(it->second.address, it->second.expectedAddresses.data(),
+        it->second.expectedAddresses.size() * sizeof(WINDIVERT_ADDRESS)) == 0,
         "direction, interface, checksum flags and timestamp alive and unchanged");
     *sent = it->second.size;
     const bool cancelled = it->second.cancelled;
@@ -106,6 +108,47 @@ static void DatagramTests() {
         [&](const uint8_t*, size_t, size_t) { ++calls; return false; }), "send failure propagated");
     Check(calls == 1, "no retry duplicates");
 }
+static void BatchTests() {
+    AsyncTunnelSender sender;
+    sender.SetApi({&WinDivertSendEx, &Result, &Cancel});
+    Check(sender.Reset(), "batch sender reset");
+    const HANDLE handle = reinterpret_cast<HANDLE>(1);
+    std::vector<uint8_t> data(100, 42);
+    WINDIVERT_ADDRESS address{};
+    mode = 0;
+    sender.BeginBatch();
+    for (int i = 0; i < 65; ++i) {
+        address.Timestamp = i;
+        address.Outbound = i % 2;
+        Check(sender.Send(handle, data.data(), data.size(), &address, 1), "batch accepts packet");
+    }
+    Check(pending.size() == 1 && pending.begin()->second.size == 6400, "64 packets use one operation");
+    Check(pending.begin()->second.expectedAddresses.size() == 64 &&
+        pending.begin()->second.expectedAddresses[63].Timestamp == 63, "batch address order retained");
+    Check(sender.EndBatch() && pending.size() == 2, "partial batch flushes at boundary");
+    data.assign(200000, 17);
+    sender.BeginBatch();
+    Check(sender.Send(handle, data.data(), data.size(), &address, 1), "large batched packet");
+    Check(sender.Send(handle, data.data(), data.size(), &address, 1), "byte boundary flush");
+    Check(pending.size() == 3, "byte limit splits batch");
+    sender.EndBatch();
+    Check(pending.size() == 4, "byte boundary remainder flushed");
+    for (auto& item : pending) SetEvent(item.first->hEvent);
+    sender.Drain();
+    Check(pending.empty(), "batch buffers and address arrays survive completion");
+    sender.BeginBatch();
+    sender.Send(handle, data.data(), data.size(), &address, 1);
+    sender.RequestStop();
+    Check(!sender.EndBatch() && pending.empty(), "stop discards unsent batch");
+    Check(sender.Reset(), "batch sender restarts");
+    sender.BeginBatch();
+    sender.Send(handle, data.data(), data.size(), &address, 1);
+    sender.EndBatch();
+    sender.RequestStop();
+    sender.Drain();
+    Check(pending.empty(), "stop cancels submitted batch before releasing memory");
+}
+
 static void AsyncTests() {
     AsyncTunnelSender sender;
     sender.SetApi({&WinDivertSendEx, &Result, &Cancel});
@@ -163,6 +206,7 @@ int main() {
     try {
         DatagramTests();
         AsyncTests();
+        BatchTests();
         TunnelRouteCache routes;
         Check(routes.Start() == NO_ERROR, "route notifications subscribe");
         TunnelRouteCache::Route route;

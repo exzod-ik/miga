@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [ValidatePattern('^\d+\.\d+\.\d+$')]
-    [string]$ProductVersion = '1.2.3',
+    [string]$ProductVersion = '1.2.5',
     [string]$ServerBinary,
     [string]$VisualStudioPath,
     [string]$CrtDirectory

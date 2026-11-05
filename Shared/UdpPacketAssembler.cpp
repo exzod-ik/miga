@@ -240,3 +240,10 @@ void UdpPacketAssembler::CleanupTimeoutFragments() {
         }
     }
 }
+
+void UdpPacketAssembler::CleanupExpired() {
+    std::lock_guard<std::mutex> lock(mtx_);
+    CleanupTimeoutFragments();
+}
+
+uint64_t UdpPacketAssembler::TakeExpiredIncompleteCount() { return expiredIncomplete_.exchange(0, std::memory_order_relaxed); }

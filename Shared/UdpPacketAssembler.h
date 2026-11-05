@@ -24,7 +24,8 @@ public:
     bool AddIpPacket(const uint8_t* packet, size_t len);
     UdpPacketInfo* GetCompleteUdpPacket();
     void ReleaseUdpPacket(UdpPacketInfo* pkt);
-    uint64_t TakeExpiredIncompleteCount() { return expiredIncomplete_.exchange(0, std::memory_order_relaxed); }
+    void CleanupExpired();
+    uint64_t TakeExpiredIncompleteCount();
 
 private:
     struct FragmentedPacket {

@@ -12,13 +12,17 @@
     <ClInclude Include="$(MSBuildThisFileDirectory)nlohmann\json.hpp">
       <Filter>nlohmann</Filter>
     </ClInclude>
-    <ClInclude Include="$(MSBuildThisFileDirectory)UdpPacketAssembler.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)LogTime.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)NetworkStructures.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)InternetChecksum.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="$(MSBuildThisFileDirectory)Logger.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)Encryption.cpp" />
-    <ClCompile Include="$(MSBuildThisFileDirectory)UdpPacketAssembler.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="$(MSBuildThisFileDirectory)InternetChecksum.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)LogFormat.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)LogTime.cpp" />
   </ItemGroup>
 </Project>

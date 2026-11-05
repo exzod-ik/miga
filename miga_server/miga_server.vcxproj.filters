@@ -29,6 +29,9 @@
     <ClInclude Include="include\TcpConnectionState.h">
       <Filter>Файлы заголовков</Filter>
     </ClInclude>
+    <ClInclude Include="include\TunnelIngress.h">
+      <Filter>Файлы заголовков</Filter>
+    </ClInclude>
     <ClInclude Include="include\ServerCore.h">
       <Filter>Файлы заголовков</Filter>
     </ClInclude>
@@ -37,4 +40,11 @@
     <CopyFileToFolders Include="install.sh" />
   </ItemGroup>
   
+  <ItemGroup>
+    <ClCompile Include="src\ConnectionKey.cpp" />
+    <ClCompile Include="src\InterfaceIpCache.cpp" />
+    <ClCompile Include="src\PortPool.cpp" />
+    <ClCompile Include="src\TcpConnectionState.cpp" />
+    <ClCompile Include="src\TunnelIngress.cpp" />
+  </ItemGroup>
 </Project>

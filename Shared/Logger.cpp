@@ -30,22 +30,6 @@ Logger::~Logger() {
 #endif
 }
 
-string Logger::getCurrentTime() {
-    auto now = chrono::system_clock::now();
-    auto in_time_t = chrono::system_clock::to_time_t(now);
-    struct tm bt;
-
-#ifdef __linux__
-    localtime_r(&in_time_t, &bt);
-#else
-    localtime_s(&bt, &in_time_t);
-#endif
-
-    stringstream ss;
-    ss << put_time(&bt, "%Y-%m-%d %H:%M:%S");
-    return ss.str();
-}
-
 void Logger::enable(int level, bool consoleOutput) {
     lock_guard<mutex> lock(m_Mutex);
     m_level = level;
@@ -88,7 +72,7 @@ void Logger::enable(int level, bool consoleOutput) {
     }
 }
 
-void Logger::log(const int level, const string& message) {
+void Logger::log(const int level, const string& message, chrono::system_clock::time_point time) {
     if (!isEnabled(level)) return;
 #ifndef __linux__
     {
@@ -98,7 +82,7 @@ void Logger::log(const int level, const string& message) {
                 ++m_Dropped;
                 return;
             }
-            m_Queue.emplace_back(level, message);
+            m_Queue.push_back({level, message, time});
             m_QueueBytes += message.size();
             lock.unlock();
             m_QueueChanged.notify_one();
@@ -106,7 +90,7 @@ void Logger::log(const int level, const string& message) {
         }
     }
 #endif
-    write(level, message);
+    write(level, message, time);
 }
 
 #ifndef __linux__
@@ -133,7 +117,7 @@ void Logger::stopAsync() {
 
 void Logger::writerLoop() {
     for (;;) {
-        deque<pair<int, string>> batch;
+        deque<LogEntry> batch;
         uint64_t dropped;
         {
             unique_lock lock(m_QueueMutex);
@@ -144,13 +128,13 @@ void Logger::writerLoop() {
             dropped = m_Dropped;
             m_Dropped = 0;
         }
-        if (dropped) write(LOGGER_LEVEL_WARNING, "log_queue_overflow dropped=" + to_string(dropped));
-        for (const auto& item : batch) write(item.first, item.second);
+        if (dropped) write(LOGGER_LEVEL_WARNING, "log_queue_overflow dropped=" + to_string(dropped), chrono::system_clock::now());
+        for (const auto& item : batch) write(item.level, item.message, item.time);
     }
 }
 #endif
 
-void Logger::write(int level, const string& message) {
+void Logger::write(int level, const string& message, chrono::system_clock::time_point time) {
     lock_guard<mutex> lock(m_Mutex);
 
     string lvlString;
@@ -172,7 +156,7 @@ void Logger::write(int level, const string& message) {
     }
 
     if (m_consoleOutput) {
-        const auto timestamp = getCurrentTime();
+        const auto timestamp = FormatLogTime(time);
         cout << "[" << timestamp << "] " << lvlString << ": " << message << endl;
         if (m_LogFile.is_open()) {
             m_LogFile << "[" << timestamp << "] " << lvlString << ": " << message << endl;
@@ -191,7 +175,7 @@ void Logger::write(int level, const string& message) {
         syslog(syslogPriority, "%s", message.c_str());
 #else
         if (m_LogFile.is_open()) {
-            const auto timestamp = getCurrentTime();
+            const auto timestamp = FormatLogTime(time);
             m_LogFile << "[" << timestamp << "] " << lvlString << ": " << message << endl;
         }
 #endif
@@ -215,21 +199,26 @@ void Logger::recordDelay(NetworkWarning event, std::chrono::steady_clock::time_p
 
 void Logger::flushWarnings() {
     static constexpr const char* names[] = {
-        "receive_buffer_wait", "receive_event_queue_wait", "batch_age_after_receive", "batch_processing",
-        "pending_pid_direct_fallback", "tunnel_packet_over_1500_bytes_mtu_risk",
-        "incomplete_fragment_sets_expired", "client_packet_processing", "internet_packet_processing", "routing_drop"
+        "batch_processing", "pending_pid_direct_fallback", "routing_drop",
+        "client_packet_processing", "internet_packet_processing", "large_tunnel_packet"
     };
+    static constexpr const char* units[] = { "ms", "none", "none", "ms", "ms", "bytes" };
+    static_assert(std::size(names) == static_cast<size_t>(NetworkWarning::Count));
+    static_assert(std::size(units) == std::size(names));
     for (size_t i = 0; i < m_warningCounts.size(); ++i) {
         const auto count = m_warningCounts[i].exchange(0, std::memory_order_relaxed);
         const auto value = m_warningValues[i].exchange(0, std::memory_order_relaxed);
         if (count == 0 && value == 0) continue;
         logLazy(LOGGER_LEVEL_WARNING, [&] {
             return std::string(names[i]) + " count=" + std::to_string(count) +
-                " total_value=" + std::to_string(value) + " value_unit=" + (i == static_cast<size_t>(NetworkWarning::LargeTunnelPacket) ? "bytes" :
-                    (i == static_cast<size_t>(NetworkWarning::PendingPidFallback) ||
-                     i == static_cast<size_t>(NetworkWarning::IncompleteFragments) ||
-                     i == static_cast<size_t>(NetworkWarning::RoutingDrop)) ? "none" : "ms") +
+                " total_value=" + std::to_string(value) + " value_unit=" + units[i] +
                 " window=approximate";
         });
     }
+}
+
+void Logger::setLevel(int level) { m_level.store(level, std::memory_order_relaxed); }
+
+bool Logger::isEnabled(int level) const {
+    return level > LOGGER_LEVEL_NONE && level <= m_level.load(std::memory_order_relaxed);
 }
