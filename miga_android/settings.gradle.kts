@@ -10,4 +10,4 @@ dependencyResolutionManagement {
     repositories { google(); mavenCentral() }
 }
 rootProject.name = "miga_android"
-include(":app", ":core")
+include(":app", ":core", ":devicechecks")

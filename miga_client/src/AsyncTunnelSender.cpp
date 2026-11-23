@@ -40,6 +40,13 @@ bool AsyncTunnelSender::Send(HANDLE handle, const uint8_t* data, size_t size, co
     return Submit(handle, data, size, addresses, count, nullptr);
 }
 
+bool AsyncTunnelSender::SendObserved(HANDLE handle, const uint8_t* data, size_t size,
+    const WINDIVERT_ADDRESS* addresses, size_t count, Completion completion) {
+    const bool success = Flush() && Submit(handle, data, size, addresses, count, nullptr, &completion);
+    if (completion) completion(success);
+    return success;
+}
+
 void AsyncTunnelSender::BeginBatch() { batching_ = true; }
 
 bool AsyncTunnelSender::EndBatch() { batching_ = false; return Flush(); }
@@ -59,7 +66,7 @@ void AsyncTunnelSender::Drain() {
 }
 
 bool AsyncTunnelSender::Submit(HANDLE handle, const uint8_t* data, size_t size, const WINDIVERT_ADDRESS* addresses,
-    size_t count, std::vector<uint8_t>* owned) {
+    size_t count, std::vector<uint8_t>* owned, Completion* completion) {
     if (!stop_ || WaitForSingleObject(stop_, 0) != WAIT_TIMEOUT) return false;
     size_t available = slots_.size();
     for (size_t i = 0; i < slots_.size(); ++i) {
@@ -89,6 +96,7 @@ bool AsyncTunnelSender::Submit(HANDLE handle, const uint8_t* data, size_t size, 
     }
     const DWORD code = GetLastError();
     if (code != ERROR_IO_PENDING) return Fail(code);
+    if (completion) slot.completion = std::move(*completion);
     slot.pending = true;
     return true;
 }
@@ -112,10 +120,16 @@ void AsyncTunnelSender::Complete(Slot& slot, bool wait) {
         const auto result = WaitForMultipleObjects(2, events, FALSE, INFINITE);
         if (result != WAIT_OBJECT_0) api_.cancel(slot.handle, &slot.operation);
     }
+    bool success = false;
     if (!api_.result(slot.handle, &slot.operation, &slot.sent, wait ? TRUE : FALSE)) {
         const DWORD code = GetLastError();
         if (code == ERROR_IO_INCOMPLETE) return;
         if (code != ERROR_OPERATION_ABORTED) Fail(code);
     } else if (slot.sent != slot.data.size()) Fail(ERROR_WRITE_FAULT);
+    else success = true;
     slot.pending = false;
+    if (slot.completion) {
+        auto notify = std::move(slot.completion);
+        notify(success);
+    }
 }

@@ -10,7 +10,8 @@ struct DnsMessage {
     bool response = false;
     std::vector<std::pair<uint32_t, uint32_t>> addresses;
     static bool Name(const uint8_t* data, size_t size, size_t& offset, std::string& result);
-    bool Read(const Packet& packet);
+    bool Read(const Packet& packet) { return Read(packet.bytes->data(), packet.view); }
+    bool Read(const uint8_t* bytes, const PacketView& view);
 };
 class DnsClassifier {
 public:
@@ -18,7 +19,7 @@ public:
     uint64_t TakeOverflows();
     void Reconfigure(const Configuration& config);
     struct Output { Packet packet; FlowRoute route; };
-    const Server* Select(const Configuration& config, const std::string& process, uint32_t ip, Clock::time_point now);
+    const Server* Select(const Configuration& config, const std::string& process, uint32_t ip, Clock::time_point now, const char** reason = nullptr);
     uint32_t Translate(uint32_t ip, size_t server, Clock::time_point now) const;
     std::vector<Output> Query(const Packet& packet, const Configuration& config, const std::string& process,
         PacketBufferPool& pool, Clock::time_point now);

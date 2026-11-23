@@ -62,7 +62,7 @@ class StartCoordinatorTest {
             coordinator.prepare(current) { newSnapshot.await() }?.let { if (coordinator.isCurrent(current)) started.add(it) }
         }
         val settings = SessionSettings(mapOf("id" to ServerSession("8.8.8.8", 0x08080808, 5000, 5000,
-            ByteArray(128), ByteArray(8))), mapOf("example.app" to "id"), "id")
+            testInvitation())), mapOf("example.app" to "id"), "id")
         PendingSession.put(current, settings)
         oldSnapshot.complete("old")
         oldJob.join()

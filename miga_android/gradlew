@@ -199,6 +199,33 @@ if "$cygwin" || "$msys" ; then
 fi
 
 
+if [ -z "$MIGA_ANDROID_WORKSPACE" ]; then
+    work_root="$APP_HOME/../Build/.work"
+    [ ! -L "$APP_HOME/../Build" ] && [ ! -L "$work_root" ] || exit 1
+    mkdir -p "$work_root" || exit 1
+    MIGA_ANDROID_WORKSPACE=$(mktemp -d "$work_root/android-XXXXXXXX") || exit 1
+    export MIGA_ANDROID_WORKSPACE
+    trap 'rm -rf -- "$MIGA_ANDROID_WORKSPACE"; rmdir "$work_root" 2>/dev/null || true' EXIT
+    "$APP_HOME/gradlew" --project-cache-dir "$MIGA_ANDROID_WORKSPACE/cache" --no-daemon "-Pkotlin.project.persistent.dir=$MIGA_ANDROID_WORKSPACE/kotlin" "$@" || exit "$?"
+    for module in app core devicechecks; do
+        for folder in outputs/apk outputs/bundle outputs/mapping libs; do
+            input="$MIGA_ANDROID_WORKSPACE/$module/$folder"
+            [ -d "$input" ] || continue
+            find "$input" -type f \( -name '*.apk' -o -name '*.aab' -o -name '*.jar' -o -name 'mapping.txt' \) \
+                -exec sh -c '
+                    input=$1
+                    output=$2
+                    shift 2
+                    for artifact do
+                        target="$output/${artifact#"$input"/}"
+                        mkdir -p "$(dirname "$target")" && mv -f "$artifact" "$target" || exit 1
+                    done
+                ' sh "$input" "$APP_HOME/../Build/android/$module/$folder" {} + || exit 1
+        done
+    done
+    exit 0
+fi
+
 # Add default JVM options here. You can also use JAVA_OPTS and GRADLE_OPTS to pass JVM options to this script.
 DEFAULT_JVM_OPTS='"-Xmx64m" "-Xms64m"'
 

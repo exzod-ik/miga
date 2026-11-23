@@ -1,26 +1,37 @@
 package org.miga.android
 
-import java.util.Base64
-import org.junit.Assert.assertEquals
-import org.junit.Assert.assertThrows
+import org.junit.Assert.*
 import org.junit.Test
 
 class ServerQrTest {
-    private val xor = Base64.getEncoder().encodeToString(ByteArray(128) { it.toByte() })
-    private val swap = Base64.getEncoder().encodeToString(ByteArray(8) { it.toByte() })
-
-    @Test fun decodesDesktopPayload() {
-        val qr = parseServerQr("""{"type":"miga-server","version":1,"address":"8.8.8.8","ports":[10000,15000],"xor":"$xor","swap":"$swap"}""")
-        assertEquals("8.8.8.8", qr.address)
-        assertEquals(10000, qr.firstPort)
-        assertEquals(15000, qr.lastPort)
-        assertEquals(xor, qr.xor)
+    @Test fun decodesInvitation() {
+        val text = testInvitation("8.8.8.8", 10000, 15000)
+        val parsed = parseServerQr(text)
+        assertEquals("8.8.8.8", parsed.address)
+        assertEquals(10000, parsed.firstPort)
+        assertEquals(text, parsed.invitation)
+    }
+    @Test fun readsInvitationFileWithBomAndTrailingNewline() {
+        val text = testInvitation()
+        val input = ("\uFEFF" + text + "\r\n").byteInputStream()
+        assertEquals(parseServerQr(text), readInvitationFile(input))
     }
 
-    @Test fun rejectsWrongFormatAndInvalidKeys() {
-        assertThrows(IllegalArgumentException::class.java) { parseServerQr("https://example.com") }
-        assertThrows(IllegalArgumentException::class.java) {
-            parseServerQr("""{"type":"miga-server","version":1,"address":"8.8.8.8","ports":[10000,15000],"xor":"bad","swap":"$swap"}""")
+    @Test fun rejectsOversizedAndInvalidInvitationFiles() {
+        val oversized = (testInvitation() + " ".repeat(16384)).byteInputStream()
+        assertThrows(IllegalArgumentException::class.java) { readInvitationFile(oversized) }
+        assertThrows(IllegalArgumentException::class.java) { readInvitationFile("miga-server".byteInputStream()) }
+    }
+
+    @Test fun rejectsOldPayloadAndInvalidInvitation() {
+        for (text in listOf("{}", "miga-server", "miga2:bad", testInvitation() + "="))
+            assertThrows(Exception::class.java) { parseServerQr(text) }
+    }
+    @Test fun oldSettingsRemainUntouched() {
+        for (version in 1..4) {
+            val raw = java.io.ByteArrayOutputStream()
+            java.io.DataOutputStream(raw).use { it.writeInt(version) }
+            assertThrows(SettingsCorrupt::class.java) { SettingsCodec.decode(java.util.Base64.getEncoder().encodeToString(raw.toByteArray())) }
         }
     }
 }

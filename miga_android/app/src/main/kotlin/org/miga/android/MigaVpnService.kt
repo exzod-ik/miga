@@ -20,7 +20,6 @@ import android.system.OsConstants
 import org.miga.core.ConnectionController
 import org.miga.core.ConnectionOwnerResolver
 import org.miga.core.ConnectionState
-import org.miga.core.LegacyMigaCodec
 import org.miga.core.MultiTunnelEngine
 import org.miga.core.PublicRoutes
 import org.miga.core.RetryScheduler
@@ -40,6 +39,7 @@ class MigaVpnService : VpnService() {
     private var eventDispatcher: ServerEventDispatcher? = null
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
     private val controllers = linkedMapOf<String, ConnectionController<Network>>()
+    private val transports = mutableMapOf<String, ProtocolV2Transport>()
     private var directController: ConnectionController<Network>? = null
     private var captureMode = CaptureMode.ASSIGNED_APPS
     private var replyCheck: Runnable? = null
@@ -190,7 +190,14 @@ class MigaVpnService : VpnService() {
             replyCheck = object : Runnable {
                 override fun run() {
                     if (generation != session) return
-                    VpnState.checkNoResponse(SystemClock.elapsedRealtime())
+                    val now = SystemClock.elapsedRealtime()
+                    VpnState.checkNoResponse(now)
+                    safeConnectionEvent {
+                        controllers.forEach { (id, controller) ->
+                            if (transports[id]?.checkDataPath(now) == true) controller.failed(controller.token)
+                        }
+                    }
+                    if (generation != session) return
                     engine?.let {
                         VpnState.addUnknownOwnerDrops(it.unknownOwnerDrops)
                         VpnState.updateDirectCounters(it.directCounters)
@@ -210,17 +217,18 @@ class MigaVpnService : VpnService() {
 
     private fun openTransport(id: String, profile: ServerSession, network: Network,
                               session: Long, token: Long): Closeable {
-        val transport = ProtectedUdpTransport(this, network, profile.serverAddress)
+        val transport = ProtocolV2Transport(this, network, profile)
         try {
             check(setUnderlyingNetworks(arrayOf(network))) { "Could not set underlying network" }
-            val server = ServerTransport(id, token, transport,
-                LegacyMigaCodec(profile.xorKey, profile.swapKey), profile.serverIp,
-                profile.firstPort, profile.lastPort,
-                { ThreadLocalRandom.current().nextInt(profile.firstPort, profile.lastPort + 1) })
+            val server = ServerTransport(id, token, transport, transport, profile.serverIp)
             check(generation == session)
             eventDispatcher?.advance(id, token)
             checkNotNull(engine).attach(server)
-            return Closeable { engine?.detach(id, token) }
+            transports[id] = transport
+            return Closeable {
+                transports.remove(id, transport)
+                engine?.detach(id, token)
+            }
         } catch (ex: Exception) {
             transport.close()
             throw ex

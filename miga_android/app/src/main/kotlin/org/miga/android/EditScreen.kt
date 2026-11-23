@@ -1,6 +1,8 @@
 package org.miga.android
 
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -9,13 +11,14 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.miga.core.Ipv4Interval
-
-internal fun serverNeedsSsh(server: ServerProfile?, address: String): Boolean =
-    server == null || runCatching { SessionValidator.endpoint(address, "1", "1").first }.getOrNull() != server.address
 
 @Composable
 internal fun EditScreen(kind: Editor, id: String?, saved: SavedSettings, locked: Boolean,
@@ -25,9 +28,7 @@ internal fun EditScreen(kind: Editor, id: String?, saved: SavedSettings, locked:
     val domainRule = saved.domainRules.firstOrNull { it.id == id }
     var name by rememberSaveable(id, kind) { mutableStateOf(server?.name.orEmpty()) }
     var address by rememberSaveable(id, kind) { mutableStateOf(server?.address.orEmpty()) }
-    val needsSsh = kind == Editor.SERVER && serverNeedsSsh(server, address)
-    var sshUser by rememberSaveable(id, kind) { mutableStateOf("root") }
-    var sshPassword by remember(id, kind) { mutableStateOf("") }
+    var invitation by remember(id, kind) { mutableStateOf("") }
     var expression by rememberSaveable(id, kind) { mutableStateOf(ipRule?.expression ?: domainRule?.pattern.orEmpty()) }
     var profileId by rememberSaveable(id, kind) { mutableStateOf(ipRule?.profileId ?: domainRule?.profileId ?: saved.profiles.firstOrNull()?.id) }
     var saving by remember { mutableStateOf(false) }
@@ -36,14 +37,34 @@ internal fun EditScreen(kind: Editor, id: String?, saved: SavedSettings, locked:
     var attempted by remember { mutableStateOf(false) }
     val errorName = stringResource(R.string.error_name)
     val errorEndpoint = stringResource(R.string.error_endpoint)
-    val errorSshCredentials = stringResource(R.string.error_ssh_credentials)
-    val hostQuestion by model.hostQuestion.collectAsState()
     val errorIp = stringResource(R.string.error_ip)
     val errorDomain = stringResource(R.string.error_domain)
     val errorServer = stringResource(R.string.error_server)
+    val errorInvitationFile = stringResource(R.string.error_invitation_file)
+    val resolver = LocalContext.current.contentResolver
+    val scope = rememberCoroutineScope()
+    val openInvitationFile = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri == null || locked || saving) return@rememberLauncherForActivityResult
+        saving = true
+        error = ""
+        scope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    requireNotNull(resolver.openInputStream(uri)).use(::readInvitationFile)
+                }
+            }
+            result.onSuccess {
+                invitation = it.invitation
+                if (name.isBlank()) name = it.address
+            }.onFailure {
+                error = errorInvitationFile
+            }
+            saving = false
+        }
+    }
     val dirty = when (kind) {
         Editor.SERVER -> name != server?.name.orEmpty() || address != server?.address.orEmpty() ||
-            (needsSsh && (sshPassword.isNotEmpty() || sshUser != "root"))
+            invitation.isNotEmpty()
         Editor.IP, Editor.DOMAIN -> expression != (ipRule?.expression ?: domainRule?.pattern.orEmpty()) ||
             profileId != (ipRule?.profileId ?: domainRule?.profileId ?: saved.profiles.firstOrNull()?.id)
         else -> false
@@ -62,22 +83,17 @@ internal fun EditScreen(kind: Editor, id: String?, saved: SavedSettings, locked:
         if (locked) Text(stringResource(R.string.stop_to_edit))
         when (kind) {
             Editor.SERVER -> {
+                if (server?.requiresInvitation == true) Text(stringResource(R.string.migration_rules_kept))
                 OutlinedTextField(name, { name = it; error = "" }, Modifier.fillMaxWidth(),
                     label = { Text(stringResource(R.string.server_name)) }, singleLine = true,
                     isError = attempted && (name.isBlank() || name.length > 80),
                     supportingText = { if (attempted && (name.isBlank() || name.length > 80)) Text(errorName) })
-                OutlinedTextField(address, { address = it; error = "" }, Modifier.fillMaxWidth(),
-                    label = { Text(stringResource(R.string.public_ipv4)) }, singleLine = true,
-                    isError = attempted && runCatching { SessionValidator.endpoint(address, "1", "1") }.isFailure,
-                    supportingText = { if (attempted && runCatching { SessionValidator.endpoint(address, "1", "1") }.isFailure) Text(errorEndpoint) })
-                if (needsSsh) {
-                    OutlinedTextField(sshUser, { sshUser = it; error = "" }, Modifier.fillMaxWidth(),
-                        label = { Text(stringResource(R.string.ssh_login)) }, singleLine = true)
-                    OutlinedTextField(sshPassword, { sshPassword = it; error = "" }, Modifier.fillMaxWidth(),
-                        label = { Text(stringResource(R.string.ssh_password)) },
-                        visualTransformation = PasswordVisualTransformation(), singleLine = true)
+                OutlinedTextField(invitation, { invitation = it; error = "" }, Modifier.fillMaxWidth(),
+                    label = { Text("Приглашение miga2:") }, visualTransformation = PasswordVisualTransformation())
+                OutlinedButton(onClick = { openInvitationFile.launch(arrayOf("*/*")) }, enabled = !locked && !saving) {
+                    Text(stringResource(R.string.open_invitation_file))
                 }
-                if (server != null) Text("UDP ${server.firstPort}–${server.lastPort}")
+                if (server != null && !server.requiresInvitation) Text("UDP ${server.firstPort}–${server.lastPort}")
             }
             Editor.IP, Editor.DOMAIN -> {
                 OutlinedTextField(expression, { expression = it; error = "" }, Modifier.fillMaxWidth(),
@@ -104,8 +120,7 @@ internal fun EditScreen(kind: Editor, id: String?, saved: SavedSettings, locked:
             error = when (kind) {
                 Editor.SERVER -> when {
                     name.isBlank() || name.length > 80 -> errorName
-                    runCatching { SessionValidator.endpoint(address, "1", "1") }.isFailure -> errorEndpoint
-                    needsSsh && (sshUser.isBlank() || sshPassword.isBlank()) -> errorSshCredentials
+                    (server == null || invitation.isNotBlank()) && runCatching { parseServerQr(invitation.trim()) }.isFailure -> errorEndpoint
                     else -> ""
                 }
                 Editor.IP -> if (runCatching { Ipv4Interval.parse(expression) }.isFailure) errorIp else ""
@@ -116,16 +131,17 @@ internal fun EditScreen(kind: Editor, id: String?, saved: SavedSettings, locked:
             val chosen = profileId
             if (kind != Editor.SERVER && chosen == null) { error = errorServer; return@Button }
             saving = true
-            val success = { sshPassword = ""; saving = false; onClose() }
+            val success = { invitation = ""; saving = false; onClose() }
             val failure: (String) -> Unit = { error = it; saving = false }
             when (kind) {
-                Editor.SERVER -> model.importServer(id, name, address, sshUser, sshPassword, success, failure)
+                Editor.SERVER -> if (server != null && invitation.isBlank()) model.renameProfile(server.id, name, server.address, success, failure)
+                    else model.importInvitation(id, name, invitation, success, failure)
                 Editor.IP -> model.saveIpv4Rule(id, chosen!!, expression, success, failure)
                 Editor.DOMAIN -> model.saveDomainRule(id, chosen!!, expression, success, failure)
                 else -> Unit
             }
         }, enabled = !locked && !saving, modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp)) {
-            Text(if (needsSsh) stringResource(R.string.ssh_import) else stringResource(R.string.save))
+            Text(stringResource(R.string.save))
         }
         TextButton(onClick = ::requestClose, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
             Text(stringResource(R.string.cancel))
@@ -134,11 +150,6 @@ internal fun EditScreen(kind: Editor, id: String?, saved: SavedSettings, locked:
     if (confirmDiscard) AlertDialog(onDismissRequest = { confirmDiscard = false },
         title = { Text(stringResource(R.string.unsaved_changes)) },
         text = { Text(stringResource(R.string.discard_question)) },
-        confirmButton = { TextButton(onClick = { sshPassword = ""; confirmDiscard = false; onClose() }) { Text(stringResource(R.string.discard)) } },
+        confirmButton = { TextButton(onClick = { invitation = ""; confirmDiscard = false; onClose() }) { Text(stringResource(R.string.discard)) } },
         dismissButton = { TextButton(onClick = { confirmDiscard = false }) { Text(stringResource(R.string.continue_editing)) } })
-    if (hostQuestion != null) AlertDialog(onDismissRequest = { model.answerHostQuestion(false) },
-        title = { Text(stringResource(R.string.ssh_key_title)) },
-        text = { Text(hostQuestion.orEmpty()) },
-        confirmButton = { TextButton(onClick = { model.answerHostQuestion(true) }) { Text(stringResource(R.string.ssh_key_confirm)) } },
-        dismissButton = { TextButton(onClick = { model.answerHostQuestion(false) }) { Text(stringResource(R.string.cancel)) } })
 }

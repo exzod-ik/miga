@@ -21,7 +21,8 @@ public:
     Decision Lookup(const PacketView& packet, int64_t timestamp, Clock::time_point now);
     bool Commit(const PacketView& packet, int64_t timestamp, const RouteDecision& decision, Clock::time_point now);
     Decision Expire(const PacketView& packet, int64_t timestamp, Clock::time_point now);
-    void Inbound(const PacketView& packet, int64_t timestamp, size_t server, Clock::time_point now);
+    std::optional<uint32_t> Inbound(const PacketView& packet, int64_t timestamp, size_t server,
+        Clock::time_point now, bool reverse = false);
     void Servers(const std::unordered_set<size_t>& live);
     void Cleanup(Clock::time_point now, size_t budget = 128);
     void Probed(const Probe& probe, std::optional<bool> present, Clock::time_point now);
@@ -40,6 +41,7 @@ private:
         std::optional<uint32_t> syn;
         bool finOut = false, finIn = false, reset = false;
         bool seeded = false;
+        bool ownerIndependent = false;
     };
     static Clock::time_point Due(const Flow& flow, uint8_t protocol);
     bool CanProbe(const Flow& flow, uint8_t protocol) const;

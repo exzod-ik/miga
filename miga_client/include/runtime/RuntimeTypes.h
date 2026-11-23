@@ -58,5 +58,8 @@ struct RouteDecision {
     OwnerRecord owner;
     uint64_t configVersion = 0;
     uint64_t request = 0;
+    const char* reason = "no_matching_rule";
+    bool resolutionPending = false;
+    bool ownerIndependent = false;
 };
 }

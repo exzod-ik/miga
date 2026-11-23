@@ -25,6 +25,8 @@ public:
     bool Reset();
     void RequestStop();
     bool Send(HANDLE handle, const uint8_t* data, size_t size, const WINDIVERT_ADDRESS* addresses, size_t count);
+    using Completion = std::function<void(bool)>;
+    bool SendObserved(HANDLE handle, const uint8_t* data, size_t size, const WINDIVERT_ADDRESS* addresses, size_t count, Completion completion);
     void BeginBatch();
     bool EndBatch();
     uint64_t TakeOverflows();
@@ -33,7 +35,7 @@ public:
     void Drain();
 private:
     bool Submit(HANDLE handle, const uint8_t* data, size_t size, const WINDIVERT_ADDRESS* addresses,
-        size_t count, std::vector<uint8_t>* owned);
+        size_t count, std::vector<uint8_t>* owned, Completion* completion = nullptr);
     bool Flush();
     bool batching_ = false;
     std::vector<uint8_t> batchData_;
@@ -48,6 +50,7 @@ private:
         DWORD sent = 0;
         UINT submitted = 0;
         bool pending = false;
+        Completion completion;
     };
     std::array<Slot, 32> slots_;
     size_t next_ = 0;

@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <RootNamespace>MIGA_Agent</RootNamespace>
+    <AssemblyName>MIGA Admin</AssemblyName>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <ApplicationIcon>Icon.ico</ApplicationIcon>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <AssemblyVersion>1.3.0.0</AssemblyVersion>
+    <Version>1.3.0</Version>
+    <FileVersion>1.3.0.0</FileVersion>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.2" />
+    <PackageReference Include="QRCoder" Version="1.8.0" />
+    <PackageReference Include="Ookii.Dialogs.Wpf" Version="5.0.1" />
+    <PackageReference Include="SSH.NET" Version="2026.0.0" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="..\MIGA Agent\Models\ServerConfig.cs;..\MIGA Agent\Models\PortRange.cs;..\MIGA Agent\Models\ProtocolV2Invitation.cs" Link="Models\%(Filename)%(Extension)" />
+    <Compile Include="..\MIGA Agent\Helpers\PasswordBoxAssistant.cs;..\MIGA Agent\Helpers\ServerConfigUpdate.cs" Link="Helpers\%(Filename)%(Extension)" />
+    <Compile Include="..\MIGA Agent\Services\ISshManager.cs;..\MIGA Agent\Services\SshManager.cs;..\MIGA Agent\Services\UnsavedChangesDecision.cs;..\MIGA Agent\Services\IDialogService.cs;..\MIGA Agent\Services\DialogService.cs;..\MIGA Agent\Services\NotificationCenter.cs;..\MIGA Agent\Services\InvitationHandoff.cs" Link="Services\%(Filename)%(Extension)" />
+    <Compile Include="..\MIGA Agent\Views\Dialogs\*.cs" Exclude="..\MIGA Agent\Views\Dialogs\DiagnosticsWindow.cs" Link="Views\Dialogs\%(Filename)%(Extension)" />
+    <Page Include="..\MIGA Agent\Views\Dialogs\*.xaml" Link="Views\Dialogs\%(Filename)%(Extension)" />
+    <Page Include="..\MIGA Agent\Views\TabPages.xaml" Link="Views\TabPages.xaml"/>
+    <Resource Include="Icon.ico" />
+  </ItemGroup>
+</Project>

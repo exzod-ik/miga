@@ -27,11 +27,8 @@ data class ServerTransport(
     val profileId: String,
     val generation: Long,
     val transport: DatagramTransport,
-    val codec: LegacyMigaCodec,
+    val codec: SessionCodec,
     val serverIp: Int,
-    val firstPort: Int,
-    val lastPort: Int,
-    val portPicker: () -> Int,
 )
 
 /** One TUN reader and writer. UDP readers only enqueue tagged datagrams. */
@@ -63,6 +60,7 @@ class MultiTunnelEngine(
     private data class DirectActive(val stack: DirectPacketStack, val generation: Long)
     private data class AuxiliaryPort(val profileId: String, val generation: Long, var observed: Boolean = false)
     private data class Pin(val id: String?, val generation: Long, var seen: Long, val actualIp: Int? = null)
+    private data class ServerFlow(val id: String, val generation: Long, val wire: FlowKey)
     private sealed interface Target {
         data class Server(val value: ServerTransport) : Target
         data class Direct(val value: DirectActive) : Target
@@ -74,7 +72,7 @@ class MultiTunnelEngine(
     private val dnsRules = domainRules ?: DomainRuleSet(emptyList())
     private val dnsRouting = DnsRouting(clock, dnsRules, dnsProfileId)
     private val pins = LinkedHashMap<FlowKey, Pin>(16, .75f, true)
-    private val wireToOriginal = HashMap<FlowKey, FlowKey>()
+    private val wireToOriginal = HashMap<ServerFlow, FlowKey>()
     private val unknown = LinkedHashMap<FlowKey, Long>(16, .75f, true)
     private val auxiliaryPorts = HashMap<Int, AuxiliaryPort>()
     private val retiredAuxiliaryPorts = LinkedHashMap<Int, Long>()
@@ -95,8 +93,8 @@ class MultiTunnelEngine(
         if (!running.get() || port !in 1..65535 || auxiliaryPorts.size >= 32 ||
             port in auxiliaryPorts || active[profile]?.server?.generation != generation) false
         else {
-            pins.entries.removeIf { it.key.protocol == 6 && it.key.sourcePort == port &&
-                it.key.destinationPort == 53 && it.key.destinationIp == DNS_ADDRESS }
+            removePins { key, _ -> key.protocol == 6 && key.sourcePort == port &&
+                key.destinationPort == 53 && key.destinationIp == DNS_ADDRESS }
             retiredAuxiliaryPorts.remove(port)
             auxiliaryPorts[port] = AuxiliaryPort(profile, generation)
             true
@@ -123,7 +121,6 @@ class MultiTunnelEngine(
     }
 
     fun attach(server: ServerTransport) {
-        require(server.firstPort in 1..65535 && server.lastPort in server.firstPort..65535)
         check(running.get())
         val reader = Thread({ readUdp(server) }, "miga-udp-${server.profileId.take(8)}")
         synchronized(lock) {
@@ -144,8 +141,7 @@ class MultiTunnelEngine(
                     retireAuxiliaryPort(it.key); true
                 } else false
             }
-            pins.entries.removeIf { it.value.id == id }
-            wireToOriginal.entries.removeIf { it.value !in pins }
+            removePins { _, pin -> pin.id == id && pin.generation == generation }
             dnsRouting?.detach(id, generation)
             current
         }
@@ -166,7 +162,7 @@ class MultiTunnelEngine(
             val current = direct ?: return
             if (current.generation != generation) return
             direct = null
-            pins.entries.removeIf { it.value.id == null }
+            removePins { _, pin -> pin.id == null }
             current
         }
         previous.stack.close()
@@ -250,8 +246,10 @@ class MultiTunnelEngine(
                 val server = synchronized(lock) { active[send.profileId]?.server?.takeIf { it.generation == send.generation } }
                     ?: continue
                 try {
-                    val port = server.portPicker(); require(port in server.firstPort..server.lastPort)
-                    server.transport.send(server.codec.encode(send.packet, port), port)
+                    val port = server.codec.port
+                    val encoded = server.codec.encode(send.packet, port)
+                    if (encoded == null) { update(server.profileId, server.generation) { it.copy(queueDrops = it.queueDrops + 1) }; continue }
+                    server.transport.send(encoded, port)
                     update(server.profileId, server.generation) { it.copy(sent = it.sent + 1,
                         unansweredSinceMillis = if (it.unansweredSinceMillis == 0L) now else it.unansweredSinceMillis) }
                 } catch (_: Exception) { signalFailure(server.profileId, server.generation) }
@@ -286,9 +284,10 @@ class MultiTunnelEngine(
             }
         }
         try {
-            val port = server.portPicker()
-            require(port in server.firstPort..server.lastPort)
-            server.transport.send(server.codec.encode(payload, port), port)
+            val port = server.codec.port
+            val encoded = server.codec.encode(payload, port)
+            if (encoded == null) { update(server.profileId, server.generation) { it.copy(queueDrops = it.queueDrops + 1) }; return }
+            server.transport.send(encoded, port)
             if (packet.protocol == 6 && packet.bytes[packet.headerLength + 13].toInt() and 2 != 0 &&
                 key.destinationPort == 53 && key.destinationIp == DNS_ADDRESS &&
                 key.sourceIp == VPN_ADDRESS) synchronized(lock) {
@@ -302,11 +301,13 @@ class MultiTunnelEngine(
     }
 
     private fun choose(key: FlowKey, now: Long): Target? {
-        val pinned = synchronized(lock) {
-            prune(now)
-            pins[key]?.also { it.seen = now }
+        synchronized(lock) {
+            livePin(key, now)?.let {
+                it.seen = now
+                return targetFor(it)
+            }
+            pruneExpiredPins(now)
         }
-        if (pinned != null) return synchronized(lock) { targetFor(pinned) }
         if (key.protocol == 6 && key.sourceIp == VPN_ADDRESS && key.destinationIp == DNS_ADDRESS &&
             key.destinationPort == 53 && synchronized(lock) {
                 retiredAuxiliaryPorts[key.sourcePort]?.let { now < it } == true
@@ -347,7 +348,7 @@ class MultiTunnelEngine(
             }
         }
         return synchronized(lock) {
-            pins[key]?.let { return@synchronized targetFor(it) }
+            livePin(key, now)?.let { return@synchronized targetFor(it) }
             val target = when (decision) {
                 is RouteDecision.Server -> active[decision.profileId]?.server?.takeIf {
                     auxiliary == null || it.generation == auxiliary.generation
@@ -372,18 +373,19 @@ class MultiTunnelEngine(
                 }
             }
             if (target != null) {
-                pins[key] = when (target) {
+                val pin = when (target) {
                     is Target.Server -> Pin(target.value.profileId, target.value.generation, now, mappedIp)
                     is Target.Direct -> Pin(null, target.value.generation, now)
                 }
-                if (mappedIp != null && mappedIp != key.destinationIp) {
-                    val wire = key.copy(destinationIp = mappedIp)
+                val wire = serverFlow(key, pin)
+                if (wire != null) {
                     val previous = wireToOriginal[wire]
-                    if (previous != null && previous != key) { pins.remove(key); return@synchronized null }
+                    if (previous != null && previous != key && livePin(previous, now) != null)
+                        return@synchronized null
                     wireToOriginal[wire] = key
                 }
-                if (pins.size > maxFlows) pins.remove(pins.keys.first())
-                wireToOriginal.entries.removeIf { it.value !in pins }
+                pins[key] = pin
+                if (pins.size > maxFlows) removePin(pins.keys.first())
             }
             target
         }
@@ -401,9 +403,9 @@ class MultiTunnelEngine(
         val key = FlowKey.from(packet).reverse()
         val now = clock.elapsedMillis()
         val owned = synchronized(lock) {
-            val pin = pins[key]
+            val pin = livePin(key, now)
             if (direct?.generation != event.generation || pin == null || pin.id != null ||
-                pin.generation != event.generation || now < pin.seen || now - pin.seen >= flowTtlMillis) false
+                pin.generation != event.generation) false
             else { pin.seen = now; true }
         }
         if (!owned) { rejectDirectReply(); return }
@@ -422,13 +424,14 @@ class MultiTunnelEngine(
     private fun incoming(event: Event.In) {
         val server = synchronized(lock) { active[event.id]?.server?.takeIf { it.generation == event.generation } } ?: return
         val datagram = event.datagram
-        if (datagram.sourceIp != server.serverIp || datagram.sourcePort !in server.firstPort..server.lastPort) {
+        if (datagram.sourceIp != server.serverIp || datagram.sourcePort != server.codec.port) {
             update(event.id, event.generation) { it.copy(unknownEndpoint = it.unknownEndpoint + 1) }; return
         }
-        if (datagram.bytes.isEmpty() || datagram.bytes.size > TunnelPacketLimits.MAX_INNER_PACKET) {
+        if (datagram.bytes.isEmpty() || datagram.bytes.size > 65507) {
             update(event.id, event.generation) { it.copy(oversized = it.oversized + 1) }; return
         }
-        val packet = ServerReplyPacket.parse(server.codec.decode(datagram.bytes, datagram.sourcePort))
+        val decoded = server.codec.decode(datagram.bytes, datagram.sourcePort) ?: return
+        val packet = Ipv4Packet.parse(decoded)
         if (packet == null) { update(event.id, event.generation) { it.copy(malformed = it.malformed + 1) }; return }
         if (packet.protocol == 17 && packet.sourcePort == 53 &&
             FlowKey.from(packet).sourceIp == DNS_ADDRESS) {
@@ -443,14 +446,12 @@ class MultiTunnelEngine(
             }
         }
         val wireKey = FlowKey.from(packet).reverse()
-        val key = synchronized(lock) { wireToOriginal[wireKey] } ?: wireKey
+        val flow = ServerFlow(event.id, event.generation, wireKey)
         val now = clock.elapsedMillis()
-        val owned = synchronized(lock) {
-            val pin = pins[key]
-            pin != null && pin.id == event.id && pin.generation == event.generation &&
-                now >= pin.seen && now - pin.seen < flowTtlMillis
+        val key = synchronized(lock) {
+            wireToOriginal[flow]?.takeIf { livePin(it, now) != null }
         }
-        if (!owned) { update(event.id, event.generation) { it.copy(unknownFlow = it.unknownFlow + 1) }; return }
+        if (key == null) { update(event.id, event.generation) { it.copy(unknownFlow = it.unknownFlow + 1) }; return }
         val maxMss = (TunnelPacketLimits.MAX_INNER_PACKET - packet.headerLength - packet.transportHeaderLength)
             .coerceAtMost(TunnelPacketLimits.TUNNEL_MAX_MSS)
         val clamped = if (maxMss > 0) packet.clampMss(maxMss) else null
@@ -458,10 +459,9 @@ class MultiTunnelEngine(
             PacketRewrite.address(Ipv4Packet.parse(clamped) ?: return, key.destinationIp, false) else clamped
         if (payload == null) { update(event.id, event.generation) { it.copy(malformed = it.malformed + 1) }; return }
         val stillOwned = synchronized(lock) {
-            val pin = pins[key]
+            val pin = livePin(key, now)
             if (active[event.id]?.server?.generation != event.generation || pin == null ||
-                pin.id != event.id || pin.generation != event.generation ||
-                now < pin.seen || now - pin.seen >= flowTtlMillis) false
+                wireToOriginal[flow] != key) false
             else { pin.seen = now; true }
         }
         if (!stillOwned) return
@@ -484,11 +484,47 @@ class MultiTunnelEngine(
         onStats(id, generation, next)
     }
 
-    private fun prune(now: Long) {
-        pins.entries.removeIf { now < it.value.seen || now - it.value.seen >= flowTtlMillis }
-        wireToOriginal.entries.removeIf { it.value !in pins }
-        unknown.entries.removeIf { now < it.value || now - it.value >= 5_000 }
-        retiredAuxiliaryPorts.entries.removeIf { now >= it.value }
+    private fun serverFlow(key: FlowKey, pin: Pin): ServerFlow? = pin.id?.let {
+        val address = pin.actualIp
+        val wire = if (address != null && address != key.destinationIp) key.copy(destinationIp = address) else key
+        ServerFlow(it, pin.generation, wire)
+    }
+
+    private fun removePin(key: FlowKey) {
+        val pin = pins.remove(key) ?: return
+        serverFlow(key, pin)?.let { wireToOriginal.remove(it) }
+    }
+
+    private fun removePins(predicate: (FlowKey, Pin) -> Boolean) {
+        val iterator = pins.entries.iterator()
+        while (iterator.hasNext()) {
+            val (key, pin) = iterator.next()
+            if (predicate(key, pin)) {
+                serverFlow(key, pin)?.let { wireToOriginal.remove(it) }
+                iterator.remove()
+            }
+        }
+    }
+
+    private fun expired(pin: Pin, now: Long): Boolean =
+        now < pin.seen || now - pin.seen >= flowTtlMillis
+
+    private fun livePin(key: FlowKey, now: Long): Pin? {
+        val pin = pins[key] ?: return null
+        if (!expired(pin, now)) return pin
+        removePin(key)
+        return null
+    }
+
+    private fun pruneExpiredPins(now: Long) {
+        val iterator = pins.entries.iterator()
+        repeat(8) {
+            if (!iterator.hasNext()) return
+            val (key, pin) = iterator.next()
+            if (!expired(pin, now)) return
+            serverFlow(key, pin)?.let { wireToOriginal.remove(it) }
+            iterator.remove()
+        }
     }
 
     private fun retireAuxiliaryPort(port: Int) {

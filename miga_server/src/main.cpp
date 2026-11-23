@@ -1,177 +1,46 @@
-#include "ServerCore.h"
-#include <nlohmann/json.hpp>
-#include <unistd.h>
-#include <fstream>
+#include "V2Server.h"
 #include <iostream>
 #include <csignal>
 #include <atomic>
-#include <sys/stat.h>
-#include <errno.h>
-#include <cstring>
+#include <string>
 
-#define VERSION "1.2.5"
+constexpr auto ServerVersion =
+#include "../ServerVersion.inc"
+    ;
 
-using namespace std;
-using json = nlohmann::json;
-
-atomic<bool> g_running(true);
+std::atomic<bool> g_running(true);
 
 void signalHandler(int) {
-    cout << "server_stopping" << endl;
     g_running = false;
 }
 
-static bool CreateDirectory(const std::string& path) {
-    struct stat st;
-    if (stat(path.c_str(), &st) == 0) {
-        return S_ISDIR(st.st_mode);
-    }
-    if (mkdir(path.c_str(), 0755) == 0) {
-        return true;
-    }
-    return errno == EEXIST;
-}
-
-static ServerConfig GetDefaultConfig() {
-    ServerConfig def;
-    def.xorKeyBase64 = Encryption::GenerateXorKeyBase64();
-    def.swapKeyBase64 = Encryption::GenerateSwapKeyBase64();
-    return def;
-}
-
-static bool UpdateConfigFile(const string& configPath, bool generateKeys) {
-    json currentJson;
-    ifstream ifs(configPath);
-    if (ifs.is_open()) {
-        try {
-            ifs >> currentJson;
-        }
-        catch (const exception& e) {
-            cerr << "config_parse_failed error=" << LogValue(e.what()) << endl;
-            return false;
-        }
-    }
-    else {
-        cout << "config_creating reason=missing_file" << endl;
-    }
-
-    ServerConfig defaultConfig = GetDefaultConfig();
-
-    if (currentJson.contains("client_ports")) {
-        if (currentJson["client_ports"].contains("start"))
-            defaultConfig.client_port_start = currentJson["client_ports"]["start"];
-        if (currentJson["client_ports"].contains("end"))
-            defaultConfig.client_port_end = currentJson["client_ports"]["end"];
-    }
-    if (!generateKeys) {
-        if (currentJson.contains("encryption")) {
-            if (currentJson["encryption"].contains("xor_key"))
-                defaultConfig.xorKeyBase64 = currentJson["encryption"]["xor_key"];
-            if (currentJson["encryption"].contains("swap_key"))
-                defaultConfig.swapKeyBase64 = currentJson["encryption"]["swap_key"];
-        }
-    }
-    if (currentJson.contains("interface"))
-        defaultConfig.interface = currentJson["interface"];
-    if (currentJson.contains("log_level")) {
-        string levelStr = currentJson["log_level"];
-        if (levelStr == "error") defaultConfig.log_level = LOGGER_LEVEL_ERROR;
-        else if (levelStr == "warning") defaultConfig.log_level = LOGGER_LEVEL_WARNING;
-        else if (levelStr == "info") defaultConfig.log_level = LOGGER_LEVEL_INFO;
-        else if (levelStr == "debug") defaultConfig.log_level = LOGGER_LEVEL_DEBUG;
-        else defaultConfig.log_level = LOGGER_LEVEL_NONE;
-    }
-    if (currentJson.contains("dns_server")) {
-        string dns = currentJson["dns_server"];
-        defaultConfig.dns_server = inet_addr(dns.c_str());
-    }
-
-    json newConfig;
-    newConfig["log_level"] =
-        (defaultConfig.log_level == LOGGER_LEVEL_ERROR) ? "error" :
-        (defaultConfig.log_level == LOGGER_LEVEL_WARNING) ? "warning" :
-        (defaultConfig.log_level == LOGGER_LEVEL_INFO) ? "info" :
-        (defaultConfig.log_level == LOGGER_LEVEL_DEBUG) ? "debug" : "none";
-
-    newConfig["client_ports"]["start"] = defaultConfig.client_port_start;
-    newConfig["client_ports"]["end"] = defaultConfig.client_port_end;
-    newConfig["encryption"]["xor_key"] = defaultConfig.xorKeyBase64;
-    newConfig["encryption"]["swap_key"] = defaultConfig.swapKeyBase64;
-    newConfig["interface"] = defaultConfig.interface;
-    struct in_addr addr;
-    addr.s_addr = defaultConfig.dns_server;
-    char* ip_str = inet_ntoa(addr);
-    string dns_string(ip_str);
-    newConfig["dns_server"] = dns_string;
-
-    size_t lastSlash = configPath.find_last_of('/');
-    if (lastSlash != string::npos) {
-        string dir = configPath.substr(0, lastSlash);
-        if (!CreateDirectory(dir)) {
-            cerr << "directory_create_failed path=" << LogValue(dir) << endl;
-            return false;
-        }
-    }
-
-    ofstream ofs(configPath);
-    if (!ofs.is_open()) {
-        cerr << "config_write_failed path=" << LogValue(configPath) << endl;
-        return false;
-    }
-    ofs << newConfig.dump(4, ' ', false, json::error_handler_t::ignore);
-    cout << "config_written path=" << LogValue(configPath) << endl;
-    return true;
-}
-
 int main(int argc, char* argv[]) {
-    signal(SIGINT, signalHandler);
-    signal(SIGTERM, signalHandler);
-
-    string configPath = "/etc/miga/config.json";
-
-    for (int i = 1; i < argc; i++) {
-        string arg = argv[i];
-        if (string(argv[i]) == "--generate-keys") {
-            if (!UpdateConfigFile(configPath, true)) return 1;
-            return 0;
-        }
-        if (arg == "--update") {
-            if (!UpdateConfigFile(configPath, false)) return 1;
-            return 0;
-        }
-        if (arg == "--version") {
-            cout << VERSION << endl;
-            return 0;
-        }
+    std::signal(SIGINT, signalHandler);
+    std::signal(SIGTERM, signalHandler);
+    std::string configPath = "/etc/miga/config.json";
+    for (int i = 1; i + 1 < argc; ++i)
+        if (std::string(argv[i]) == "--config") configPath = argv[i + 1];
+    if (argc > 1 && (std::string(argv[1]) == "client" || std::string(argv[1]) == "settings"))
+        return miga::v2::V2Server::Admin(argc, argv, configPath);
+    for (int i = 1; i < argc; ++i) {
+        const std::string arg = argv[i];
+        if (arg == "--config" && i + 1 < argc) { ++i; continue; }
+        if (arg == "--version") { std::cout << ServerVersion << std::endl; return 0; }
         if (arg == "--help") {
-            cout << "M.I.G.A. Server\n"
-                << "Usage:\n"
-                << "  ./miga_server [options]\n\n"
-                << "Options:\n"
-                << "  --generate-keys     Generate new keys\n"
-                << "  --update            Update config file to current version (preserve existing values)\n"
-                << "  --version           Show version\n"
-                << "  --help              Show this help\n";
+            std::cout << "M.I.G.A. Server (protocol 2)\n"
+                "Usage: miga_server [--config PATH] [--version|--help]\n"
+                "Administration: miga_server client ... | settings ...\n"
+                "Client list: miga_server client list [--page [--after ID]] [--json]\n";
             return 0;
         }
-    }
-
-    ServerCore server;
-
-    if (!server.Initialize(configPath)) {
-        cerr << "server_init_failed" << endl;
+        std::cerr << "argument_invalid" << std::endl;
         return 1;
     }
-
-    server.Start();
-    cout << "server_running stop_action=ctrl_c" << endl;
-
-    while (g_running) {
-        pause();
+    miga::v2::V2Server server;
+    if (!server.Initialize(configPath)) {
+        std::cerr << "server_init_failed protocol=2" << std::endl;
+        return 1;
     }
-
-    server.Stop();
-    cout << "server_stopped" << endl;
-
+    server.Run(g_running);
     return 0;
 }

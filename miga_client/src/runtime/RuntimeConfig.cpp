@@ -1,7 +1,7 @@
 #include "runtime/RuntimeConfig.h"
 
 namespace miga::runtime {
-Transport::~Transport() { if (reservation != INVALID_SOCKET) closesocket(reservation); }
+Transport::~Transport() { if (session) session->Stop(); if (reservation != INVALID_SOCKET) closesocket(reservation); }
 
 void Configuration::Index() {
     processes.clear(); transports.clear(); inboundPorts.clear();
@@ -34,9 +34,12 @@ const Server* Configuration::ById(size_t id) const {
     return found == transports.end() ? nullptr : &servers[found->second];
 }
 
+bool PrivateIpv4(uint32_t ip) {
+    return (ip >> 24) == 10 || (ip & 0xfff00000) == 0xac100000 || (ip >> 16) == 0xc0a8;
+}
+
 bool Local(uint32_t ip) {
-    return (ip >> 24) == 127 || (ip >> 24) == 10 || (ip & 0xfff00000) == 0xac100000 ||
-        (ip >> 16) == 0xc0a8 || (ip >> 16) == 0xa9fe || (ip >> 28) == 14 || ip == 0xffffffff;
+    return PrivateIpv4(ip) || (ip >> 24) == 127 || (ip >> 16) == 0xa9fe || (ip >> 28) == 14 || ip == 0xffffffff;
 }
 
 uint16_t Read16(const uint8_t* data) { return static_cast<uint16_t>((uint16_t(data[0]) << 8) | data[1]); }

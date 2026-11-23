@@ -1,26 +1,38 @@
 package org.miga.android
 
 import org.json.JSONObject
+import java.io.InputStream
+import java.util.Base64
 
-internal data class ServerQr(val address: String, val firstPort: Int, val lastPort: Int,
-                             val xor: String, val swap: String)
+internal data class ServerQr(val address: String, val firstPort: Int, val lastPort: Int, val invitation: String)
+
+internal fun readInvitationFile(input: InputStream): ServerQr {
+    val bytes = ByteArray(16384 + 1)
+    var length = 0
+    while (length < bytes.size) {
+        val read = input.read(bytes, length, bytes.size - length)
+        if (read < 0) break
+        length += read
+    }
+    require(length < bytes.size) { "Файл приглашения слишком большой" }
+    return parseServerQr(bytes.decodeToString(endIndex = length, throwOnInvalidSequence = true).removePrefix("\uFEFF").trim())
+}
 
 internal fun parseServerQr(text: String): ServerQr {
-    require(text.length <= 4096) { "QR-код слишком длинный" }
-    val root = try { JSONObject(text) }
-        catch (_: Exception) { throw IllegalArgumentException("Это не QR-код сервера M.I.G.A.") }
-    require(root.optString("type") == "miga-server" && root.optInt("version") == 1) {
-        "Это не QR-код сервера M.I.G.A."
+    require(text.length <= 4096 && text.startsWith("miga2:")) { "Требуется приглашение miga2:" }
+    val encoded = text.substring(6)
+    require(encoded.matches(Regex("[A-Za-z0-9_-]+"))) { "Неверное приглашение" }
+    val bytes = Base64.getUrlDecoder().decode(encoded)
+    require(Base64.getUrlEncoder().withoutPadding().encodeToString(bytes) == encoded) { "Неверное приглашение" }
+    val root = JSONObject(bytes.toString(Charsets.UTF_8))
+    require(root.keys().asSequence().toSet() == setOf("v", "host", "ports", "server_key", "server_secret", "client_id", "client_secret") && root.get("v") == 2) { "Неверный формат приглашения" }
+    for ((field, size) in listOf("server_key" to 32, "server_secret" to 32, "client_id" to 16, "client_secret" to 32)) {
+        val value = root.getString(field)
+        val decoded = Base64.getUrlDecoder().decode(value)
+        require(decoded.size == size && Base64.getUrlEncoder().withoutPadding().encodeToString(decoded) == value) { "Неверное приглашение" }
     }
-    val ports = root.optJSONArray("ports") ?: throw IllegalArgumentException("Не указан диапазон портов")
-    require(ports.length() == 2) { "Неверный диапазон портов" }
-    val address = root.getString("address")
-    val first = ports.getInt(0)
-    val last = ports.getInt(1)
-    val endpoint = SessionValidator.endpoint(address, first.toString(), last.toString())
-    val xor = root.getString("xor")
-    val swap = root.getString("swap")
-    SessionValidator.keyBase64(xor, 128)
-    SessionValidator.keyBase64(swap, 8)
-    return ServerQr(endpoint.first, endpoint.second, endpoint.third, xor, swap)
+    val ports = root.getJSONArray("ports")
+    require(ports.length() == 2 && ports.get(0) is Int && ports.get(1) is Int && ports.getInt(0) >= 1024) { "Неверный диапазон управления" }
+    val endpoint = SessionValidator.endpoint(root.getString("host"), ports.getInt(0).toString(), ports.getInt(1).toString())
+    return ServerQr(endpoint.first, endpoint.second, endpoint.third, text)
 }

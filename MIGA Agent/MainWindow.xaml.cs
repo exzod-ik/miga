@@ -1,6 +1,8 @@
 ﻿using System.ComponentModel;
+using System.Diagnostics;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Navigation;
 using MIGA_Agent.ViewModels;
 using MIGA_Agent.Services;
 
@@ -22,12 +24,28 @@ namespace MIGA_Agent.Views
             DataContext = viewModel; // Устанавливаем контекст данных
         }
 
-        private void ShareServer_Click(object sender, RoutedEventArgs e)
+
+
+        private void ServerTabs_SelectionChanged(object sender, SelectionChangedEventArgs e)
         {
-            if (sender is Button { ContextMenu: { } menu } button)
+            if (sender is not TabControl tabs || e.OriginalSource != tabs) return;
+            _ = Dispatcher.InvokeAsync(() =>
             {
-                menu.PlacementTarget = button;
-                menu.IsOpen = true;
+                if (tabs.SelectedItem is { } item && tabs.ItemContainerGenerator.ContainerFromItem(item) is TabItem tab)
+                    tab.BringIntoView();
+            }, System.Windows.Threading.DispatcherPriority.Loaded);
+        }
+
+        private void ProjectLink_RequestNavigate(object sender, RequestNavigateEventArgs e)
+        {
+            e.Handled = true;
+            try
+            {
+                Process.Start(new ProcessStartInfo(e.Uri.AbsoluteUri) { UseShellExecute = true })?.Dispose();
+            }
+            catch (Win32Exception)
+            {
+                _notificationCenter.Show("GitHub", "Не удалось открыть ссылку в браузере.", NotificationKind.Error);
             }
         }
 
@@ -49,10 +67,17 @@ namespace MIGA_Agent.Views
             {
                 e.Cancel = true;
 
-                if (await vm.ConfirmClosingAsync())
+                try
                 {
-                    _forceClose = true;
-                    Close();
+                    if (await vm.ConfirmClosingAsync())
+                    {
+                        _forceClose = true;
+                        _ = Dispatcher.BeginInvoke(new System.Action(Close));
+                    }
+                }
+                catch (Exception error)
+                {
+                    _notificationCenter.Show("Ошибка сохранения", $"Не удалось сохранить конфигурацию: {error.Message}", NotificationKind.Error);
                 }
             }
         }

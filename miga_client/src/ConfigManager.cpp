@@ -1,5 +1,6 @@
 #include <ws2tcpip.h>
 #include "ConfigManager.h"
+#include "ProtocolProfiles.h"
 
 using namespace std;
 
@@ -23,8 +24,9 @@ bool ServerConfig::IsDomainRedirect(std::string domain) const {
     return false;
 }
 
-ConfigManager::ConfigManager(Logger* logger)
+ConfigManager::ConfigManager(Logger* logger, std::function<bool(const std::string&, miga::v2::Invitation&)> loadProfile)
     : m_Logger(logger)
+    , loadProfile_(loadProfile ? std::move(loadProfile) : ProtocolProfiles::Load)
     , m_LogLevel(LOGGER_LEVEL_NONE) {
 }
 
@@ -108,31 +110,22 @@ bool ConfigManager::ParseDomainRules(const json& config, ServerConfig& server) {
 }
 
 bool ConfigManager::ParseServer(const json& serverJson, ServerConfig& server) {
-    if (!serverJson.contains("server_ip")) {
-        m_Logger->log(LOGGER_LEVEL_ERROR, "config_invalid reason=missing_field field=server_ip");
+    if (serverJson.value("protocol", 0) != 2 || serverJson.contains("encryption") || serverJson.contains("server_ports")) {
+        m_Logger->log(LOGGER_LEVEL_ERROR, "config_invalid reason=unsupported_protocol expected=2");
         return false;
     }
-
-    server.serverIP = serverJson["server_ip"];
-    m_Logger->log(LOGGER_LEVEL_INFO, "server_address_loaded ip=" + LogValue(server.serverIP));
-
-    if (serverJson.contains("server_ports")) {
-        server.portStart = serverJson["server_ports"]["start"];
-        server.portEnd = serverJson["server_ports"]["end"];
-        m_Logger->log(LOGGER_LEVEL_INFO, "server_ports_loaded range=" + to_string(server.portStart) + "-" + to_string(server.portEnd));
+    if (serverJson.contains("requires_invitation") && !serverJson["requires_invitation"].is_boolean()) return false;
+    if (serverJson.value("requires_invitation", false)) {
+        if (serverJson.contains("profile_id") && serverJson["profile_id"] != "") return false;
+        return ParseProcessRules(serverJson, server) && ParseIPRules(serverJson, server) && ParseDomainRules(serverJson, server);
     }
-
-    if (serverJson.contains("encryption")) {
-        server.xorKeyBase64 = serverJson["encryption"]["xor_key"];
-        server.swapKeyBase64 = serverJson["encryption"]["swap_key"];
-        m_Logger->log(LOGGER_LEVEL_INFO, "transform_keys_loaded");
-    }
-
-    if (!ParseProcessRules(serverJson, server)) return false;
-    if (!ParseIPRules(serverJson, server)) return false;
-    if (!ParseDomainRules(serverJson, server)) return false;
-
-    return true;
+    server.profileId = serverJson.value("profile_id", "");
+    miga::v2::Invitation invitation;
+    if (!miga::v2::Initialize() || !loadProfile_(server.profileId, invitation)) return false;
+    server.serverIP = invitation.host;
+    server.portStart = invitation.portStart;
+    server.portEnd = invitation.portEnd;
+    return ParseProcessRules(serverJson, server) && ParseIPRules(serverJson, server) && ParseDomainRules(serverJson, server);
 }
 
 bool ConfigManager::Load(const string& configPath) {
@@ -148,6 +141,14 @@ bool ConfigManager::Load(const string& configPath) {
 
         json config;
         configFile >> config;
+
+        const auto dnsResolver = config.find("dns_resolver_enabled");
+        if (dnsResolver != config.end() && !dnsResolver->is_boolean()) {
+            m_Logger->log(LOGGER_LEVEL_ERROR, "config_invalid field=dns_resolver_enabled expected=boolean");
+            return false;
+        }
+        const bool dnsResolverEnabled = dnsResolver == config.end() || dnsResolver->get<bool>();
+        auto loadedPath = configPath;
 
         uint16_t tunnelMaxMss = 1400;
         if (config.contains("tunnel_max_mss")) {
@@ -190,21 +191,48 @@ bool ConfigManager::Load(const string& configPath) {
         vector<ServerConfig> newServers;
         newServers.reserve(config["servers"].size());
 
+        bool invitationsPending = false;
         for (const auto& serverJson : config["servers"]) {
+            const auto enabled = serverJson.find("enabled");
+            if (enabled != serverJson.end() && !enabled->is_boolean()) {
+                m_Logger->log(LOGGER_LEVEL_ERROR, "config_invalid field=enabled expected=boolean");
+                return false;
+            }
+            if (enabled != serverJson.end() && !enabled->get<bool>()) continue;
             ServerConfig server;
             if (!ParseServer(serverJson, server))
                 return false;
+            invitationsPending = invitationsPending || serverJson.value("requires_invitation", false);
             newServers.push_back(move(server));
         }
 
-        if (newServers.empty()) {
-            m_Logger->log(LOGGER_LEVEL_ERROR, "config_invalid reason=no_servers");
+        if (config.value("protocol", 0) != 2) {
+            m_Logger->log(LOGGER_LEVEL_ERROR, "config_invalid reason=unsupported_protocol expected=2");
             return false;
         }
 
+        const auto routingMode = config.value("routing_mode", std::string("split"));
+        auto fullProfileId = config.value("full_routing_profile_id", std::string());
+        if ((routingMode != "split" && routingMode != "full") ||
+            (routingMode == "split" && !fullProfileId.empty()) ||
+            (routingMode == "full" && (fullProfileId.empty() || invitationsPending ||
+                std::count_if(newServers.begin(), newServers.end(), [&](const auto& server) {
+                    return server.profileId == fullProfileId;
+                }) != 1))) {
+            m_Logger->log(LOGGER_LEVEL_ERROR, "config_invalid reason=invalid_routing_mode_or_profile");
+            return false;
+        }
+
+        if (invitationsPending) {
+            newServers.clear();
+            m_Logger->log(LOGGER_LEVEL_WARNING, "config_pending_invitation forwarding=disabled");
+        }
         m_LogLevel = logLevel;
         m_Servers = move(newServers);
         m_TunnelMaxMss = tunnelMaxMss;
+        m_FullRoutingProfileId = std::move(fullProfileId);
+        m_DnsResolverEnabled = dnsResolverEnabled && m_FullRoutingProfileId.empty() && !m_Servers.empty();
+        m_ConfigPath = std::move(loadedPath);
 
         m_Logger->log(LOGGER_LEVEL_INFO, "config_loaded server_count=" +
             to_string(m_Servers.size()));
@@ -246,8 +274,7 @@ void IPRule::Normalize() {
 }
 
 bool ServerConfig::SameTransport(const ServerConfig& other) const {
-    return serverIP == other.serverIP && portStart == other.portStart && portEnd == other.portEnd &&
-        xorKeyBase64 == other.xorKeyBase64 && swapKeyBase64 == other.swapKeyBase64;
+    return profileId == other.profileId && serverIP == other.serverIP && portStart == other.portStart && portEnd == other.portEnd;
 }
 
 const std::vector<ServerConfig>& ConfigManager::GetServers() const { return m_Servers; }

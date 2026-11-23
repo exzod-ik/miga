@@ -5,12 +5,15 @@
 
 typedef BOOL (WINAPI *DnsFlushResolverCacheFn)();
 
-static void FlushDnsCache() {
+bool ServiceManager::FlushDnsCache() {
     HMODULE hDns = LoadLibraryW(L"Dnsapi.dll");
-    if (!hDns) return;
+    if (!hDns) return false;
     auto fn = reinterpret_cast<DnsFlushResolverCacheFn>(GetProcAddress(hDns, "DnsFlushResolverCache"));
-    if (fn) fn();
+    const bool flushed = fn && fn();
+    const auto error = flushed ? ERROR_SUCCESS : GetLastError();
     FreeLibrary(hDns);
+    SetLastError(error);
+    return flushed;
 }
 
 using namespace std;
@@ -162,8 +165,6 @@ void WINAPI ServiceManager::ServiceMain(DWORD argc, LPWSTR* argv) {
         SetServiceStatus(m_StatusHandle, &m_Status);
         return;
     }
-
-    FlushDnsCache();
 
     m_Status.dwCurrentState = SERVICE_RUNNING;
     m_Status.dwCheckPoint = 0;

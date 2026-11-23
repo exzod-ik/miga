@@ -4,7 +4,7 @@
         xmlns:helpers="clr-namespace:MIGA_Agent.Helpers"
         xmlns:services="clr-namespace:MIGA_Agent.Services"
         Title="{Binding WindowTitle}"
-        Height="880" Width="1200"
+        Height="650" Width="1060" MinHeight="645" MinWidth="855"
         Icon="/Icon.ico"
         WindowStartupLocation="CenterScreen">
     <Window.Resources>
@@ -27,29 +27,115 @@
                 </Setter.Value>
             </Setter>
         </Style>
-        <!-- Стиль элемента списка перенаправления: красный шрифт и подсказка при пересечении -->
+        <Style x:Key="RedirectHeadingStyle" TargetType="TextBlock">
+            <Setter Property="Foreground" Value="{DynamicResource TextFillColorPrimaryBrush}"/>
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding DataContext.CanEditRules, RelativeSource={RelativeSource AncestorType=Window}}" Value="False">
+                    <Setter Property="Foreground" Value="{DynamicResource TextFillColorDisabledBrush}"/>
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
         <Style x:Key="RedirectItemStyle" TargetType="ListBoxItem"
                BasedOn="{StaticResource {x:Type ListBoxItem}}">
             <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+            <Setter Property="IsEnabled"
+                    Value="{Binding DataContext.CanEditRules, RelativeSource={RelativeSource AncestorType=Window}}"/>
             <Style.Triggers>
                 <DataTrigger Binding="{Binding IsConflicting}" Value="True">
                     <Setter Property="Foreground" Value="Red"/>
                     <Setter Property="ToolTip" Value="{Binding ConflictTooltip}"/>
                 </DataTrigger>
+                <Trigger Property="IsEnabled" Value="False">
+                    <Setter Property="Foreground" Value="{DynamicResource TextFillColorDisabledBrush}"/>
+                </Trigger>
             </Style.Triggers>
         </Style>
+        <Style x:Key="RedirectListStyle" TargetType="ListBox" BasedOn="{StaticResource {x:Type ListBox}}">
+            <Setter Property="MinHeight" Value="60"/>
+            <Setter Property="MaxHeight" Value="Infinity"/>
+            <Setter Property="VirtualizingPanel.ScrollUnit" Value="Pixel"/>
+            <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Disabled"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Padding" Value="0"/>
+            <Setter Property="Margin" Value="0,0,0,5"/>
+            <Setter Property="ItemContainerStyle" Value="{StaticResource RedirectItemStyle}"/>
+            <Setter Property="ScrollViewer.CanContentScroll" Value="True"/>
+            <Setter Property="ContextMenuService.IsEnabled"
+                    Value="{Binding DataContext.CanEditRules, RelativeSource={RelativeSource AncestorType=Window}}"/>
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding DataContext.CanEditRules, RelativeSource={RelativeSource AncestorType=Window}}" Value="False">
+                    <Setter Property="Focusable" Value="False"/>
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+        <Style x:Key="RedirectActionsStyle" TargetType="StackPanel">
+            <Setter Property="Orientation" Value="Horizontal"/>
+            <Setter Property="IsEnabled"
+                    Value="{Binding DataContext.CanEditRules, RelativeSource={RelativeSource AncestorType=Window}}"/>
+            <Setter Property="Margin" Value="0,0,0,5"/>
+        </Style>
+        <Style x:Key="RedirectButtonStyle" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+            <Setter Property="Padding" Value="10,5"/>
+            <Setter Property="HorizontalContentAlignment" Value="Center"/>
+            <Setter Property="VerticalContentAlignment" Value="Center"/>
+            <Setter Property="Margin" Value="0,0,6,0"/>
+        </Style>
+        <DataTemplate x:Key="RedirectRuleTemplate">
+            <TextBlock Text="{Binding Value}" TextWrapping="Wrap"/>
+        </DataTemplate>
     </Window.Resources>
 
     <Grid Margin="10" TextElement.Foreground="{DynamicResource TextFillColorPrimaryBrush}">
         <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
             <RowDefinition Height="1*"/>
+            <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
-        <!-- ВКЛАДКИ СЕРВЕРОВ (+ кнопка добавления в ряду заголовков) -->
-        <TabControl Grid.Row="0" Margin="0,0,0,10"
+        <WrapPanel Grid.Row="0" Margin="0,0,0,10">
+            <StackPanel Margin="0,0,16,0">
+                <Label Content="Режим перенаправления" Target="{Binding ElementName=RoutingModeBox}" Padding="0,0,0,4"/>
+                <ComboBox x:Name="RoutingModeBox" MinWidth="224" SelectedValuePath="Tag"
+                          SelectedValue="{Binding RoutingMode}">
+                    <ComboBoxItem Content="Раздельный (рекомендуемый)" Tag="split"/>
+                    <ComboBoxItem Content="Полный" Tag="full"/>
+                </ComboBox>
+            </StackPanel>
+            <StackPanel IsEnabled="{Binding IsFullRouting}">
+                <Label Content="Сервер перенаправления" Target="{Binding ElementName=RoutingServerBox}" Padding="0,0,0,4"/>
+                <ComboBox x:Name="RoutingServerBox" Width="280" ItemsSource="{Binding Servers}"
+                          SelectedItem="{Binding FullRoutingServer}"
+                          IsSynchronizedWithCurrentItem="False">
+                    <ComboBox.ToolTip>
+                        <TextBlock Text="{Binding FullRoutingServer.DisplayName}" MaxWidth="360" TextWrapping="Wrap"/>
+                    </ComboBox.ToolTip>
+                    <ComboBox.ItemTemplate>
+                        <DataTemplate>
+                            <TextBlock Text="{Binding DisplayName}" MaxWidth="250" TextTrimming="CharacterEllipsis">
+                                <TextBlock.ToolTip>
+                                    <TextBlock Text="{Binding DisplayName}" MaxWidth="360" TextWrapping="Wrap"/>
+                                </TextBlock.ToolTip>
+                            </TextBlock>
+                        </DataTemplate>
+                    </ComboBox.ItemTemplate>
+                    <ComboBox.ItemContainerStyle>
+                        <Style TargetType="ComboBoxItem">
+                            <Setter Property="IsEnabled" Value="{Binding CanUseForFullRouting}"/>
+                        </Style>
+                    </ComboBox.ItemContainerStyle>
+                </ComboBox>
+            </StackPanel>
+            <CheckBox Content="Встроенный DNS-резолвер" IsChecked="{Binding DnsResolverEnabled}"
+                      IsEnabled="{Binding CanEditRules}"
+                      ToolTip="Выдаёт виртуальные IPv4 из 198.18.0.0/15 для выбора DNS по маршруту приложения. Для сетей, использующих этот диапазон, оставьте настройку выключенной."
+                      Margin="16,0,0,0" VerticalAlignment="Bottom" VerticalContentAlignment="Center" Padding="8,0,0,0"/>
+        </WrapPanel>
+
+        <TabControl Grid.Row="1" Margin="0,0,0,10"
                     ItemsSource="{Binding Servers}"
-                    SelectedItem="{Binding SelectedServer}">
+                    SelectedItem="{Binding SelectedServer}"
+                    SelectionChanged="ServerTabs_SelectionChanged">
             <TabControl.Template>
                 <ControlTemplate TargetType="TabControl">
                     <Grid KeyboardNavigation.TabNavigation="Local">
@@ -57,19 +143,17 @@
                             <RowDefinition Height="Auto"/>
                             <RowDefinition Height="*"/>
                         </Grid.RowDefinitions>
-                        <StackPanel Grid.Row="0" Orientation="Horizontal">
-                            <TabPanel IsItemsHost="True" Margin="0,0,8,0"/>
-                            <Button Content="+ Добавить сервер"
-                                    Command="{Binding AddServerCommand}"
-                                    VerticalAlignment="Center"
-                                    Padding="8,4" Margin="0,3,8,0"/>
-                            <Button Content="Загрузить из файла"
-                                    Command="{Binding ImportServerFileCommand}"
-                                    VerticalAlignment="Center"
-                                    Padding="8,4" Margin="0,3,0,0"/>
-                        </StackPanel>
+                        <DockPanel Grid.Row="0">
+                            <Button DockPanel.Dock="Right" Content="+ Добавить подключение"
+                                    Command="{Binding AddServerCommand}" VerticalAlignment="Top"
+                                    Padding="12,5" Margin="8,2,0,0"/>
+                            <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled"
+                                          Focusable="False" PanningMode="HorizontalOnly">
+                                <TabPanel IsItemsHost="True"/>
+                            </ScrollViewer>
+                        </DockPanel>
                         <Border Grid.Row="1">
-                            <ContentPresenter ContentSource="SelectedContent"/>
+                            <ContentPresenter x:Name="PART_SelectedContentHost" ContentSource="SelectedContent"/>
                         </Border>
                     </Grid>
                 </ControlTemplate>
@@ -77,273 +161,266 @@
 
             <TabControl.ItemTemplate>
                 <DataTemplate>
-                    <TextBlock Text="{Binding DisplayName}" Margin="5,0"/>
+                    <DockPanel MaxWidth="196" Margin="5,0">
+                        <DockPanel.ToolTip>
+                            <TextBlock Text="{Binding TabTitle}" MaxWidth="360" TextWrapping="Wrap"/>
+                        </DockPanel.ToolTip>
+                        <TextBlock DockPanel.Dock="Right" Text=" · отключён">
+                            <TextBlock.Style>
+                                <Style TargetType="TextBlock">
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding Enabled}" Value="True">
+                                            <Setter Property="Visibility" Value="Collapsed"/>
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </TextBlock.Style>
+                        </TextBlock>
+                        <TextBlock Text="{Binding DisplayName}" TextTrimming="CharacterEllipsis"/>
+                    </DockPanel>
                 </DataTemplate>
             </TabControl.ItemTemplate>
 
             <TabControl.ContentTemplate>
                 <DataTemplate>
-                    <!-- Рамка визуально отделяет содержимое сервера от остальных элементов -->
-                    <Border BorderBrush="#80808080" BorderThickness="1" CornerRadius="4" Margin="4">
-                        <ScrollViewer VerticalScrollBarVisibility="Auto">
-                        <Grid Margin="5">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="385"/>
-                                <ColumnDefinition Width="1*"/>
-                            </Grid.ColumnDefinitions>
+                    <Border Style="{StaticResource TabPageFrame}" Padding="12">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="*"/>
+                            </Grid.RowDefinitions>
 
-                            <!-- ЛЕВАЯ КОЛОНКА: настройки сервера -->
-                            <StackPanel Grid.Column="0" Margin="0,0,10,0">
+                            <Grid Margin="0,0,0,8">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="2*"/>
+                                    <ColumnDefinition Width="3*"/>
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Margin="0,0,16,0">
+                                    <Label Content="Название подключения" Target="{Binding ElementName=ConnectionNameBox}" Padding="0,0,0,4"/>
+                                    <TextBox x:Name="ConnectionNameBox" Text="{Binding ConnectionName, UpdateSourceTrigger=PropertyChanged}"/>
+                                </StackPanel>
+                                <DockPanel Grid.Column="1" VerticalAlignment="Bottom">
+                                    <Button DockPanel.Dock="Right" Command="{Binding CheckProtocolV2StatusCommand}"
+                                            Style="{StaticResource RefreshButtonStyle}" IsEnabled="{Binding IsNotBusy}"
+                                            ToolTip="Обновить статус туннеля" AutomationProperties.Name="Обновить статус туннеля"/>
+                                    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
+                                                  MaxHeight="54" VerticalAlignment="Center" Margin="0,0,8,0">
+                                        <TextBlock Text="{Binding DisplayedConnectionStatus}" TextWrapping="Wrap"
+                                                   Foreground="{DynamicResource TextFillColorPrimaryBrush}"/>
+                                    </ScrollViewer>
+                                </DockPanel>
+                            </Grid>
 
-                                <GroupBox Header="Настройки сервера">
-                                    <StackPanel Margin="5">
-
-                                        <!-- Server IP -->
-                                        <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
-                                            <TextBlock Text="Server IP:" Width="80" VerticalAlignment="Center"/>
-                                            <TextBox Text="{Binding ServerIp, UpdateSourceTrigger=PropertyChanged}" IsEnabled="{Binding IsNotBusy}" Width="263"/>
-                                        </StackPanel>
-
-                                        <!-- SSH + статус демона -->
-                                        <StackPanel Margin="0,0,0,10">
-                                            <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
-                                                <TextBlock Text="Username:" Width="80" VerticalAlignment="Center"/>
-                                                <TextBox Text="{Binding ServerSshUser}" IsEnabled="{Binding IsNotBusy}" Width="263"/>
-                                            </StackPanel>
-                                            <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
-                                                <TextBlock Text="Password:" Width="80" VerticalAlignment="Center"/>
-                                                <PasswordBox IsEnabled="{Binding IsNotBusy}" Width="263"
-                                                             helpers:PasswordBoxAssistant.BindPassword="true"
-                                                             helpers:PasswordBoxAssistant.BoundPassword="{Binding ServerSshPassword, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"/>
-                                            </StackPanel>
-                                            <Grid Width="343" HorizontalAlignment="Left" Margin="0,5,0,0">
-                                                <Grid.ColumnDefinitions>
-                                                    <ColumnDefinition Width="Auto"/>
-                                                    <ColumnDefinition Width="Auto"/>
-                                                    <ColumnDefinition Width="*"/>
-                                                    <ColumnDefinition Width="Auto"/>
-                                                </Grid.ColumnDefinitions>
-                                                <Button Grid.Column="0" Content="{Binding SshButtonText}" Command="{Binding ToggleSshCommand}" IsEnabled="{Binding IsNotBusy}" Width="120" Margin="0,0,10,0" Padding="5"/>
-                                                <TextBlock Grid.Column="1" Text="Статус:" VerticalAlignment="Center" Margin="0,0,5,0"/>
-                                                <TextBlock Grid.Column="2" Text="{Binding ServerDemoStatus}" VerticalAlignment="Center" Margin="0,0,10,0"/>
-                                                <Button Grid.Column="3" Command="{Binding RefreshServerDemoStatusCommand}" Style="{StaticResource RefreshButtonStyle}" ToolTip="Обновить статус демона" AutomationProperties.Name="Обновить статус демона" IsEnabled="{Binding IsSshConnected}"/>
-                                            </Grid>
-                                        </StackPanel>
-
-                                        <!-- Управление сервером и обмен его настройками -->
-                                        <StackPanel Orientation="Horizontal" Width="343" HorizontalAlignment="Left">
-                                            <Button Content="{Binding DynamicDemoButtonText}" Command="{Binding DynamicDemoCommand}"
-                                                    Width="220" Padding="5" IsEnabled="{Binding IsSshConnected}" Margin="0,0,7,0"/>
-                                            <Button Content="Поделиться ▾" Width="116" Padding="5" Click="ShareServer_Click"
-                                                    AutomationProperties.Name="Поделиться сервером"
-                                                    ToolTip="Адрес, порты и ключи сервера. Передавайте только доверенному получателю.">
-                                                <Button.ContextMenu>
-                                                    <ContextMenu Placement="Bottom"
-                                                                 DataContext="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource Self}}">
-                                                        <MenuItem Header="Показать QR-код" Command="{Binding ShareServerQrCommand}"/>
-                                                        <MenuItem Header="Сохранить в файл..." Command="{Binding ShareServerFileCommand}"/>
-                                                    </ContextMenu>
-                                                </Button.ContextMenu>
-                                            </Button>
-                                        </StackPanel>
-
-                                    </StackPanel>
-                                </GroupBox>
-
-                                <!-- Экспертные настройки (сворачиваемые, по умолчанию скрыты) -->
-                                <Expander Header="Экспертные настройки" Margin="0,10,0,10" IsExpanded="False">
-                                    <StackPanel Margin="10">
-                                        <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
-                                            <TextBlock Text="Log level:" Width="155" VerticalAlignment="Center"/>
-                                            <ComboBox ItemsSource="{Binding LogLevels}" SelectedItem="{Binding ServerLogLevel}" IsEnabled="{Binding IsSshConnected}" Width="250" VerticalAlignment="Center"/>
-                                        </StackPanel>
-
-                                        <!-- DNS сервер для перенаправления -->
-                                        <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
-                                            <TextBlock Text="DNS Server:" Width="155" VerticalAlignment="Center"/>
-                                            <TextBox Text="{Binding DnsServer}" IsEnabled="{Binding IsSshConnected}" Width="250"/>
-                                        </StackPanel>
-
-                                        <!-- Диапазоны портов -->
-                                        <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
-                                            <TextBlock Text="Client ports (start - end):" Width="155" VerticalAlignment="Center"/>
-                                            <TextBox Text="{Binding ServerPortsStart}" IsEnabled="{Binding IsSshConnected}" Width="80" Margin="0,0,5,0"/>
-                                            <TextBlock Text="-" Margin="0,0,5,0" VerticalAlignment="Center"/>
-                                            <TextBox Text="{Binding ServerPortsEnd}" IsEnabled="{Binding IsSshConnected}" Width="80"/>
-                                        </StackPanel>
-
-                                        <!-- Генерация ключей -->
-                                        <Button Content="Сгенерировать новые ключи" Command="{Binding GenerateKeysCommand}" IsEnabled="{Binding IsSshConnected}" Width="200" Padding="5" HorizontalAlignment="Left" Margin="0,10,0,0"/>
-                                    </StackPanel>
-                                </Expander>
-
-                                <!-- Удаление вкладки сервера -->
-                                <Button Content="Удалить сервер" Command="{Binding RemoveServerCommand}" Width="200" Padding="5" HorizontalAlignment="Left"/>
-
+                            <StackPanel Grid.Row="1" Margin="0,0,0,12">
+                                <CheckBox Content="Использовать сервер" IsChecked="{Binding Enabled}" Margin="0,0,0,8"/>
+                                <WrapPanel>
+                                    <Menu IsEnabled="{Binding IsNotBusy}" Margin="0,0,6,0" VerticalAlignment="Center">
+                                        <MenuItem Header="{Binding InvitationMenuTitle}" Padding="12,6" MinHeight="32">
+                                            <MenuItem Header="Файл" Command="{Binding ImportInvitationCommand}"/>
+                                            <MenuItem Header="Текст" Command="{Binding PasteInvitationCommand}"/>
+                                            <MenuItem Header="Изображение QR-кода" Command="{Binding ImportQrCommand}"/>
+                                        </MenuItem>
+                                    </Menu>
+                                    <Button Content="Поделиться" Command="{Binding ShareInvitationCommand}" IsEnabled="{Binding IsNotBusy}"
+                                            Padding="12,5" MinHeight="32" Margin="0,0,6,0"/>
+                                    <Button Content="Диагностика подключения" Command="{Binding OpenDiagnosticsCommand}"
+                                            Padding="12,5" MinHeight="32" Margin="0,0,6,0"/>
+                                    <Button Content="Удалить подключение" Command="{Binding RemoveServerCommand}"
+                                            Padding="12,5" MinHeight="32"/>
+                                </WrapPanel>
                             </StackPanel>
 
-                            <!-- ПРАВАЯ КОЛОНКА: перенаправление трафика -->
-                            <GroupBox Grid.Column="1" Header="Перенаправление трафика" Margin="10,0,0,0">
-                                <ScrollViewer VerticalScrollBarVisibility="Auto">
-                                    <StackPanel Margin="10">
-
-                                        <TextBlock Text="Процессы (имена исполняемых файлов)" FontWeight="Bold" Margin="0,0,0,5"/>
-                                        <ListBox x:Name="RedirectProcessesListBox" ItemsSource="{Binding RedirectProcesses}"
-                                                 ItemContainerStyle="{StaticResource RedirectItemStyle}"
-                                                 Height="140" Margin="0,0,0,5">
+                            <Grid Grid.Row="2">
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="*"/>
+                                </Grid.RowDefinitions>
+                                <TextBlock Text="Правила раздельного перенаправления" FontSize="17" FontWeight="SemiBold"
+                                           Margin="0,0,0,8" Style="{StaticResource RedirectHeadingStyle}"/>
+                                <Grid Grid.Row="1">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition/>
+                                        <ColumnDefinition/>
+                                        <ColumnDefinition/>
+                                    </Grid.ColumnDefinitions>
+                                    <Grid Grid.Column="0" Margin="0,0,10,0">
+                                        <Grid.RowDefinitions>
+                                            <RowDefinition Height="Auto"/>
+                                            <RowDefinition Height="*"/>
+                                            <RowDefinition Height="Auto"/>
+                                        </Grid.RowDefinitions>
+                                        <TextBlock Text="Процессы" TextWrapping="NoWrap" Margin="0,0,0,5" Style="{StaticResource RedirectHeadingStyle}"/>
+                                        <ListBox Grid.Row="1" x:Name="RedirectProcessesListBox" ItemsSource="{Binding RedirectProcesses}"
+                                                 Style="{StaticResource RedirectListStyle}" ItemTemplate="{StaticResource RedirectRuleTemplate}">
                                             <ListBox.ContextMenu>
                                                 <ContextMenu>
                                                     <MenuItem Header="Добавить" Command="{Binding AddProcessCommand}"/>
                                                     <MenuItem Header="Изменить" Command="{Binding EditProcessCommand}"/>
-                                                    <MenuItem Header="Удалить" Command="{Binding RemoveProcessCommand}" CommandParameter="{Binding SelectedItem, RelativeSource={RelativeSource AncestorType=ListBox}}"/>
+                                                    <MenuItem Header="Удалить" Command="{Binding RemoveProcessCommand}" CommandParameter="{Binding PlacementTarget.SelectedItem, RelativeSource={RelativeSource AncestorType=ContextMenu}}"/>
                                                 </ContextMenu>
                                             </ListBox.ContextMenu>
                                         </ListBox>
-                                        <WrapPanel Margin="0,0,0,5">
-                                            <Button Content="Добавить" Command="{Binding AddProcessCommand}" Width="85" Margin="0,0,5,0"/>
-                                            <Button Content="Изменить" Command="{Binding EditProcessCommand}" Width="85" Margin="0,0,5,0"/>
-                                            <Button Content="Удалить" Command="{Binding RemoveProcessCommand}" CommandParameter="{Binding SelectedItem, ElementName=RedirectProcessesListBox}" Width="85"/>
-                                        </WrapPanel>
-
-                                        <TextBlock Text="Доменные имена" FontWeight="Bold" Margin="0,5,0,5"/>
-                                        <ListBox x:Name="RedirectDomainsListBox" ItemsSource="{Binding RedirectDomains}"
-                                                 ItemContainerStyle="{StaticResource RedirectItemStyle}"
-                                                 Height="140" Margin="0,0,0,5">
+                                        <StackPanel Grid.Row="2" Style="{StaticResource RedirectActionsStyle}">
+                                            <Button Content="Добавить" Command="{Binding AddProcessCommand}" Style="{StaticResource RedirectButtonStyle}"/>
+                                            <Button Content="Изменить" Command="{Binding EditProcessCommand}" Style="{StaticResource RedirectButtonStyle}"/>
+                                            <Button Content="Удалить" Command="{Binding RemoveProcessCommand}" CommandParameter="{Binding SelectedItem, ElementName=RedirectProcessesListBox}" Style="{StaticResource RedirectButtonStyle}" Margin="0"/>
+                                        </StackPanel>
+                                    </Grid>
+                                    <Grid Grid.Column="1" Margin="0,0,10,0">
+                                        <Grid.RowDefinitions>
+                                            <RowDefinition Height="Auto"/>
+                                            <RowDefinition Height="*"/>
+                                            <RowDefinition Height="Auto"/>
+                                        </Grid.RowDefinitions>
+                                        <TextBlock Text="Доменные имена" TextWrapping="NoWrap" Margin="0,0,0,5" Style="{StaticResource RedirectHeadingStyle}"/>
+                                        <ListBox Grid.Row="1" x:Name="RedirectDomainsListBox" ItemsSource="{Binding RedirectDomains}"
+                                                 Style="{StaticResource RedirectListStyle}" ItemTemplate="{StaticResource RedirectRuleTemplate}">
                                             <ListBox.ContextMenu>
                                                 <ContextMenu>
                                                     <MenuItem Header="Добавить" Command="{Binding AddDomainCommand}"/>
                                                     <MenuItem Header="Изменить" Command="{Binding EditDomainCommand}"/>
-                                                    <MenuItem Header="Удалить" Command="{Binding RemoveDomainCommand}" CommandParameter="{Binding SelectedItem, RelativeSource={RelativeSource AncestorType=ListBox}}"/>
+                                                    <MenuItem Header="Удалить" Command="{Binding RemoveDomainCommand}" CommandParameter="{Binding PlacementTarget.SelectedItem, RelativeSource={RelativeSource AncestorType=ContextMenu}}"/>
                                                 </ContextMenu>
                                             </ListBox.ContextMenu>
                                         </ListBox>
-                                        <WrapPanel Margin="0,0,0,5">
-                                            <Button Content="Добавить" Command="{Binding AddDomainCommand}" Width="85" Margin="0,0,5,0"/>
-                                            <Button Content="Изменить" Command="{Binding EditDomainCommand}" Width="85" Margin="0,0,5,0"/>
-                                            <Button Content="Удалить" Command="{Binding RemoveDomainCommand}" CommandParameter="{Binding SelectedItem, ElementName=RedirectDomainsListBox}" Width="85"/>
-                                        </WrapPanel>
-
-                                        <TextBlock Text="IP адреса (IP или диапазоны)" FontWeight="Bold" Margin="0,5,0,5"/>
-                                        <ListBox x:Name="RedirectIpsListBox" ItemsSource="{Binding RedirectIps}"
-                                                 ItemContainerStyle="{StaticResource RedirectItemStyle}"
-                                                 Height="140" Margin="0,0,0,5">
+                                        <StackPanel Grid.Row="2" Style="{StaticResource RedirectActionsStyle}">
+                                            <Button Content="Добавить" Command="{Binding AddDomainCommand}" Style="{StaticResource RedirectButtonStyle}"/>
+                                            <Button Content="Изменить" Command="{Binding EditDomainCommand}" Style="{StaticResource RedirectButtonStyle}"/>
+                                            <Button Content="Удалить" Command="{Binding RemoveDomainCommand}" CommandParameter="{Binding SelectedItem, ElementName=RedirectDomainsListBox}" Style="{StaticResource RedirectButtonStyle}" Margin="0"/>
+                                        </StackPanel>
+                                    </Grid>
+                                    <Grid Grid.Column="2">
+                                        <Grid.RowDefinitions>
+                                            <RowDefinition Height="Auto"/>
+                                            <RowDefinition Height="*"/>
+                                            <RowDefinition Height="Auto"/>
+                                        </Grid.RowDefinitions>
+                                        <TextBlock Text="IP адреса (IP или диапазоны)" TextWrapping="NoWrap" Margin="0,0,0,5" Style="{StaticResource RedirectHeadingStyle}"/>
+                                        <ListBox Grid.Row="1" x:Name="RedirectIpsListBox" ItemsSource="{Binding RedirectIps}"
+                                                 Style="{StaticResource RedirectListStyle}" ItemTemplate="{StaticResource RedirectRuleTemplate}">
                                             <ListBox.ContextMenu>
                                                 <ContextMenu>
                                                     <MenuItem Header="Добавить" Command="{Binding AddIpCommand}"/>
                                                     <MenuItem Header="Изменить" Command="{Binding EditIpCommand}"/>
-                                                    <MenuItem Header="Удалить" Command="{Binding RemoveIpCommand}" CommandParameter="{Binding SelectedItem, RelativeSource={RelativeSource AncestorType=ListBox}}"/>
+                                                    <MenuItem Header="Удалить" Command="{Binding RemoveIpCommand}" CommandParameter="{Binding PlacementTarget.SelectedItem, RelativeSource={RelativeSource AncestorType=ContextMenu}}"/>
                                                 </ContextMenu>
                                             </ListBox.ContextMenu>
                                         </ListBox>
-                                        <WrapPanel Margin="0,0,0,5">
-                                            <Button Content="Добавить" Command="{Binding AddIpCommand}" Width="85" Margin="0,0,5,0"/>
-                                            <Button Content="Изменить" Command="{Binding EditIpCommand}" Width="85" Margin="0,0,5,0"/>
-                                            <Button Content="Удалить" Command="{Binding RemoveIpCommand}" CommandParameter="{Binding SelectedItem, ElementName=RedirectIpsListBox}" Width="85"/>
-                                        </WrapPanel>
-                                    </StackPanel>
-                                </ScrollViewer>
-                            </GroupBox>
-
+                                        <StackPanel Grid.Row="2" Style="{StaticResource RedirectActionsStyle}">
+                                            <Button Content="Добавить" Command="{Binding AddIpCommand}" Style="{StaticResource RedirectButtonStyle}"/>
+                                            <Button Content="Изменить" Command="{Binding EditIpCommand}" Style="{StaticResource RedirectButtonStyle}"/>
+                                            <Button Content="Удалить" Command="{Binding RemoveIpCommand}" CommandParameter="{Binding SelectedItem, ElementName=RedirectIpsListBox}" Style="{StaticResource RedirectButtonStyle}" Margin="0"/>
+                                        </StackPanel>
+                                    </Grid>
+                                </Grid>
+                            </Grid>
                         </Grid>
-                    </ScrollViewer>
                     </Border>
                 </DataTemplate>
             </TabControl.ContentTemplate>
         </TabControl>
 
-        <!-- НИЖНЯЯ ПАНЕЛЬ: применение конфигурации и управление службой -->
-        <WrapPanel Grid.Row="1" VerticalAlignment="Center">
-            <StackPanel Orientation="Horizontal" Margin="0,0,12,0">
-                <Button Content="Применить конфигурацию" Command="{Binding ApplyConfigurationCommand}" Width="205" Padding="5" Margin="0,0,12,0"/>
-                <TextBlock Text="Лог" VerticalAlignment="Center" Margin="0,0,6,0"/>
-                <ComboBox ItemsSource="{Binding LogLevels}" SelectedItem="{Binding LogLevel}"
-                          Width="90" VerticalAlignment="Center" Margin="0,0,12,0"
-                          ToolTip="Уровень логирования клиента" AutomationProperties.Name="Уровень логирования клиента"/>
-                <TextBlock Text="MSS" VerticalAlignment="Center" Margin="0,0,6,0"/>
-                <TextBox Text="{Binding TunnelMaxMss, UpdateSourceTrigger=PropertyChanged, ValidatesOnNotifyDataErrors=True}"
-                         Width="70" VerticalAlignment="Center" VerticalContentAlignment="Center"
-                         ToolTip="TCP MSS: целое число от 1 до 65535. По умолчанию 1400."
-                         AutomationProperties.Name="TCP MSS клиента"/>
-            </StackPanel>
-            <StackPanel Orientation="Horizontal">
-                <Separator Style="{StaticResource {x:Static ToolBar.SeparatorStyleKey}}" Margin="0,0,12,0"/>
-                <TextBlock Text="Служба MigaClient:" FontWeight="Bold" VerticalAlignment="Center" Margin="0,0,5,0"/>
-                <TextBlock Text="{Binding ServiceStatus}" FontWeight="Bold" FontSize="12" VerticalAlignment="Center" Margin="0,0,10,0" Width="128"/>
-                <Button Content="Запустить" Command="{Binding StartLocalServiceCommand}" Width="90" Margin="0,0,8,0" Padding="5"/>
-                <Button Content="Остановить" Command="{Binding StopLocalServiceCommand}" Width="95" Margin="0,0,8,0" Padding="5"/>
-                <Button Command="{Binding RefreshServiceStatusCommand}" Style="{StaticResource RefreshButtonStyle}"
-                        ToolTip="Обновить статус службы" AutomationProperties.Name="Обновить статус службы"/>
-            </StackPanel>
-        </WrapPanel>
+        <Grid Grid.Row="3">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <WrapPanel VerticalAlignment="Center">
+                <StackPanel Orientation="Horizontal" Margin="0,0,12,4">
+                    <Button Content="Применить конфигурацию" Command="{Binding ApplyConfigurationCommand}" Padding="10,5" Margin="0,0,8,0"/>
+                    <TextBlock Text="Лог" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                    <ComboBox ItemsSource="{Binding LogLevels}" SelectedItem="{Binding LogLevel}"
+                              Width="90" VerticalAlignment="Center" Margin="0,0,12,0"
+                              ToolTip="Уровень логирования клиента" AutomationProperties.Name="Уровень логирования клиента"/>
+                    <TextBlock Text="MSS" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                    <TextBox Text="{Binding TunnelMaxMss, UpdateSourceTrigger=PropertyChanged, ValidatesOnNotifyDataErrors=True}"
+                             Width="70" VerticalAlignment="Center" VerticalContentAlignment="Center"
+                             ToolTip="TCP MSS: целое число от 1 до 65535. По умолчанию 1400."
+                             AutomationProperties.Name="TCP MSS клиента"/>
+                </StackPanel>
+                <StackPanel Orientation="Horizontal">
+                    <Separator Style="{StaticResource {x:Static ToolBar.SeparatorStyleKey}}" Margin="0,0,12,0"/>
+                    <TextBlock Text="Служба MigaClient:" FontWeight="Bold" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                    <TextBlock Text="{Binding ServiceStatus}" FontWeight="Bold" FontSize="12" VerticalAlignment="Center" Margin="0,0,10,0"/>
+                    <Button Content="Запустить" Command="{Binding StartLocalServiceCommand}" MinWidth="90" Margin="0,0,8,0" Padding="10,5"/>
+                    <Button Content="Остановить" Command="{Binding StopLocalServiceCommand}" MinWidth="95" Margin="0,0,8,0" Padding="10,5"/>
+                    <Button Command="{Binding RefreshServiceStatusCommand}" Style="{StaticResource RefreshButtonStyle}"
+                            ToolTip="Обновить статус службы" AutomationProperties.Name="Обновить статус службы"/>
+                </StackPanel>
+            </WrapPanel>
+            <TextBlock Grid.Column="1" VerticalAlignment="Bottom" Margin="12,0,0,8">
+                <Hyperlink NavigateUri="https://github.com/exzod-ik/miga" RequestNavigate="ProjectLink_RequestNavigate">GitHub</Hyperlink>
+            </TextBlock>
+        </Grid>
 
-        <!-- Компактные уведомления поверх правого нижнего угла окна. -->
-        <ItemsControl x:Name="NotificationList" Grid.Row="0" Grid.RowSpan="2"
-                      HorizontalAlignment="Right" VerticalAlignment="Bottom"
-                      Width="350" Margin="0,0,12,12" Panel.ZIndex="10">
-            <ItemsControl.ItemTemplate>
-                <DataTemplate>
-                    <Border Background="#202630" BorderBrush="#49515E" BorderThickness="1"
-                            CornerRadius="12" Margin="0,8,0,0" ClipToBounds="True">
-                        <Border.Effect>
-                            <DropShadowEffect BlurRadius="16" ShadowDepth="3" Opacity="0.22"/>
-                        </Border.Effect>
-                        <Grid>
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="4"/>
-                                <ColumnDefinition Width="*"/>
-                            </Grid.ColumnDefinitions>
-                            <Border x:Name="Accent" Background="#75A7F5"/>
-                            <Grid Grid.Column="1" Margin="13,10,9,11">
+        <ScrollViewer Grid.Row="2" MaxHeight="76" VerticalScrollBarVisibility="Auto"
+                      HorizontalScrollBarVisibility="Disabled" PanningMode="VerticalOnly">
+            <ItemsControl x:Name="NotificationList">
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate>
+                        <Border Background="#202630" BorderBrush="#49515E" BorderThickness="1"
+                                CornerRadius="10" Margin="2,0,2,8" ClipToBounds="True">
+                            <Border.Effect>
+                                <DropShadowEffect BlurRadius="16" ShadowDepth="3" Opacity="0.22"/>
+                            </Border.Effect>
+                            <Grid>
                                 <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="28"/>
+                                    <ColumnDefinition Width="4"/>
                                     <ColumnDefinition Width="*"/>
-                                    <ColumnDefinition Width="28"/>
                                 </Grid.ColumnDefinitions>
-                                <TextBlock x:Name="Icon" Text="i" Foreground="#9AC1FF"
-                                           FontSize="17" FontWeight="Bold" VerticalAlignment="Top"
-                                           HorizontalAlignment="Center"/>
-                                <StackPanel Grid.Column="1">
-                                    <TextBlock Text="{Binding Title}" Foreground="#F7F9FC"
-                                               FontWeight="SemiBold" FontSize="13"/>
-                                    <TextBlock Text="{Binding Message}" Foreground="#D1D8E1"
-                                               FontSize="12" TextWrapping="Wrap" TextTrimming="CharacterEllipsis"
-                                               MaxHeight="80" ToolTip="{Binding Message}" Margin="0,3,0,0"/>
-                                    <ProgressBar x:Name="OperationProgress" IsIndeterminate="True"
-                                                 Height="3" Margin="0,10,0,0" Visibility="Collapsed"/>
-                                </StackPanel>
-                                <Button x:Name="DismissButton" Grid.Column="2" Content="×" Width="26" Height="26"
-                                        Padding="0" VerticalAlignment="Top"
-                                        ToolTip="Закрыть уведомление"
-                                        AutomationProperties.Name="Закрыть уведомление"
-                                        Click="DismissNotification_Click"/>
+                                <Border x:Name="Accent" Background="#75A7F5"/>
+                                <Grid Grid.Column="1" Margin="13,10,9,11">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="28"/>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="28"/>
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock x:Name="Icon" Text="i" Foreground="#9AC1FF"
+                                               FontSize="17" FontWeight="Bold" VerticalAlignment="Top"
+                                               HorizontalAlignment="Center"/>
+                                    <StackPanel Grid.Column="1">
+                                        <TextBlock Text="{Binding Title}" Foreground="#F7F9FC"
+                                                   FontWeight="SemiBold" FontSize="13" TextWrapping="Wrap"/>
+                                        <TextBlock Text="{Binding Message}" Foreground="#D1D8E1"
+                                                   FontSize="12" TextWrapping="Wrap" Margin="0,3,0,0"/>
+                                        <ProgressBar x:Name="OperationProgress" IsIndeterminate="True"
+                                                     Height="3" Margin="0,10,0,0" Visibility="Collapsed"/>
+                                    </StackPanel>
+                                    <Button x:Name="DismissButton" Grid.Column="2" Content="×" Width="26" Height="26"
+                                            Padding="0" VerticalAlignment="Top"
+                                            ToolTip="Закрыть уведомление"
+                                            AutomationProperties.Name="Закрыть уведомление"
+                                            Click="DismissNotification_Click"/>
+                                </Grid>
                             </Grid>
-                        </Grid>
-                    </Border>
-                    <DataTemplate.Triggers>
-                        <DataTrigger Binding="{Binding Kind}" Value="{x:Static services:NotificationKind.Warning}">
-                            <Setter TargetName="Accent" Property="Background" Value="#F3B75E"/>
-                            <Setter TargetName="Icon" Property="Text" Value="!"/>
-                            <Setter TargetName="Icon" Property="Foreground" Value="#F3B75E"/>
-                        </DataTrigger>
-                        <DataTrigger Binding="{Binding Kind}" Value="{x:Static services:NotificationKind.Error}">
-                            <Setter TargetName="Accent" Property="Background" Value="#EF7D83"/>
-                            <Setter TargetName="Icon" Property="Text" Value="×"/>
-                            <Setter TargetName="Icon" Property="Foreground" Value="#EF7D83"/>
-                        </DataTrigger>
-                        <DataTrigger Binding="{Binding Kind}" Value="{x:Static services:NotificationKind.Success}">
-                            <Setter TargetName="Accent" Property="Background" Value="#70D2A0"/>
-                            <Setter TargetName="Icon" Property="Text" Value="✓"/>
-                            <Setter TargetName="Icon" Property="Foreground" Value="#70D2A0"/>
-                        </DataTrigger>
-                        <DataTrigger Binding="{Binding Kind}" Value="{x:Static services:NotificationKind.Progress}">
-                            <Setter TargetName="Accent" Property="Background" Value="#9AC1FF"/>
-                            <Setter TargetName="Icon" Property="Text" Value="…"/>
-                            <Setter TargetName="OperationProgress" Property="Visibility" Value="Visible"/>
-                            <Setter TargetName="DismissButton" Property="Visibility" Value="Collapsed"/>
-                        </DataTrigger>
-                    </DataTemplate.Triggers>
-                </DataTemplate>
-            </ItemsControl.ItemTemplate>
-        </ItemsControl>
+                        </Border>
+                        <DataTemplate.Triggers>
+                            <DataTrigger Binding="{Binding Kind}" Value="{x:Static services:NotificationKind.Warning}">
+                                <Setter TargetName="Accent" Property="Background" Value="#F3B75E"/>
+                                <Setter TargetName="Icon" Property="Text" Value="!"/>
+                                <Setter TargetName="Icon" Property="Foreground" Value="#F3B75E"/>
+                            </DataTrigger>
+                            <DataTrigger Binding="{Binding Kind}" Value="{x:Static services:NotificationKind.Error}">
+                                <Setter TargetName="Accent" Property="Background" Value="#EF7D83"/>
+                                <Setter TargetName="Icon" Property="Text" Value="×"/>
+                                <Setter TargetName="Icon" Property="Foreground" Value="#EF7D83"/>
+                            </DataTrigger>
+                            <DataTrigger Binding="{Binding Kind}" Value="{x:Static services:NotificationKind.Success}">
+                                <Setter TargetName="Accent" Property="Background" Value="#70D2A0"/>
+                                <Setter TargetName="Icon" Property="Text" Value="✓"/>
+                                <Setter TargetName="Icon" Property="Foreground" Value="#70D2A0"/>
+                            </DataTrigger>
+                            <DataTrigger Binding="{Binding Kind}" Value="{x:Static services:NotificationKind.Progress}">
+                                <Setter TargetName="Accent" Property="Background" Value="#9AC1FF"/>
+                                <Setter TargetName="Icon" Property="Text" Value="…"/>
+                                <Setter TargetName="OperationProgress" Property="Visibility" Value="Visible"/>
+                                <Setter TargetName="DismissButton" Property="Visibility" Value="Collapsed"/>
+                            </DataTrigger>
+                        </DataTemplate.Triggers>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+        </ScrollViewer>
     </Grid>
 </Window>

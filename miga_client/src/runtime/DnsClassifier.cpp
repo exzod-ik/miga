@@ -23,11 +23,11 @@ bool DnsMessage::Name(const uint8_t* data, size_t size, size_t& offset, std::str
     return false;
 }
 
-bool DnsMessage::Read(const Packet& packet) {
-    if (packet.view.tuple.protocol != 17) return false;
-    const auto* udp = packet.bytes->data() + packet.view.header;
+bool DnsMessage::Read(const uint8_t* packet, const PacketView& view) {
+    if (view.tuple.protocol != 17 || view.header + 8 > view.length) return false;
+    const auto* udp = packet + view.header;
     const auto length = Read16(udp + 4);
-    if (length < 20 || packet.view.header + length > packet.view.length) return false;
+    if (length < 20 || view.header + length > view.length) return false;
     const auto* data = udp + 8;
     const size_t size = length - 8;
     if (Read16(data + 4) != 1) return false;
@@ -72,15 +72,24 @@ void DnsClassifier::Reconfigure(const Configuration& config) {
     }
 }
 
-const Server* DnsClassifier::Select(const Configuration& config, const std::string& process, uint32_t ip, Clock::time_point now) {
+const Server* DnsClassifier::Select(const Configuration& config, const std::string& process, uint32_t ip, Clock::time_point now, const char** reason) {
     Reconfigure(config);
-    if (const auto* server = config.Process(process)) return server;
-    for (const auto& server : config.servers) if (server.rules.staticIPRule.matches(ip)) return &server;
+    if (const auto* server = config.Process(process)) {
+        if (reason) *reason = "process_rule";
+        return server;
+    }
+    for (const auto& server : config.servers) if (server.rules.staticIPRule.matches(ip)) {
+        if (reason) *reason = "static_ip_rule";
+        return &server;
+    }
     for (const auto& server : config.servers) {
         auto found = dynamic_.find({ip, server.transport->id});
         if (found != dynamic_.end() && found->second.expires > now) {
             const auto* domain = config.Domain(found->second.question);
-            if (domain && domain->transport->id == server.transport->id) return &server;
+            if (domain && domain->transport->id == server.transport->id) {
+                if (reason) *reason = "dns_rule";
+                return &server;
+            }
         }
     }
     return nullptr;
@@ -97,6 +106,7 @@ std::vector<DnsClassifier::Output> DnsClassifier::Query(const Packet& packet, co
     DnsMessage message;
     const auto* primary = config.Process(process);
     if (!message.Read(packet) || message.response) {
+        if (PrivateIpv4(packet.view.tuple.remoteIp)) return {{packet, {}}};
         const auto* target = Select(config, process, packet.view.tuple.remoteIp, now);
         return {{packet, target ? FlowRoute{FlowRoute::Kind::Tunnel, target->transport->id, 0} : FlowRoute{}}};
     }

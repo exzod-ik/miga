@@ -1,0 +1,9 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.INTERNET" />
+    <application android:label="MIGA Device Checks" android:allowBackup="false"
+        android:theme="@android:style/Theme.Material.Light.NoActionBar">
+        <activity android:name=".CheckActivity" android:exported="false" />
+    </application>
+    <instrumentation android:name="org.miga.android.NativeLoadInstrumentation"
+        android:targetPackage="org.miga.android.devicechecks" android:label="MIGA isolated checks" />
+</manifest>

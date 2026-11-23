@@ -81,59 +81,76 @@
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <IncludePath>D:\linux_headers\include;D:\linux_headers\include\x86_64-linux-gnu;$(RemoteHeadersRoot)/usr/include;$(RemoteHeadersRoot)/usr/include/c++/*/**;$(RemoteHeadersRoot)/usr/include/x86_64-linux-gnu;$(IncludePath)</IncludePath>
     <TargetExt />
-    <OutDir>$(SolutionDir)Build\$(ProjectName)\bin\$(Platform)\$(Configuration)\</OutDir>
-    <IntDir>$(SolutionDir)Build\$(ProjectName)\obj\$(Platform)\$(Configuration)\</IntDir>
+    <OutDir>$(MigaOutputRoot)$(ProjectName)\bin\$(Platform)\$(Configuration)\</OutDir>
+    <IntDir>$(MigaWorkRoot)$(ProjectName)\obj\$(Platform)\$(Configuration)\</IntDir>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <IncludePath>D:\linux_headers\include;D:\linux_headers\include\x86_64-linux-gnu;$(RemoteHeadersRoot)/usr/include;$(RemoteHeadersRoot)/usr/include/c++/*/**;$(RemoteHeadersRoot)/usr/include/x86_64-linux-gnu;$(IncludePath)</IncludePath>
     <TargetExt />
-    <OutDir>$(SolutionDir)Build\$(ProjectName)\bin\$(Platform)\$(Configuration)\</OutDir>
-    <IntDir>$(SolutionDir)Build\$(ProjectName)\obj\$(Platform)\$(Configuration)\</IntDir>
+    <OutDir>$(MigaOutputRoot)$(ProjectName)\bin\$(Platform)\$(Configuration)\</OutDir>
+    <IntDir>$(MigaWorkRoot)$(ProjectName)\obj\$(Platform)\$(Configuration)\</IntDir>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM'">
-    <OutDir>$(SolutionDir)Build\$(ProjectName)\bin\$(Platform)\$(Configuration)\</OutDir>
-    <IntDir>$(SolutionDir)Build\$(ProjectName)\obj\$(Platform)\$(Configuration)\</IntDir>
+    <OutDir>$(MigaOutputRoot)$(ProjectName)\bin\$(Platform)\$(Configuration)\</OutDir>
+    <IntDir>$(MigaWorkRoot)$(ProjectName)\obj\$(Platform)\$(Configuration)\</IntDir>
     <TargetExt />
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM'">
-    <OutDir>$(SolutionDir)Build\$(ProjectName)\bin\$(Platform)\$(Configuration)\</OutDir>
-    <IntDir>$(SolutionDir)Build\$(ProjectName)\obj\$(Platform)\$(Configuration)\</IntDir>
+    <OutDir>$(MigaOutputRoot)$(ProjectName)\bin\$(Platform)\$(Configuration)\</OutDir>
+    <IntDir>$(MigaWorkRoot)$(ProjectName)\obj\$(Platform)\$(Configuration)\</IntDir>
     <TargetExt />
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">
-    <OutDir>$(SolutionDir)Build\$(ProjectName)\bin\$(Platform)\$(Configuration)\</OutDir>
-    <IntDir>$(SolutionDir)Build\$(ProjectName)\obj\$(Platform)\$(Configuration)\</IntDir>
+    <OutDir>$(MigaOutputRoot)$(ProjectName)\bin\$(Platform)\$(Configuration)\</OutDir>
+    <IntDir>$(MigaWorkRoot)$(ProjectName)\obj\$(Platform)\$(Configuration)\</IntDir>
     <TargetExt />
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM64'">
-    <OutDir>$(SolutionDir)Build\$(ProjectName)\bin\$(Platform)\$(Configuration)\</OutDir>
-    <IntDir>$(SolutionDir)Build\$(ProjectName)\obj\$(Platform)\$(Configuration)\</IntDir>
+    <OutDir>$(MigaOutputRoot)$(ProjectName)\bin\$(Platform)\$(Configuration)\</OutDir>
+    <IntDir>$(MigaWorkRoot)$(ProjectName)\obj\$(Platform)\$(Configuration)\</IntDir>
     <TargetExt />
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x86'">
-    <OutDir>$(SolutionDir)Build\$(ProjectName)\bin\$(Platform)\$(Configuration)\</OutDir>
-    <IntDir>$(SolutionDir)Build\$(ProjectName)\obj\$(Platform)\$(Configuration)\</IntDir>
+    <OutDir>$(MigaOutputRoot)$(ProjectName)\bin\$(Platform)\$(Configuration)\</OutDir>
+    <IntDir>$(MigaWorkRoot)$(ProjectName)\obj\$(Platform)\$(Configuration)\</IntDir>
     <TargetExt />
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x86'">
-    <OutDir>$(SolutionDir)Build\$(ProjectName)\bin\$(Platform)\$(Configuration)\</OutDir>
-    <IntDir>$(SolutionDir)Build\$(ProjectName)\obj\$(Platform)\$(Configuration)\</IntDir>
+    <OutDir>$(MigaOutputRoot)$(ProjectName)\bin\$(Platform)\$(Configuration)\</OutDir>
+    <IntDir>$(MigaWorkRoot)$(ProjectName)\obj\$(Platform)\$(Configuration)\</IntDir>
     <TargetExt />
   </PropertyGroup>
   
   <ItemGroup>
     <ClCompile Include="src\main.cpp" />
-    <ClCompile Include="src\ServerCore.cpp" />
+    <ClCompile Include="src\ClientStore.cpp" />
+    <ClCompile Include="src\V2Server.cpp" />
+    <ClCompile Include="..\Shared\ProtocolV2.cpp" />
+    <ClCompile Include="..\Shared\DiagnosticLoad.cpp" />
+    <ClCompile Include="..\Shared\ProtocolV2Packets.cpp" />
+    <ClCompile Include="src\DiagnosticControl.cpp" />
+    <ClCompile Include="src\DiagnosticLoadSocket.cpp" />
+    <ClCompile Include="src\DiagnosticNetworkStats.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="include\ServerCore.h" />
-    <ClInclude Include="include\TcpConnectionState.h" />
-    <ClInclude Include="include\TunnelIngress.h" />
-    <ClInclude Include="include\PortPool.h" />
-    <ClInclude Include="include\ConnectionKey.h" />
+    <ClInclude Include="include\ClientStore.h" />
+    <ClInclude Include="include\V2Server.h" />
+    <ClInclude Include="ServerVersion.inc" />
+    <ClInclude Include="..\Shared\ProtocolV2.h" />
+    <ClInclude Include="..\Shared\ProtocolV2Packets.h" />
+    <ClInclude Include="..\dependencies\build-linux.py" />
+    <ClInclude Include="..\dependencies\manifest.json" />
+    <ClInclude Include="..\dependencies\libsodium-1.0.22.tar.gz" />
+    <ClInclude Include="..\dependencies\noise-c-cfe25410979a87391bb9ac8d4d4bef64e9f268c6.tar.gz" />
+    <ClInclude Include="..\dependencies\sqlite-amalgamation-3540100.zip" />
+    <ClInclude Include="..\Shared\DiagnosticLoad.h" />
+    <ClInclude Include="include\DiagnosticControl.h" />
+    <ClInclude Include="include\DiagnosticLoadSocket.h" />
+    <ClInclude Include="include\DiagnosticNetworkStats.h" />
     <ClInclude Include="include\InterfaceIpCache.h" />
   </ItemGroup>
   <ItemGroup>
+    <None Include="install-v2.sh" />
     <CopyFileToFolders Include="install.sh">
       <FileType>Document</FileType>
       <RemoteCopyFile Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">
@@ -184,7 +201,7 @@
       <AdditionalIncludeDirectories>include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>pthread;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>-lpthread;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <PostBuildEvent>
       <Command>copy /Y "$(ProjectDir)install.sh" "$(OutDir)"</Command>
@@ -196,7 +213,7 @@
       <AdditionalIncludeDirectories>include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>pthread;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>-lpthread;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <PostBuildEvent>
       <Command>copy /Y "$(ProjectDir)install.sh" "$(OutDir)"</Command>
@@ -208,7 +225,7 @@
       <AdditionalIncludeDirectories>include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>pthread;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>-lpthread;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <PostBuildEvent>
       <Command>copy /Y "$(ProjectDir)install.sh" "$(OutDir)"</Command>
@@ -220,7 +237,7 @@
       <AdditionalIncludeDirectories>include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>pthread;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>-lpthread;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <PostBuildEvent>
       <Command>copy /Y "$(ProjectDir)install.sh" "$(OutDir)"</Command>
@@ -260,7 +277,7 @@
       <AdditionalIncludeDirectories>include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>pthread;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>-lpthread;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <PostBuildEvent>
       <Command>copy /Y "$(ProjectDir)install.sh" "$(OutDir)"</Command>
@@ -272,19 +289,35 @@
       <AdditionalIncludeDirectories>include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>pthread;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>-lpthread;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <PostBuildEvent>
       <Command>copy /Y "$(ProjectDir)install.sh" "$(OutDir)"</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="src\ConnectionKey.cpp" />
     <ClCompile Include="src\InterfaceIpCache.cpp" />
-    <ClCompile Include="src\PortPool.cpp" />
-    <ClCompile Include="src\TcpConnectionState.cpp" />
-    <ClCompile Include="src\TunnelIngress.cpp" />
   </ItemGroup>
+  <PropertyGroup>
+    <MigaOpenSslIncludeDirectory Condition="'$(MigaOpenSslIncludeDirectory)' == ''">/usr/include</MigaOpenSslIncludeDirectory>
+    <MigaOpenSslLibraryDirectory Condition="'$(MigaOpenSslLibraryDirectory)' == '' and '$(Platform)' == 'x64'">/usr/lib/x86_64-linux-gnu</MigaOpenSslLibraryDirectory>
+    <MigaOpenSslLibraryDirectory Condition="'$(MigaOpenSslLibraryDirectory)' == '' and '$(Platform)' == 'x86'">/usr/lib/i386-linux-gnu</MigaOpenSslLibraryDirectory>
+    <MigaOpenSslLibraryDirectory Condition="'$(MigaOpenSslLibraryDirectory)' == '' and '$(Platform)' == 'ARM'">/usr/lib/arm-linux-gnueabihf</MigaOpenSslLibraryDirectory>
+    <MigaOpenSslLibraryDirectory Condition="'$(MigaOpenSslLibraryDirectory)' == '' and '$(Platform)' == 'ARM64'">/usr/lib/aarch64-linux-gnu</MigaOpenSslLibraryDirectory>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <RemotePreBuildEvent><Command>python3 ../dependencies/build-linux.py</Command></RemotePreBuildEvent>
+    <ClCompile><AdditionalIncludeDirectories>../Build/protocol-v2/linux/include;$(MigaOpenSslIncludeDirectory);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories></ClCompile>
+    <Link><AdditionalDependencies>../Build/protocol-v2/linux/lib/libnoiseprotocol.a;../Build/protocol-v2/linux/lib/libsodium.a;../Build/protocol-v2/linux/lib/libsqlite3.a;$(MigaOpenSslLibraryDirectory)/libssl.a;$(MigaOpenSslLibraryDirectory)/libcrypto.a;-ldl;-lm;%(AdditionalDependencies)</AdditionalDependencies></Link>
+  </ItemDefinitionGroup>
+  <PropertyGroup>
+    <RemoteOutDir Condition="'$(RemoteOutDir)' == '' and '$(RemoteRootDir)' != ''">$(RemoteRootDir)/Build/miga_server/bin/$(Platform)/$(Configuration)/</RemoteOutDir>
+    <RemoteIntDir Condition="'$(RemoteIntDir)' == '' and '$(RemoteRootDir)' != ''">$(RemoteRootDir)/Build/.work/miga_server/$(Platform)/$(Configuration)/</RemoteIntDir>
+    <RemoteIntDir Condition="$([System.Text.RegularExpressions.Regex]::IsMatch('$(MigaRemoteWorkId)', '^[a-f0-9]{32}$'))">$(RemoteRootDir)/Build/.work/$(MigaRemoteWorkId)/</RemoteIntDir>
+  </PropertyGroup>
+  <ItemDefinitionGroup Condition="'$(MigaCleanRemoteWork)' == 'true' and $([System.Text.RegularExpressions.Regex]::IsMatch('$(MigaRemoteWorkId)', '^[a-f0-9]{32}$'))">
+    <RemotePostBuildEvent><Command>python3 -c "from pathlib import Path; import shutil; path = Path('$(RemoteIntDir)').expanduser(); parent = path.parent; assert path.name == '$(MigaRemoteWorkId)' and parent.name == '.work'; assert not parent.is_symlink() and not parent.parent.is_symlink() and not path.is_symlink(); shutil.rmtree(path) if path.is_dir() else None"</Command></RemotePostBuildEvent>
+  </ItemDefinitionGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets" />
 

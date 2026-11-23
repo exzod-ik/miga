@@ -4,9 +4,10 @@
            UpgradeCode="2654C1FC-1389-4A26-8E91-7BC1FEF638DC" Language="1049" Codepage="1251"
            Scope="perMachine">
     <!-- Remove the legacy MSI before installing the replacement service. -->
-    <MajorUpgrade Schedule="afterInstallInitialize"
+    <MajorUpgrade Schedule="afterInstallInitialize" AllowSameVersionUpgrades="yes"
                   DowngradeErrorMessage="Уже установлена более новая версия M.I.G.A." />
     <MediaTemplate EmbedCab="yes" />
+    <Property Id="INSTALLLEVEL" Value="1" />
     <!-- MSI WindowsBuild can report a compatibility version; read the actual OS build. -->
     <Property Id="WINDOWSBUILDNUMBER" Secure="yes">
       <RegistrySearch Id="WindowsBuildNumberSearch" Root="HKLM"
@@ -16,29 +17,39 @@
     <Launch Condition="Installed OR (VersionNT64 AND WINDOWSBUILDNUMBER &gt;= 19041)"
             Message="Требуется Windows 10 x64 версии 2004 или новее." />
     <Icon Id="MigaIcon.exe" SourceFile="..\MIGA Agent\Icon.ico" />
+    <Icon Id="MigaAdminIcon.exe" SourceFile="..\MIGA Admin\Icon.ico" />
     <Property Id="ARPPRODUCTICON" Value="MigaIcon.exe" />
     <StandardDirectory Id="ProgramFiles64Folder">
-      <Directory Id="INSTALLFOLDER" Name="M.I.G.A." />
+      <Directory Id="INSTALLFOLDER" Name="M.I.G.A.">
+        <Directory Id="RUNTIMEFOLDER" Name="Runtime" />
+      </Directory>
     </StandardDirectory>
     <StandardDirectory Id="ProgramMenuFolder" />
     <StandardDirectory Id="DesktopFolder" />
-    <ui:WixUI Id="WixUI_Minimal" />
+    <ui:WixUI Id="WixUI_FeatureTree" />
     <WixVariable Id="WixUILicenseRtf" Value="License.rtf" />
     <WixVariable Id="WixUIBannerBmp" Value="TopBanner.png" />
     <WixVariable Id="WixUIDialogBmp" Value="DialogBackground.png" />
-    <Feature Id="Main" Title="M.I.G.A." Level="1">
-      <ComponentGroupRef Id="Payload" />
+    <Feature Id="Common" Title="Общие компоненты" Level="1" Display="hidden" AllowAbsent="no">
+      <ComponentGroupRef Id="CommonPayload" />
+    </Feature>
+    <Feature Id="Client" Title="MIGA Client" Description="Подключения, правила приложений и служба туннеля." Level="1">
+      <ComponentGroupRef Id="ClientPayload" />
+    </Feature>
+    <Feature Id="Admin" Title="MIGA Admin" Description="Управление серверами по SSH, приглашения и лимиты." Level="2">
+      <ComponentGroupRef Id="AdminPayload" />
     </Feature>
   </Package>
   <Fragment>
-    <ComponentGroup Id="Payload" Directory="INSTALLFOLDER">
-      <Files Include="$(var.PayloadDir)\**">
-        <Exclude Files="$(var.PayloadDir)\Agent\**" />
-        <Exclude Files="$(var.PayloadDir)\miga_client.exe" />
-        <Exclude Files="$(var.PayloadDir)\**\config.json" />
-        <Exclude Files="$(var.PayloadDir)\**\*.pdb" />
-        <Exclude Files="$(var.PayloadDir)\**\*.log" />
+    <ComponentGroup Id="CommonPayload" Directory="INSTALLFOLDER">
+      <Files Directory="RUNTIMEFOLDER" Include="$(var.PayloadDir)\Runtime\**" />
+      <Files Include="$(var.PayloadDir)\*.dll">
+        <Exclude Files="$(var.PayloadDir)\WinDivert.dll" />
       </Files>
+      <Files Include="$(var.PayloadDir)\*LICENSE*.txt" />
+    </ComponentGroup>
+    <ComponentGroup Id="ClientPayload" Directory="INSTALLFOLDER">
+      <Files Include="$(var.PayloadDir)\WinDivert.dll;$(var.PayloadDir)\WinDivert64.sys" />
       <Component Id="ClientService" Guid="*" Bitness="always64">
         <File Id="ClientExe" Source="$(var.PayloadDir)\miga_client.exe" KeyPath="yes" />
         <ServiceInstall Id="InstallClient" Name="MigaClient"
@@ -49,12 +60,22 @@
         <!-- First installation has no config; start from the GUI after configuring. -->
         <ServiceControl Id="ControlClient" Name="MigaClient" Stop="both" Remove="uninstall" Wait="yes" />
       </Component>
-      <Component Id="Agent" Guid="*" Bitness="always64">
-        <File Id="AgentExe" Source="$(var.AgentPublishDir)\MIGA Agent.exe" KeyPath="yes">
-          <Shortcut Id="StartMenuShortcut" Directory="ProgramMenuFolder" Name="M.I.G.A."
-                    WorkingDirectory="INSTALLFOLDER" Advertise="yes" Icon="MigaIcon.exe" />
-          <Shortcut Id="DesktopShortcut" Directory="DesktopFolder" Name="M.I.G.A."
-                    WorkingDirectory="INSTALLFOLDER" Advertise="yes" Icon="MigaIcon.exe" />
+      <Component Id="Diagnostics" Guid="*" Bitness="always64">
+        <File Id="DiagnosticsExe" Source="$(var.PayloadDir)\Diagnostics\miga_diagnostics.exe" KeyPath="yes" />
+      </Component>
+      <Component Id="ClientGui" Guid="*" Bitness="always64">
+        <File Id="ClientGuiExe" Source="$(var.ClientPublishDir)\MIGA Client.exe" KeyPath="yes">
+          <Shortcut Id="ClientStartMenuShortcut" Directory="ProgramMenuFolder" Name="MIGA Client" WorkingDirectory="INSTALLFOLDER" Advertise="yes" Icon="MigaIcon.exe" />
+          <Shortcut Id="ClientDesktopShortcut" Directory="DesktopFolder" Name="MIGA Client" WorkingDirectory="INSTALLFOLDER" Advertise="yes" Icon="MigaIcon.exe" />
+        </File>
+      </Component>
+    </ComponentGroup>
+    <ComponentGroup Id="AdminPayload" Directory="INSTALLFOLDER">
+      <Files Include="$(var.PayloadDir)\miga_server;$(var.PayloadDir)\install.sh;$(var.PayloadDir)\install-v2.sh;$(var.PayloadDir)\update-v2.py;$(var.PayloadDir)\ServerVersion.inc;$(var.PayloadDir)\prepare-dependencies.sh" />
+      <Component Id="AdminGui" Guid="*" Bitness="always64">
+        <File Id="AdminGuiExe" Source="$(var.AdminPublishDir)\MIGA Admin.exe" KeyPath="yes">
+          <Shortcut Id="AdminStartMenuShortcut" Directory="ProgramMenuFolder" Name="MIGA Admin" WorkingDirectory="INSTALLFOLDER" Advertise="yes" Icon="MigaAdminIcon.exe" />
+          <Shortcut Id="AdminDesktopShortcut" Directory="DesktopFolder" Name="MIGA Admin" WorkingDirectory="INSTALLFOLDER" Advertise="yes" Icon="MigaAdminIcon.exe" />
         </File>
       </Component>
     </ComponentGroup>

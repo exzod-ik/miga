@@ -31,17 +31,17 @@ class TunPacketDevice(private val descriptor: ParcelFileDescriptor) : PacketDevi
     private val closed = AtomicBoolean(false)
     private val operationsLock = Object()
     private var activeOperations = 0
+    private val readBuffer = ByteArray(65535)
 
     override fun read(): ByteArray? {
         if (!enter()) return null
         try {
-            val buffer = ByteArray(65535)
             while (!closed.get()) {
                 if (!awaitReady(OsConstants.POLLIN)) continue
                 try {
-                    val count = Os.read(descriptor.fileDescriptor, buffer, 0, buffer.size)
+                    val count = Os.read(descriptor.fileDescriptor, readBuffer, 0, readBuffer.size)
                     if (count <= 0) throw IOException("TUN read ended")
-                    return buffer.copyOf(count)
+                    return readBuffer.copyOf(count)
                 } catch (ex: ErrnoException) {
                     if (ex.errno != OsConstants.EAGAIN && ex.errno != OsConstants.EINTR) throw ex
                 }
@@ -121,40 +121,6 @@ class AndroidConnectionOwnerResolver(private val manager: ConnectivityManager) :
 
     private fun Int.toAddress() = InetAddress.getByAddress(byteArrayOf(
         (this ushr 24).toByte(), (this ushr 16).toByte(), (this ushr 8).toByte(), toByte()))
-}
-
-class ProtectedUdpTransport(
-    service: VpnService,
-    network: Network,
-    address: String,
-) : DatagramTransport {
-    private val server = InetAddress.getByAddress(address.split('.').map { it.toInt().toByte() }.toByteArray())
-    private val socket = DatagramSocket(null)
-    @Volatile private var closed = false
-
-    init {
-        try {
-            socket.bind(InetSocketAddress(0))
-            require(service.protect(socket)) { "VPN socket protection failed" }
-            network.bindSocket(socket)
-        } catch (ex: Exception) { socket.close(); throw ex }
-    }
-
-    override fun send(bytes: ByteArray, destinationPort: Int) {
-        socket.send(DatagramPacket(bytes, bytes.size, server, destinationPort))
-    }
-
-    override fun receive(): ReceivedDatagram? {
-        val buffer = ByteArray(TunnelPacketLimits.RECEIVE_BUFFER)
-        val packet = DatagramPacket(buffer, buffer.size)
-        try { socket.receive(packet) }
-        catch (ex: SocketException) { if (closed) return null else throw ex }
-        val address = packet.address.address
-        val ip = if (address.size == 4) address.fold(0) { result, octet -> (result shl 8) or (octet.toInt() and 255) } else 0
-        return ReceivedDatagram(buffer.copyOf(packet.length), ip, packet.port)
-    }
-
-    override fun close() { closed = true; socket.close() }
 }
 
 /** Every physical DIRECT socket is protected and bound before connect/send. */

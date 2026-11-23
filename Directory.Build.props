@@ -1,8 +1,14 @@
 <Project>
   <PropertyGroup>
-    <BaseIntermediateOutputPath>$(MSBuildThisFileDirectory)Build\$(MSBuildProjectName)\obj\</BaseIntermediateOutputPath>
-    <IntermediateOutputPath>$(MSBuildThisFileDirectory)Build\$(MSBuildProjectName)\obj\$(Configuration)\</IntermediateOutputPath>
-    <BaseOutputPath>$(MSBuildThisFileDirectory)Build\$(MSBuildProjectName)\bin\</BaseOutputPath>
-    <OutputPath>$(MSBuildThisFileDirectory)Build\$(MSBuildProjectName)\bin\$(Configuration)\</OutputPath>
+    <MigaBuildRoot>$(MSBuildThisFileDirectory)Build\</MigaBuildRoot>
+    <MigaOutputRoot Condition="'$(MigaOutputRoot)' == ''">$(MigaBuildRoot)</MigaOutputRoot>
+    <MigaWorkRoot Condition="'$(MigaWorkRoot)' == ''">$(MigaBuildRoot).work\msbuild\</MigaWorkRoot>
+    <MigaProjectOutputRoot>$(MigaOutputRoot)</MigaProjectOutputRoot>
+    <MigaProjectOutputRoot Condition="$([System.String]::Copy('$(MSBuildProjectName)').EndsWith('_wpftmp'))">$(MigaWorkRoot)</MigaProjectOutputRoot>
+    <DebugType Condition="'$(Configuration)' == 'Release' and '$(DebugType)' == ''">none</DebugType>
+    <BaseIntermediateOutputPath>$(MigaWorkRoot)$(MSBuildProjectName)\obj\</BaseIntermediateOutputPath>
+    <IntermediateOutputPath>$(MigaWorkRoot)$(MSBuildProjectName)\obj\$(Configuration)\</IntermediateOutputPath>
+    <BaseOutputPath>$(MigaProjectOutputRoot)$(MSBuildProjectName)\bin\</BaseOutputPath>
+    <OutputPath>$(MigaProjectOutputRoot)$(MSBuildProjectName)\bin\$(Configuration)\</OutputPath>
   </PropertyGroup>
 </Project>

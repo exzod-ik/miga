@@ -362,6 +362,7 @@ MigrationBackup/
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
 /Build
+/Artifacts
 /miga_client/config.json
 /miga_server/config.json
 /AGENTS.md

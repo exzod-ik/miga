@@ -63,8 +63,10 @@ static void DatagramTests() {
             for (size_t i = 0; i < size; ++i) payload[i] = static_cast<uint8_t>(i);
             std::vector<uint8_t> udp;
             size_t fragmentCount = 0;
+            std::vector<uint8_t> expectedWire;
             Check(builder.Build(payload.data(), payload.size(), source, destination, 40000, 54321, 65535, mtu,
                 [&](const uint8_t* batch, size_t length, size_t count) {
+                    expectedWire.insert(expectedWire.end(), batch, batch + length);
                     Check(count > 0 && count <= 64, "fragment batch bounded");
                     size_t offset = 0;
                     for (size_t i = 0; i < count; ++i) {
@@ -95,6 +97,20 @@ static void DatagramTests() {
             const uint8_t pseudo[] = {0, 17, udp[4], udp[5]};
             checksum.Add(pseudo, 4); checksum.Add(udp.data(), udp.size());
             Check(checksum.Value() == 0, "UDP pseudo-header checksum");
+            std::vector<uint8_t> generatedWire;
+            uint8_t* filled = nullptr;
+            Check(builder.BuildGenerated(payload.size(), [&](uint8_t* output, size_t available) {
+                Check(available == payload.size(), "writer capacity");
+                filled = output;
+                std::copy(payload.begin(), payload.end(), output);
+                return payload.size();
+            }, source, destination, 40000, 54321, 65535, mtu,
+                [&](const uint8_t* batch, size_t length, size_t) {
+                    if (payload.size() + 28 <= mtu) Check(filled == batch + 28, "writer uses final datagram memory");
+                    generatedWire.insert(generatedWire.end(), batch, batch + length);
+                    return true;
+                }), "generated datagram built");
+            Check(generatedWire == expectedWire, "generated payload wire equivalence");
         }
     }
     uint8_t payload = 1;
@@ -103,10 +119,21 @@ static void DatagramTests() {
     Check(!builder.Build(&payload, 65508, source, destination, 1, 2, 0, 1500, reject), "oversize rejected");
     Check(!builder.Build(nullptr, 1, source, destination, 1, 2, 0, 1500, reject), "null rejected");
     Check(!builder.Build(&payload, 1, source, destination, 1, 2, 0, 67, reject), "invalid MTU rejected");
+    Check(!builder.BuildGenerated(1, [](uint8_t*, size_t) { return size_t(0); }, source, destination, 1, 2, 0, 1500, reject), "writer failure rejected");
+    Check(!builder.BuildGenerated(1, [](uint8_t*, size_t) { return size_t(2); }, source, destination, 1, 2, 0, 1500, reject), "writer overflow length rejected");
     size_t calls = 0;
     Check(!builder.Build(&payload, 1, source, destination, 1, 2, 0, 1500,
         [&](const uint8_t*, size_t, size_t) { ++calls; return false; }), "send failure propagated");
     Check(calls == 1, "no retry duplicates");
+    std::vector<uint8_t> maximum(1472);
+    Check(builder.Build(maximum.data(), maximum.size(), source, destination, 1, 2, 0, 1500,
+        [](const uint8_t* ip, size_t length, size_t count) {
+            InternetChecksum checksum;
+            checksum.Add(ip, 20);
+            return length == 1500 && count == 1 && Read16(ip + 6) == 0x4000 && checksum.Value() == 0;
+        }, true), "diagnostic DF packet at MTU");
+    Check(!builder.Build(maximum.data(), maximum.size(), source, destination, 1, 2, 0, 1499, reject, true),
+        "diagnostic DF drops before fragmentation");
 }
 static void BatchTests() {
     AsyncTunnelSender sender;
@@ -157,6 +184,19 @@ static void AsyncTests() {
     const HANDLE handle = reinterpret_cast<HANDLE>(1);
     std::vector<uint8_t> data(100, 42);
     WINDIVERT_ADDRESS address{}; address.Outbound = 1;
+    std::vector<bool> completions;
+    auto record = [&](bool success) { completions.push_back(success); };
+    mode = 0;
+    Check(sender.SendObserved(handle, data.data(), data.size(), &address, 1, record), "observed submission");
+    Check(completions.empty() && pending.size() == 1, "queued send is not a completion");
+    SetEvent(pending.begin()->first->hEvent);
+    sender.Reap();
+    Check(completions == std::vector<bool>{true}, "successful completion reported once");
+    Check(sender.SendObserved(handle, data.data(), data.size(), &address, 1, record), "observed cancellation submission");
+    sender.RequestStop();
+    sender.Drain();
+    Check(completions == std::vector<bool>({true, false}), "cancelled completion reported once");
+    Check(sender.Reset(), "restart after observed cancellation");
     for (int i = 0; i < 32; ++i) {
         address.Outbound = i % 2;
         address.IPv6 = i % 3 == 0;
@@ -210,7 +250,8 @@ int main() {
         TunnelRouteCache routes;
         Check(routes.Start() == NO_ERROR, "route notifications subscribe");
         TunnelRouteCache::Route route;
-        Check(routes.Resolve(htonl(INADDR_LOOPBACK), route) == NO_ERROR && route.source == htonl(INADDR_LOOPBACK), "source route lookup");
+        Check(routes.Resolve(htonl(INADDR_LOOPBACK), route) == NO_ERROR && route.path.source == htonl(INADDR_LOOPBACK) &&
+            route.path.interfaceLuid != 0, "source and interface route lookup");
         routes.Stop();
         Check(routes.Start() == NO_ERROR, "route notification restart");
         std::cout << "Tunnel send tests passed\n";

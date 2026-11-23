@@ -3,6 +3,25 @@
 #include <iostream>
 #include <filesystem>
 
+namespace miga::v2 {
+struct ProtocolV2SessionTestAccess {
+    static void Ready(ProtocolV2Session& session, uint16_t port) {
+        auto state = std::make_shared<SessionSnapshot>();
+        state->port = port;
+        state->addresses.emplace(0xc0000201, 0x0a420001);
+        Random(state->keys.dataC2S.data(), state->keys.dataC2S.size());
+        Random(state->keys.dataS2C.data(), state->keys.dataS2C.size());
+        session.Publish(state);
+    }
+    static void SetControl(ProtocolV2Session& session, uint16_t localPort, uint16_t remotePort) {
+        session.controlLocal_.store(localPort);
+        session.dailyCurrent_.store(remotePort);
+    }
+    static bool TakeResume(ProtocolV2Session& session) { return session.resumeRequested_.exchange(false); }
+    static size_t MaximumPayload(ProtocolV2Session& session) { return session.maximumPayload_.load(); }
+};
+}
+
 namespace {
 std::vector<std::vector<uint8_t>> submissions;
 std::mutex submissionMutex;
@@ -114,7 +133,8 @@ Configuration ConfigurationFixture() {
         server.transport->localPort = static_cast<uint16_t>(60000 + i);
         server.rules.portStart = server.rules.portEnd = static_cast<uint16_t>(20000 + i);
         server.rules.processRules = {i == 1 ? "chrome.exe" : "other.exe"};
-        assert(server.transport->transform.Initialize(Encryption::GenerateXorKeyBase64(), Encryption::GenerateSwapKeyBase64()));
+        server.transport->session = std::make_shared<miga::v2::ProtocolV2Session>(miga::v2::Invitation{}, server.transport->destination, INVALID_SOCKET);
+        miga::v2::ProtocolV2SessionTestAccess::Ready(*server.transport->session, static_cast<uint16_t>(20000 + i));
         config.servers.push_back(std::move(server));
     }
     config.Index(); return config;
@@ -170,7 +190,16 @@ void DnsTests() {
 }
 }
 
+namespace miga::runtime {
+struct SyntheticDnsResolverTestAccess {
+    static void StartResolver(SyntheticDnsResolver& resolver) {
+        assert(resolver.Preflight(true) == 0xc613ffffu);
+    }
+};
+}
+
 struct NetworkRuntimeTests {
+#include "SyntheticDnsNetworkTests.inl"
     using Impl = NetworkRuntime::Impl;
     static std::unique_ptr<Impl> Fixture(Logger& logger, ConfigManager& source) {
         auto runtime = std::make_unique<Impl>(&source, &logger);
@@ -180,8 +209,46 @@ struct NetworkRuntimeTests {
         AsyncTunnelSender::Api api; api.send = SendMock;
         runtime->reinject.SetApi(api); runtime->tunnel.SetApi(api);
         for (const auto& server : runtime->config->servers)
-            runtime->routes[server.transport->id] = {htonl(0xc0000201), 1500, runtime->windowsRoutes.Revision(), Clock::now()};
+            runtime->routes[server.transport->id] = {{htonl(0xc0000201)}, 1500, runtime->windowsRoutes.Revision(), Clock::now()};
         return runtime;
+    }
+    static void RouteRefresh(Logger& logger, ConfigManager& source) {
+        using Access = miga::v2::ProtocolV2SessionTestAccess;
+        const auto runtime = Fixture(logger, source);
+        auto& session = *runtime->config->ById(1)->transport->session;
+        auto& other = *runtime->config->ById(2)->transport->session;
+        const auto refresh = [&](const TunnelRouteCache::Route& route, bool resume) {
+            auto updates = runtime->routes;
+            updates[1] = route;
+            runtime->ApplyRoutes(*runtime->config, std::move(updates));
+            assert(Access::TakeResume(session) == resume);
+            assert(!Access::TakeResume(other));
+        };
+        auto route = runtime->routes.at(1);
+        ++route.revision;
+        route.mtu = 1400;
+        refresh(route, false);
+        assert(Access::MaximumPayload(session) == 1372);
+
+        ++route.revision;
+        route.path.interfaceLuid = 42;
+        refresh(route, true);
+        ++route.revision;
+        route.path.nextHop = htonl(0xc00002fe);
+        refresh(route, true);
+        ++route.revision;
+        route.path.source = htonl(0xc0000202);
+        refresh(route, true);
+
+        refresh({{}, 0, ++route.revision, Clock::now()}, false);
+        assert(!runtime->routes.at(1).mtu && Access::MaximumPayload(session) == 0);
+        assert(runtime->routes.at(1).path == route.path);
+        ++route.revision;
+        refresh(route, false);
+        refresh({{}, 0, ++route.revision, Clock::now()}, false);
+        ++route.revision;
+        route.path.nextHop = htonl(0xc00002fd);
+        refresh(route, true);
     }
     static void Pump(Impl& runtime) {
         for (size_t i = 0; i < 100; ++i) {
@@ -193,12 +260,148 @@ struct NetworkRuntimeTests {
         }
         assert(false);
     }
+#include "NetworkRuntimeBenchmark.inl"
     static void Receive(Impl& runtime, Packet packet) {
         packet.bytes = std::make_shared<std::vector<uint8_t>>(*packet.bytes);
         runtime.PacketReceived(packet.bytes->data(), packet.bytes->size(), packet.address);
     }
     static void Run() {
         Logger logger; logger.enable(LOGGER_LEVEL_NONE, false); ConfigManager source(&logger);
+        RouteRefresh(logger, source);
+        V2PendingTests(logger, source);
+        SummaryPreservesPendingTests(logger, source);
+        DiagnosticObservationTests();
+        {
+            auto diagnostic = Fixture(logger, source);
+            diagnostic->config->dnsResolverEnabled = true;
+            diagnostic->config->dnsResolverReserveRange = true;
+            auto owner = Identity(1203, "miga_diagnostics.exe");
+            diagnostic->diagnostics.Configure(owner, 2, true);
+            auto probe = MakePacket(false, 5203, 47901);
+            probe.bytes->resize(48);
+            Write16(probe.bytes->data() + 2, 48);
+            Write16(probe.bytes->data() + 24, 28);
+            Write32(probe.bytes->data() + 16, 0xc6120001);
+            assert(probe.view.Read(probe.bytes->data(), probe.bytes->size()));
+            diagnostic->directory.Observe(probe.view.tuple,
+                std::make_shared<const SocketOwner>(SocketOwner{owner, 40, 100}), Clock::now());
+
+            const auto before = submissions.size();
+            Receive(*diagnostic, probe);
+            Pump(*diagnostic);
+            assert(submissions.size() == before + 1);
+            const auto& outer = submissions.back();
+            assert(Read16(outer.data() + 22) == 20002);
+            const auto session = diagnostic->config->ById(2)->transport->session->Snapshot();
+            miga::v2::Bytes inner;
+            assert(miga::v2::DecryptData(session->keys.dataC2S, session->keys.prefixC2S,
+                outer.data() + 28, outer.size() - 28, inner));
+            assert(inner.size() == 48 && Read32(inner.data() + 16) == 0xc6120001);
+            assert(Read16(inner.data() + 22) == 47901);
+            submissions.resize(before);
+        }
+        {
+            auto diagnostic = Fixture(logger, source);
+            auto owner = Identity(1202, "other.exe");
+            diagnostic->diagnostics.Configure(owner, 2, false);
+            auto packet = MakePacket(true, 5201);
+            diagnostic->directory.Observe(packet.view.tuple,
+                std::make_shared<const SocketOwner>(SocketOwner{owner, 38, 100}), Clock::now());
+            AsyncTunnelSender::Api api; api.send = PendingSend; api.result = SendResult; api.cancel = CancelSend;
+            diagnostic->tunnel.SetApi(api);
+            Receive(*diagnostic, packet); Pump(*diagnostic);
+            assert(diagnostic->diagnostics.submitted_ == 1 && diagnostic->diagnostics.completed_ == 0);
+            assert(diagnostic->diagnostics.rejected_ == 0 && pendingSends.size() == 1);
+            SetEvent(pendingSends.begin()->first->hEvent); diagnostic->tunnel.Reap();
+            assert(diagnostic->diagnostics.completed_ == 1 && pendingSends.empty());
+            Receive(*diagnostic, packet);
+            assert(diagnostic->diagnostics.submitted_ == 2 && pendingSends.size() == 1);
+            diagnostic->tunnel.RequestStop(); diagnostic->tunnel.Drain();
+            assert(diagnostic->diagnostics.completed_ == 1 && diagnostic->diagnostics.rejected_ == 1);
+            assert(diagnostic->tunnel.Reset());
+            Receive(*diagnostic, packet);
+            const auto oldSession = diagnostic->diagnostics.session_;
+            diagnostic->diagnostics.Configure(owner, 2, false);
+            diagnostic->tunnel.RequestStop(); diagnostic->tunnel.Drain();
+            diagnostic->diagnostics.Submitted(oldSession);
+            diagnostic->diagnostics.RejectBeforeSend(oldSession);
+            assert(diagnostic->diagnostics.submitted_ == 0 && diagnostic->diagnostics.completed_ == 0);
+            assert(diagnostic->diagnostics.rejected_ == 0 && diagnostic->diagnostics.preSendRejected_ == 0);
+            diagnostic->diagnostics.RejectBeforeSend(diagnostic->diagnostics.session_);
+            assert(diagnostic->diagnostics.preSendRejected_ == 1 && diagnostic->diagnostics.submitted_ == 0);
+            Receive(*diagnostic, packet);
+            assert(diagnostic->diagnostics.submitted_ == 1 && diagnostic->diagnostics.rejected_ == 1);
+            diagnostic->diagnostics.Configure(owner, 2, false);
+            auto oversize = MakePacket(false, 5202);
+            oversize.bytes->resize(64, 0); Write16(oversize.bytes->data() + 2, 64); Write16(oversize.bytes->data() + 24, 44);
+            assert(oversize.view.Read(oversize.bytes->data(), oversize.bytes->size()));
+            diagnostic->diagnostics.mss_ = true; diagnostic->diagnostics.probePort_ = 5202;
+            diagnostic->routes[2].mtu = 68;
+            diagnostic->directory.Observe(oversize.view.tuple,
+                std::make_shared<const SocketOwner>(SocketOwner{owner, 39, 100}), Clock::now());
+            Receive(*diagnostic, oversize); Pump(*diagnostic);
+            assert(diagnostic->diagnostics.preSendRejected_ == 1 && diagnostic->diagnostics.submitted_ == 0);
+            assert(diagnostic->diagnostics.rejected_ == 0);
+        }
+        {
+            auto diagnostic = Fixture(logger, source);
+            auto owner = Identity(1201, "miga_diagnostics.exe");
+            diagnostic->diagnostics.Configure(owner, 2, true);
+            auto probe = MakePacket(false, 5200);
+            diagnostic->directory.Observe(probe.view.tuple,
+                std::make_shared<const SocketOwner>(SocketOwner{owner, 37, 100}), Clock::now());
+            Receive(*diagnostic, probe);
+            Pump(*diagnostic);
+            assert(submissions.size() == 1 && Read16(submissions.back().data() + 22) == 20002);
+            diagnostic->diagnostics.sequencePort_ = 5200;
+            probe.bytes->resize(30); Write16(probe.bytes->data() + 2, 30); Write16(probe.bytes->data() + 24, 10);
+            (*probe.bytes)[28] = 0; (*probe.bytes)[29] = 0;
+            assert(probe.view.Read(probe.bytes->data(), probe.bytes->size()));
+            diagnostic->diagnostics.ObserveProbe(probe.view.tuple, probe.bytes->data(), probe.bytes->size());
+            diagnostic->diagnostics.ObserveProbe(probe.view.tuple, probe.bytes->data(), probe.bytes->size());
+            auto options = diagnostic->diagnostics.Options(probe.view.tuple, 2, probe.bytes->data(), probe.bytes->size());
+            assert(options.sequence == 1);
+            diagnostic->diagnostics.Submitted(options.session);
+            diagnostic->diagnostics.Sent(options.session, true, options.sequence);
+            diagnostic->diagnostics.Submitted(options.session);
+            diagnostic->diagnostics.Sent(options.session, true, options.sequence);
+            diagnostic->diagnostics.Submitted(options.session + 1);
+            diagnostic->diagnostics.Sent(options.session + 1, true, 2);
+            diagnostic->diagnostics.Submitted(options.session);
+            diagnostic->diagnostics.Sent(options.session, false, 3);
+            assert(diagnostic->diagnostics.submitted_ == diagnostic->diagnostics.completed_ + diagnostic->diagnostics.rejected_);
+            assert(diagnostic->diagnostics.capturedSequences_.size() == 1);
+            assert(diagnostic->diagnostics.completedSequences_.size() == 1);
+            (*probe.bytes)[28] = 255; (*probe.bytes)[29] = 255;
+            assert(diagnostic->diagnostics.Options(probe.view.tuple, 2, probe.bytes->data(), 30).sequence == 65536);
+            (*probe.bytes)[0] = 0x4f;
+            assert(!diagnostic->diagnostics.Options(probe.view.tuple, 2, probe.bytes->data(), 30).sequence);
+            assert(!diagnostic->diagnostics.Options(probe.view.tuple, 2, probe.bytes->data(), 19).sequence);
+            auto different = probe.view.tuple;
+            different.remotePort++;
+            assert(diagnostic->diagnostics.Options(probe.view.tuple, 2).session);
+            assert(!diagnostic->diagnostics.Options(different, 2).session);
+            assert(!diagnostic->diagnostics.Options(probe.view.tuple, 1).session);
+            FlowRoute isolated;
+            assert(!diagnostic->diagnostics.Route(Identity(1201, "replacement.exe"), isolated));
+            diagnostic->diagnostics.load.Configure({{"run", "000000000000007b"}, {"step", 1}, {"direction", 0}, {"rate", 10}, {"seconds", 1}});
+            probe.bytes->resize(60); (*probe.bytes)[0] = 0x45;
+            Write16(probe.bytes->data() + 2, 60); Write16(probe.bytes->data() + 24, 40);
+            miga::diagnostics::Probe loadProbe{123, 1, 0, 0};
+            miga::diagnostics::WriteProbe(probe.bytes->data() + 28, 32, loadProbe);
+            assert(probe.view.Read(probe.bytes->data(), probe.bytes->size()));
+            diagnostic->diagnostics.ObserveProbe(probe.view.tuple, probe.bytes->data(), probe.bytes->size());
+            const auto loadOptions = diagnostic->diagnostics.Options(probe.view.tuple, 2, probe.bytes->data(), probe.bytes->size());
+            assert(loadOptions.probe.run == 123 && loadOptions.probe.step == 1);
+            assert(diagnostic->diagnostics.load.Snapshot()["captured"]["unique"] == 1);
+            diagnostic->diagnostics.load.Configure({{"run", "000000000000007b"}, {"step", 2}, {"direction", 0}, {"rate", 10}, {"seconds", 1}});
+            diagnostic->diagnostics.load.Record(miga::diagnostics::LoadCounters::WireSent, loadOptions.probe);
+            assert(diagnostic->diagnostics.load.Snapshot()["wire_sent"]["unique"] == 0);
+            diagnostic->diagnostics.Stop();
+            assert(!diagnostic->diagnostics.load.enabled);
+            assert(!diagnostic->diagnostics.enabled && !diagnostic->diagnostics.TracksPort(probe.view.tuple));
+            submissions.clear();
+        }
         auto runtime = Fixture(logger, source);
         auto packet = MakePacket(true);
         auto owner = runtime->directory.Observe(packet.view.tuple,
@@ -206,8 +409,10 @@ struct NetworkRuntimeTests {
         Receive(*runtime, packet); assert(runtime->pendingPackets == 1); Pump(*runtime);
         assert(runtime->pendingPackets == 0 && submissions.size() == 1);
         auto encrypted = submissions.back();
-        runtime->config->servers[0].transport->transform.Decrypt(encrypted.data() + 28, encrypted.size() - 28, 20001);
-        assert(encrypted[28 + 9] == 6 && Read32(encrypted.data() + 28 + 24) == 123);
+        const auto sentState = runtime->config->servers[0].transport->session->Snapshot();
+        miga::v2::Bytes plain;
+        assert(miga::v2::DecryptData(sentState->keys.dataC2S, sentState->keys.prefixC2S, encrypted.data() + 28, encrypted.size() - 28, plain));
+        assert(plain[9] == 6 && Read32(plain.data() + 24) == 123);
         runtime->directory.Close(packet.view.tuple, 10, 100, 220, Clock::now());
         packet.address.Timestamp = 230;
         Receive(*runtime, packet); assert(submissions.size() == 2 && runtime->pendingPackets == 0);
@@ -235,15 +440,19 @@ struct NetworkRuntimeTests {
         assert(!runtime->flows.Reverse(wire, 1, 210, Clock::now()));
         runtime->routes[2] = {};
         Receive(*runtime, translated); assert(runtime->routeWaiting.size() == 1);
-        runtime->routes[2] = {htonl(0xc0000201), 1500, runtime->windowsRoutes.Revision(), Clock::now()};
+        runtime->routes[2] = {{htonl(0xc0000201)}, 1500, runtime->windowsRoutes.Revision(), Clock::now()};
         runtime->ResumeRoutes(); assert(runtime->routeWaiting.empty());
         auto reply = MakePacket(true, 443, 5002);
         Write32(reply.bytes->data() + 12, 0xcb007150); Write32(reply.bytes->data() + 16, 0xc0000201);
         (*reply.bytes)[33] = 16;
-        runtime->config->servers[1].transport->transform.Encrypt(reply.bytes->data(), reply.bytes->size(), 20002);
+        const auto replyState = runtime->config->servers[1].transport->session->Snapshot();
+        Write32(reply.bytes->data() + 16, 0x0a420001);
+        WinDivertHelperCalcChecksums(reply.bytes->data(), static_cast<UINT>(reply.bytes->size()), nullptr, 0);
+        miga::v2::Bytes replyPayload;
+        assert(miga::v2::EncryptData(replyState->keys.dataS2C, replyState->keys.prefixS2C, reply.bytes->data(), reply.bytes->size(), replyPayload));
         TunnelDatagram wrapper;
         std::vector<uint8_t> outer;
-        assert(wrapper.Build(reply.bytes->data(), reply.bytes->size(), htonl(0xc6336402), htonl(0xc0000201),
+        assert(wrapper.Build(replyPayload.data(), replyPayload.size(), htonl(0xc6336402), htonl(0xc0000201),
             20002, 60002, 1, 1500, [&](const uint8_t* data, size_t length, size_t count) {
                 assert(count == 1); outer.assign(data, data + length); return true;
             }));
@@ -274,6 +483,11 @@ struct NetworkRuntimeTests {
         DelayedConnect(*runtime);
         DnsTests();
         ReloadTests(logger, source);
+        NoActiveServersTests(logger, source);
+        LocalDnsTests(logger, source);
+        SyntheticDnsNetworkTests(logger, source);
+        FullRoutingTests(logger, source);
+        BootstrapDnsTests(logger, source);
         LoopTests(logger, source);
         std::cout << "Network runtime routing and DNS tests passed\n";
     }
@@ -307,6 +521,83 @@ struct NetworkRuntimeTests {
         Receive(runtime, ack);
         assert(runtime.pendingPackets == 0 && submissions.size() == before + 3 && submissions.back() == *ack.bytes);
     }
+    static void V2PendingTests(Logger& logger, ConfigManager& source) {
+        auto runtime = Fixture(logger, source);
+        auto& server = runtime->config->servers[0];
+        miga::v2::Invitation invitation;
+        server.transport->session = std::make_shared<miga::v2::ProtocolV2Session>(invitation, server.transport->destination, INVALID_SOCKET);
+        auto packet = MakePacket(false); const auto before = submissions.size();
+        for (size_t i = 0; i < 1025; ++i) runtime->Send(packet, {FlowRoute::Kind::Tunnel, server.transport->id, 0}, false);
+        assert(runtime->sessionWaiting.size() == 1024 && runtime->sessionWaitingBytes == 1024 * packet.view.length);
+        assert(submissions.size() == before);
+        for (auto& pending : runtime->sessionWaiting) pending.packet.received -= std::chrono::seconds(31);
+        for (size_t i = 0; i < 8; ++i) runtime->DrainSessions();
+        assert(runtime->sessionWaiting.empty() && runtime->sessionWaitingBytes == 0 && submissions.size() == before);
+    }
+    static void DiagnosticObservationTests() {
+        DiagnosticSession diagnostics;
+        const auto owner = Identity(102, "miga_diagnostics.exe");
+        const auto unrelated = Identity(202, "unrelated.exe");
+        diagnostics.Configure(owner, 1, true);
+        const SocketTuple target{17, 0xc0000202, 53531, 0xc0000201, 47901};
+        auto other = target;
+        ++other.remotePort;
+        diagnostics.registrations_.insert((uint32_t(target.protocol) << 16) | target.localPort);
+        const FlowRoute chosen{FlowRoute::Kind::Tunnel, 1, 0};
+        const FlowRoute another{FlowRoute::Kind::Tunnel, 2, 0};
+        diagnostics.Observe(target, owner, chosen, "previous_step");
+        assert(diagnostics.BeginObservation(target)["ok"] == true);
+        diagnostics.Observe(target, unrelated, chosen, "unrelated_owner");
+        diagnostics.Observe(other, owner, chosen, "unrelated_endpoint");
+        diagnostics.ObserveUnowned(other);
+        const auto empty = diagnostics.EndObservation();
+        assert(empty["ok"] == true && empty["captured"] == 0 && empty["unowned"] == 0 && empty["flows"].empty());
+
+        assert(diagnostics.BeginObservation(target)["ok"] == true);
+        diagnostics.ObserveUnowned(target);
+        diagnostics.Observe(target, owner, another, "other_server");
+        diagnostics.Observe(target, owner, chosen, "selected_server");
+        const auto result = diagnostics.EndObservation();
+        assert(result["ok"] == true && result["captured"] == 2 && result["unowned"] == 1);
+        assert(result["flows"].size() == 1 && result["flows"][0]["server_id"] == 1 &&
+            result["flows"][0]["reason"] == "selected_server");
+    }
+    static void SummaryPreservesPendingTests(Logger& logger, ConfigManager& source) {
+        auto runtime = Fixture(logger, source);
+        auto& server = runtime->config->servers[0];
+        server.transport->session = std::make_shared<miga::v2::ProtocolV2Session>(
+            miga::v2::Invitation{}, server.transport->destination, INVALID_SOCKET);
+        auto packet = MakePacket(false);
+        const auto before = submissions.size();
+        runtime->Send(packet, {FlowRoute::Kind::Tunnel, server.transport->id, 0}, false);
+        assert(runtime->sessionWaiting.size() == 1 && runtime->sessionWaitingBytes == packet.view.length);
+
+        miga::v2::Bytes first(28), second(28), complete;
+        for (auto* fragment : {&first, &second}) {
+            std::copy_n(packet.bytes->begin(), 20, fragment->begin());
+            Write16(fragment->data() + 2, static_cast<uint16_t>(fragment->size()));
+        }
+        Write16(first.data() + 6, 0x2000);
+        Write16(second.data() + 6, 1);
+        first[20] = 0x56; second[20] = 0x78;
+        using Result = miga::v2::Ipv4Reassembler::Result;
+        for (auto* assembler : {&runtime->reassembler, &runtime->innerReassembler})
+            assert(assembler->Add(first.data(), first.size(), complete) == Result::Waiting);
+
+        runtime->lastSummary = Clock::now() - std::chrono::seconds(5);
+        runtime->Summary();
+        assert(runtime->sessionWaiting.size() == 1 && runtime->sessionWaitingBytes == packet.view.length);
+        for (auto* assembler : {&runtime->reassembler, &runtime->innerReassembler}) {
+            assert(assembler->Add(second.data(), second.size(), complete) == Result::Complete);
+            assert(complete.size() == 36 && complete[20] == 0x56 && complete[28] == 0x78);
+        }
+
+        miga::v2::ProtocolV2SessionTestAccess::Ready(*server.transport->session, 20000);
+        runtime->DrainSessions();
+        assert(runtime->sessionWaiting.empty() && runtime->sessionWaitingBytes == 0);
+        assert(submissions.size() == before + 1);
+        submissions.resize(before);
+    }
     static void ReloadTests(Logger& logger, ConfigManager& source) {
         auto runtime = Fixture(logger, source);
         AsyncTunnelSender::Api api; api.send = PendingSend; api.result = SendResult; api.cancel = CancelSend;
@@ -328,6 +619,255 @@ struct NetworkRuntimeTests {
         assert(runtime->config->ById(1)->rules.processRules[0] == "chrome.exe");
         runtime->Send(packet, {}, false); assert(pendingSends.size() == 1);
         runtime->reinject.RequestStop(); runtime->reinject.Drain(); assert(pendingSends.empty());
+    }
+    static void NoActiveServersTests(Logger& logger, ConfigManager& source) {
+        auto runtime = Fixture(logger, source);
+        runtime->config->dnsResolverEnabled = true;
+        runtime->nextConfiguration = runtime->config->version;
+        Impl::Prepared reload;
+        reload.config = runtime->Prepare({}, 1400, LOGGER_LEVEL_NONE, "", false, 0, runtime->config, reload.routes);
+        assert(reload.config);
+        runtime->prepared.emplace(std::move(reload));
+        runtime->ApplyPrepared();
+        assert(runtime->config->servers.empty() && !runtime->config->dnsResolverEnabled);
+        auto owner = Identity(1202, "chrome.exe");
+        for (auto packet : {MakePacket(true), MakePacket(false), DnsPacket(1234, false)}) {
+            assert(WinDivertHelperCalcChecksums(packet.bytes->data(), static_cast<UINT>(packet.bytes->size()), nullptr, 0));
+            runtime->directory.Observe(packet.view.tuple,
+                std::make_shared<const SocketOwner>(SocketOwner{owner, 10, 100}), Clock::now());
+            const auto before = submissions.size();
+            Receive(*runtime, packet);
+            Pump(*runtime);
+            assert(submissions.size() == before + 1 && submissions.back() == *packet.bytes);
+        }
+    }
+    static void LocalDnsTests(Logger& logger, ConfigManager& source) {
+        auto runtime = Fixture(logger, source);
+        auto query = DnsPacket(1234, false);
+        const uint32_t resolver = 0xc0a80001;
+        Write32(query.bytes->data() + 16, resolver);
+        assert(WinDivertHelperCalcChecksums(query.bytes->data(), static_cast<UINT>(query.bytes->size()), nullptr, 0));
+        assert(query.view.Read(query.bytes->data(), query.bytes->size()));
+        runtime->directory.Observe(query.view.tuple,
+            std::make_shared<const SocketOwner>(SocketOwner{Identity(100, "unrelated.exe"), 10, 100}), Clock::now());
+
+        const auto before = submissions.size();
+        Receive(*runtime, query);
+        Pump(*runtime);
+        assert(submissions.size() == before + 1 && submissions.back() == *query.bytes);
+
+        auto rules = std::make_shared<Configuration>(*runtime->config);
+        ++rules->version;
+        rules->servers[1].rules.domainRules.push_back("example.com");
+        rules->Index();
+        runtime->config = rules;
+        runtime->published.store(rules);
+        Receive(*runtime, query);
+        Pump(*runtime);
+        assert(submissions.size() == before + 3);
+
+        const auto reply = [&](size_t serverId, const std::vector<uint8_t>& outer, uint32_t answer) {
+            const auto* server = rules->ById(serverId);
+            const auto state = server->transport->session->Snapshot();
+            assert(Read32(outer.data() + 16) == ntohl(server->transport->destination));
+            miga::v2::Bytes inner;
+            assert(miga::v2::DecryptData(state->keys.dataC2S, state->keys.prefixC2S,
+                outer.data() + 28, outer.size() - 28, inner));
+            assert(Read32(inner.data() + 16) == resolver);
+            auto response = DnsPacket(Read16(inner.data() + 28), true, {answer});
+            Write32(response.bytes->data() + 12, resolver);
+            Write32(response.bytes->data() + 16, Read32(inner.data() + 12));
+            miga::v2::Bytes encrypted;
+            assert(miga::v2::EncryptData(state->keys.dataS2C, state->keys.prefixS2C,
+                response.bytes->data(), response.bytes->size(), encrypted));
+            TunnelDatagram datagram;
+            assert(datagram.Build(encrypted.data(), encrypted.size(), server->transport->destination, htonl(query.view.tuple.localIp),
+                state->port, server->transport->localPort, 1, 1500, [&](const uint8_t* data, size_t length, size_t count) {
+                    assert(count == 1);
+                    auto outerReply = response;
+                    outerReply.bytes = std::make_shared<std::vector<uint8_t>>(data, data + length);
+                    Receive(*runtime, outerReply);
+                    return true;
+                }));
+            Pump(*runtime);
+        };
+        reply(1, submissions[before + 2], 0xcb007120);
+        assert(submissions.size() == before + 3);
+        reply(2, submissions[before + 1], 0xcb007110);
+        assert(submissions.size() == before + 4);
+        assert(Read32(submissions.back().data() + 12) == resolver &&
+            Read32(submissions.back().data() + 16) == query.view.tuple.localIp &&
+            Read16(submissions.back().data() + 28) == 1234);
+        PacketView answerView;
+        DnsMessage answer;
+        assert(answerView.Read(submissions.back().data(), submissions.back().size()));
+        assert(answer.Read(submissions.back().data(), answerView) && answer.addresses.size() == 1 &&
+            answer.addresses.front().first == 0xcb007110);
+
+        runtime->directory.Observe(query.view.tuple,
+            std::make_shared<const SocketOwner>(SocketOwner{Identity(101, "chrome.exe"), 11, 201}), Clock::now());
+        query.address.Timestamp = 202;
+        Receive(*runtime, query);
+        Pump(*runtime);
+        assert(submissions.size() == before + 6 && Read32(submissions[before + 4].data() + 16) == 0xc6336401);
+    }
+    static void BootstrapDnsTests(Logger& logger, ConfigManager& source) {
+        assert(Impl::BootstrapHosts("# comment\r\n198.18.0.1 vps.example\r\n::1 vps.example\r\n"
+            "192.0.2.34 alias VPS.EXAMPLE # comment\r\n", "vps.example") == 0xc0000222u);
+        assert(!Impl::BootstrapHosts("192.0.2.34 other.example # vps.example\n", "vps.example"));
+        auto runtime = Fixture(logger, source);
+        runtime->config->dnsResolverEnabled = true;
+        runtime->config->fullRoutingServerId = 1;
+        auto query = DnsPacket(1234, false);
+        auto reply = DnsPacket(1234, true, {0xcb007110});
+        runtime->bootstrapDnsTuple.store(Impl::BootstrapDnsKey(query.view.tuple));
+        const auto before = submissions.size();
+        Receive(*runtime, query);
+        Receive(*runtime, reply);
+        assert(submissions.size() == before + 2);
+        assert(submissions[before] == *query.bytes && submissions[before + 1] == *reply.bytes);
+        auto unrelated = query;
+        unrelated.bytes = std::make_shared<std::vector<uint8_t>>(*query.bytes);
+        Write32(unrelated.bytes->data() + 16, 0xcb007102);
+        Receive(*runtime, unrelated);
+        assert(submissions.size() == before + 2);
+        runtime->bootstrapDnsTuple.store(0);
+        Receive(*runtime, query);
+        assert(submissions.size() == before + 2);
+    }
+    static void FullRoutingTests(Logger& logger, ConfigManager& source) {
+        auto runtime = Fixture(logger, source);
+        auto packet = MakePacket(true);
+        runtime->directory.Observe(packet.view.tuple,
+            std::make_shared<const SocketOwner>(SocketOwner{Identity(100, "chrome.exe"), 10, 100}), Clock::now());
+        Receive(*runtime, packet); Pump(*runtime);
+
+        auto apply = [&](size_t serverId) {
+            Impl::Prepared next;
+            next.config = std::make_shared<Configuration>(*runtime->config);
+            ++next.config->version;
+            next.config->fullRoutingServerId = serverId;
+            next.routes = runtime->routes;
+            runtime->prepared.emplace(std::move(next));
+            runtime->ApplyPrepared();
+        };
+        auto checkTunnel = [&](Packet testPacket, uint16_t port) {
+            const auto before = submissions.size();
+            Receive(*runtime, testPacket);
+            assert(submissions.size() == before + 1 && runtime->pendingPackets == 0);
+            assert(Read32(submissions.back().data() + 16) == 0xc6336402);
+            assert(Read16(submissions.back().data() + 22) == port);
+            const auto state = runtime->config->ById(2)->transport->session->Snapshot();
+            miga::v2::Bytes data;
+            const auto& outer = submissions.back();
+            assert(miga::v2::DecryptData(state->keys.dataC2S, state->keys.prefixC2S, outer.data() + 28, outer.size() - 28, data));
+            assert(data[9] == testPacket.view.tuple.protocol && Read32(data.data() + 16) == testPacket.view.tuple.remoteIp);
+            if (testPacket.view.tuple.remotePort == 53)
+                assert(Read16(data.data() + 28) == Read16(testPacket.bytes->data() + 28));
+        };
+        apply(2);
+        checkTunnel(packet, 20002);
+        checkTunnel(MakePacket(false, 5201), 20002);
+        auto stun = MakePacket(false, 5201, 3478);
+        checkTunnel(stun, 20002);
+        runtime->diagnostics.directProbeOwner_ = Identity(1201, "miga_diagnostics.exe");
+        runtime->diagnostics.directProbeTuple_ = stun.view.tuple;
+        runtime->diagnostics.directProbePort_.store(5201);
+        const auto directBefore = submissions.size();
+        Receive(*runtime, stun);
+        assert(submissions.size() == directBefore + 1 && submissions.back() == *stun.bytes);
+        auto stunReply = MakePacket(false, 3478, 5201);
+        Write32(stunReply.bytes->data() + 12, stun.view.tuple.remoteIp);
+        Write32(stunReply.bytes->data() + 16, stun.view.tuple.localIp);
+        stunReply.address.Outbound = 0;
+        Receive(*runtime, stunReply);
+        assert(submissions.size() == directBefore + 2 && submissions.back() == *stunReply.bytes);
+        checkTunnel(MakePacket(false, 5201, 3479), 20002);
+        checkTunnel(MakePacket(false, 5202, 3478), 20002);
+        apply(0);
+        Receive(*runtime, stun);
+        assert(submissions.back() == *stun.bytes);
+        apply(2);
+        runtime->diagnostics.Clear();
+        checkTunnel(stun, 20002);
+
+        WSADATA winsock{};
+        assert(WSAStartup(MAKEWORD(2, 2), &winsock) == 0);
+        const SOCKET udp = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        assert(udp != INVALID_SOCKET);
+        sockaddr_in endpoint{};
+        endpoint.sin_family = AF_INET;
+        endpoint.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        endpoint.sin_port = htons(3478);
+        assert(connect(udp, reinterpret_cast<const sockaddr*>(&endpoint), sizeof(endpoint)) == 0);
+        sockaddr_in bound{};
+        int size = sizeof(bound);
+        assert(getsockname(udp, reinterpret_cast<sockaddr*>(&bound), &size) == 0);
+        const SocketTuple boundTuple{17, ntohl(bound.sin_addr.s_addr), ntohs(bound.sin_port), INADDR_LOOPBACK, 3478};
+        const DiagnosticSession::Json registration{{"local_ip", boundTuple.localIp}, {"local_port", boundTuple.localPort},
+            {"remote_ip", boundTuple.remoteIp}};
+        assert(!runtime->diagnostics.RegisterDirectProbe(0, registration));
+        assert(runtime->diagnostics.RegisterDirectProbe(GetCurrentProcessId(), registration));
+        assert(runtime->diagnostics.DirectProbeMatches(boundTuple));
+        runtime->diagnostics.ClearDirectProbe();
+        assert(!runtime->diagnostics.DirectProbeMatches(boundTuple));
+        closesocket(udp);
+        WSACleanup();
+
+        checkTunnel(DnsPacket(1234, false), 20002);
+        auto localDns = DnsPacket(1234, false);
+        Write32(localDns.bytes->data() + 16, 0xc0a80001);
+        assert(localDns.view.Read(localDns.bytes->data(), localDns.bytes->size()));
+        checkTunnel(localDns, 20002);
+        auto invalidDns = MakePacket(false, 53000, 53);
+        Write32(invalidDns.bytes->data() + 16, 0xc0a80001);
+        Receive(*runtime, invalidDns);
+        assert(submissions.back() == *invalidDns.bytes);
+        auto localTcp = MakePacket(true);
+        Write32(localTcp.bytes->data() + 16, 0xc0a80001);
+        Receive(*runtime, localTcp);
+        assert(submissions.back() == *localTcp.bytes);
+        auto candidate = std::make_shared<miga::v2::ProtocolV2Session>(miga::v2::Invitation{}, htonl(0xcb007101), INVALID_SOCKET);
+        miga::v2::ProtocolV2SessionTestAccess::SetControl(*candidate, 54000, 24000);
+        auto candidates = std::make_shared<std::vector<std::weak_ptr<miga::v2::ProtocolV2Session>>>();
+        candidates->push_back(candidate);
+        runtime->preparingSessions.store(candidates);
+        auto control = MakePacket(false, 54000, 24000);
+        Receive(*runtime, control);
+        assert(submissions.back() == *control.bytes);
+        checkTunnel(MakePacket(false, 54000, 24001), 20002);
+
+        auto directReply = DnsPacket(1234, true);
+        const auto before = submissions.size();
+        Receive(*runtime, directReply);
+        assert(submissions.size() == before);
+
+        const auto state = runtime->config->ById(2)->transport->session->Snapshot();
+        Write32(directReply.bytes->data() + 12, localDns.view.tuple.remoteIp);
+        Write32(directReply.bytes->data() + 16, 0x0a420001);
+        miga::v2::Bytes encrypted;
+        assert(miga::v2::EncryptData(state->keys.dataS2C, state->keys.prefixS2C,
+            directReply.bytes->data(), directReply.bytes->size(), encrypted));
+        TunnelDatagram wrapper;
+        assert(wrapper.Build(encrypted.data(), encrypted.size(), htonl(0xc6336402), htonl(0xc0000201),
+            20002, 60002, 1, 1500, [&](const uint8_t* data, size_t length, size_t count) {
+                assert(count == 1);
+                std::vector<uint8_t> outer(data, data + length);
+                runtime->PacketReceived(outer.data(), outer.size(), directReply.address);
+                return true;
+            }));
+        assert(submissions.size() == before + 1);
+        assert(Read32(submissions.back().data() + 12) == localDns.view.tuple.remoteIp &&
+            Read32(submissions.back().data() + 16) == 0xc0000201 &&
+            Read16(submissions.back().data() + 28) == 1234);
+
+        runtime->routes[2] = {};
+        Receive(*runtime, packet);
+        assert(runtime->routeWaiting.size() == 1 && submissions.size() == before + 1);
+        apply(0);
+        assert(runtime->routeWaiting.empty());
+        Receive(*runtime, packet); Pump(*runtime);
+        assert(submissions.size() == before + 2 && Read32(submissions.back().data() + 16) == 0xc6336401);
     }
     static void LoopTests(Logger& logger, ConfigManager& source) {
         auto runtime = Fixture(logger, source);
@@ -366,8 +906,19 @@ struct NetworkRuntimeTests {
     }
 };
 
-int main() {
+int main(int argc, char** argv) {
+    assert(miga::v2::Initialize());
     std::filesystem::create_directories("Build/tests/runtime");
     assert(SetCurrentDirectoryW(L"Build/tests/runtime"));
+    const std::string_view option = argc == 2 ? argv[1] : "";
+    if (option == "--benchmark" || option == "--benchmark-valid-checksums") {
+        for (bool enabled : {false, true})
+            for (bool tunnelled : {false, true})
+                for (bool inbound : {false, true})
+                    for (size_t bytes : {40, 1400})
+                        for (bool tcp : {true, false})
+                            NetworkRuntimeTests::Benchmark(tcp, tunnelled, inbound, enabled, bytes, option == "--benchmark-valid-checksums");
+        return 0;
+    }
     NetworkRuntimeTests::Run();
 }

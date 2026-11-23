@@ -34,15 +34,15 @@
     <string name="drop_counts">Отклонено: повреждённые %1$d, фрагменты %2$d, endpoint %3$d, flow %4$d, размер %5$d, очередь %6$d, владелец %7$d</string>
     <string name="server_editor">Сервер</string><string name="ip_editor">IP-правило</string><string name="domain_editor">Доменное правило</string>
     <string name="server_name">Имя</string><string name="public_ipv4">Публичный IPv4</string>
-    <string name="ssh_login">Логин SSH</string><string name="ssh_password">Пароль SSH</string>
-    <string name="ssh_import">Подключиться и сохранить</string>
-    <string name="ssh_key_title">Ключ SSH-сервера</string>
-    <string name="ssh_key_confirm">Доверять этому ключу</string>
+
+
+
+
     <string name="ip_expression">IPv4, CIDR или диапазон</string><string name="domain_expression">Домен или *.example.com</string><string name="choose_server">Сервер</string>
     <string name="save">Сохранить</string><string name="unsaved_changes">Несохранённые изменения</string><string name="discard_question">Отменить правки?</string>
     <string name="discard">Отменить правки</string><string name="continue_editing">Продолжить</string>
     <string name="error_name">Укажите имя сервера до 80 символов</string><string name="error_endpoint">Проверьте публичный IPv4-адрес</string>
-    <string name="error_ssh_credentials">Укажите логин и пароль SSH</string><string name="error_ip">Проверьте IPv4, CIDR или диапазон</string>
+    <string name="error_ip">Проверьте IPv4, CIDR или диапазон</string>
     <string name="error_domain">Укажите домен</string><string name="error_server">Выберите сервер</string>
     <string name="notification_title">M.I.G.A. · Туннель запущен</string><string name="notification_stop">Остановить</string>
     <string name="notification_starting">M.I.G.A. · Запуск туннеля</string><string name="notification_servers">Работают серверы: %1$d из %2$d</string>
@@ -52,4 +52,10 @@
     <string name="state_partial">Частичный отказ</string><string name="state_network_wait">Нет сети · ожидание подключения</string>
     <string name="state_retrying">Восстановление подключения</string><string name="state_unavailable">Не удалось запустить туннель</string>
     <string name="state_revoked">Разрешение VPN отозвано</string>
+    <string name="migration_rules_kept">Правила приложений, IP и доменов сохранены. Откройте перенесённый сервер и введите новое приглашение miga2 от администратора.</string>
+    <string name="invitation_required">Требуется приглашение miga2</string>
+    <string name="enter_invitation">Ввести приглашение</string>
+    <string name="open_invitation_file">Загрузить файл .miga</string>
+    <string name="error_invitation_file">Не удалось прочитать приглашение. Выберите действительный файл .miga.</string>
+    <string name="replace_migrated_invitation">Приглашение будет добавлено в сервер «%1$s». Его правила сохранятся.</string>
 </resources>

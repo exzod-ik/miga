@@ -74,20 +74,20 @@
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <LibraryPath>D:\miga\miga_client;$(LibraryPath)</LibraryPath>
-    <OutDir>$(SolutionDir)Build\$(ProjectName)\bin\$(Platform)\$(Configuration)\</OutDir>
-    <IntDir>$(SolutionDir)Build\$(ProjectName)\obj\$(Platform)\$(Configuration)\</IntDir>
+    <OutDir>$(MigaOutputRoot)$(ProjectName)\bin\$(Platform)\$(Configuration)\</OutDir>
+    <IntDir>$(MigaWorkRoot)$(ProjectName)\obj\$(Platform)\$(Configuration)\</IntDir>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
-    <OutDir>$(SolutionDir)Build\$(ProjectName)\bin\$(Platform)\$(Configuration)\</OutDir>
-    <IntDir>$(SolutionDir)Build\$(ProjectName)\obj\$(Platform)\$(Configuration)\</IntDir>
+    <OutDir>$(MigaOutputRoot)$(ProjectName)\bin\$(Platform)\$(Configuration)\</OutDir>
+    <IntDir>$(MigaWorkRoot)$(ProjectName)\obj\$(Platform)\$(Configuration)\</IntDir>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
-    <OutDir>$(SolutionDir)Build\$(ProjectName)\bin\$(Platform)\$(Configuration)\</OutDir>
-    <IntDir>$(SolutionDir)Build\$(ProjectName)\obj\$(Platform)\$(Configuration)\</IntDir>
+    <OutDir>$(MigaOutputRoot)$(ProjectName)\bin\$(Platform)\$(Configuration)\</OutDir>
+    <IntDir>$(MigaWorkRoot)$(ProjectName)\obj\$(Platform)\$(Configuration)\</IntDir>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
-    <OutDir>$(SolutionDir)Build\$(ProjectName)\bin\$(Platform)\$(Configuration)\</OutDir>
-    <IntDir>$(SolutionDir)Build\$(ProjectName)\obj\$(Platform)\$(Configuration)\</IntDir>
+    <OutDir>$(MigaOutputRoot)$(ProjectName)\bin\$(Platform)\$(Configuration)\</OutDir>
+    <IntDir>$(MigaWorkRoot)$(ProjectName)\obj\$(Platform)\$(Configuration)\</IntDir>
   </PropertyGroup>
   <PropertyGroup Label="Vcpkg">
     <VcpkgEnableManifest>false</VcpkgEnableManifest>
@@ -99,15 +99,15 @@
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>WIN32;_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>SODIUM_STATIC;WIN32;_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
-      <AdditionalIncludeDirectories>$(ProjectDir)include;$(SolutionDir)Shared;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)include;$(ProjectDir)..\Shared;$(ProjectDir)..\dependencies\libsodium-1.0.22\src\libsodium\include;$(ProjectDir)..\dependencies\noise-c-cfe25410979a87391bb9ac8d4d4bef64e9f268c6\include;$(SolutionDir)Shared;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>ws2_32.lib;iphlpapi.lib;WinDivert.lib</AdditionalDependencies>
+      <AdditionalDependencies>ws2_32.lib;iphlpapi.lib;WinDivert.lib;crypt32.lib;advapi32.lib;shell32.lib;$(ProjectDir)..\Build\protocol-v2\lib\libsodium.lib;$(ProjectDir)..\Build\protocol-v2\lib\noiseprotocol.lib</AdditionalDependencies>
       <AdditionalLibraryDirectories>$(ProjectDir)windivert\$(Platform);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <Version>
       </Version>
@@ -123,40 +123,41 @@
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>WIN32;NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>SODIUM_STATIC;WIN32;NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
-      <AdditionalIncludeDirectories>$(ProjectDir)include;$(SolutionDir)Shared;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)include;$(ProjectDir)..\Shared;$(ProjectDir)..\dependencies\libsodium-1.0.22\src\libsodium\include;$(ProjectDir)..\dependencies\noise-c-cfe25410979a87391bb9ac8d4d4bef64e9f268c6\include;$(SolutionDir)Shared;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>$(ProjectDir)windivert\$(Platform);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>ws2_32.lib;iphlpapi.lib;WinDivert.lib</AdditionalDependencies>
-      <ProgramDatabaseFile>$(OutDir)$(TargetName).pdb</ProgramDatabaseFile>
+      <AdditionalDependencies>ws2_32.lib;iphlpapi.lib;WinDivert.lib;crypt32.lib;advapi32.lib;shell32.lib;$(ProjectDir)..\Build\protocol-v2\lib\libsodium.lib;$(ProjectDir)..\Build\protocol-v2\lib\noiseprotocol.lib</AdditionalDependencies>
+      <ProgramDatabaseFile>$(IntDir)$(TargetName).pdb</ProgramDatabaseFile>
       <Version>
       </Version>
     </Link>
     <PostBuildEvent>
-      <Command>xcopy $(ProjectDir)windivert\$(Platform) $(OutDir) /y</Command>
+      <Command>copy /y "$(ProjectDir)windivert\$(Platform)\WinDivert.dll" "$(OutDir)"
+copy /y "$(ProjectDir)windivert\$(Platform)\WinDivert64.sys" "$(OutDir)"</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>_DEBUG;_CONSOLE;_WINSOCK_DEPRECATED_NO_WARNINGS;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>SODIUM_STATIC;_DEBUG;_CONSOLE;_WINSOCK_DEPRECATED_NO_WARNINGS;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <ForcedIncludeFiles>
       </ForcedIncludeFiles>
-      <AdditionalIncludeDirectories>$(ProjectDir)include;$(SolutionDir)Shared;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)include;$(ProjectDir)..\Shared;$(ProjectDir)..\dependencies\libsodium-1.0.22\src\libsodium\include;$(ProjectDir)..\dependencies\noise-c-cfe25410979a87391bb9ac8d4d4bef64e9f268c6\include;$(SolutionDir)Shared;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>ws2_32.lib;iphlpapi.lib;WinDivert.lib</AdditionalDependencies>
+      <AdditionalDependencies>ws2_32.lib;iphlpapi.lib;WinDivert.lib;crypt32.lib;advapi32.lib;shell32.lib;$(ProjectDir)..\Build\protocol-v2\lib\libsodium.lib;$(ProjectDir)..\Build\protocol-v2\lib\noiseprotocol.lib</AdditionalDependencies>
       <OptimizeReferences>false</OptimizeReferences>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <AdditionalLibraryDirectories>$(ProjectDir)windivert\$(Platform);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
@@ -174,22 +175,23 @@
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>SODIUM_STATIC;NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
-      <AdditionalIncludeDirectories>$(ProjectDir)include;$(SolutionDir)Shared;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)include;$(ProjectDir)..\Shared;$(ProjectDir)..\dependencies\libsodium-1.0.22\src\libsodium\include;$(ProjectDir)..\dependencies\noise-c-cfe25410979a87391bb9ac8d4d4bef64e9f268c6\include;$(SolutionDir)Shared;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>$(ProjectDir)windivert\$(Platform);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>ws2_32.lib;iphlpapi.lib;WinDivert.lib</AdditionalDependencies>
-      <ProgramDatabaseFile>$(OutDir)$(TargetName).pdb</ProgramDatabaseFile>
+      <AdditionalDependencies>ws2_32.lib;iphlpapi.lib;WinDivert.lib;crypt32.lib;advapi32.lib;shell32.lib;$(ProjectDir)..\Build\protocol-v2\lib\libsodium.lib;$(ProjectDir)..\Build\protocol-v2\lib\noiseprotocol.lib</AdditionalDependencies>
+      <ProgramDatabaseFile>$(IntDir)$(TargetName).pdb</ProgramDatabaseFile>
       <Version>
       </Version>
     </Link>
     <PostBuildEvent>
-      <Command>xcopy $(ProjectDir)windivert\$(Platform) $(OutDir) /y</Command>
+      <Command>copy /y "$(ProjectDir)windivert\$(Platform)\WinDivert.dll" "$(OutDir)"
+copy /y "$(ProjectDir)windivert\$(Platform)\WinDivert64.sys" "$(OutDir)"</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
@@ -201,12 +203,27 @@
     <ClCompile Include="src\ConfigManager.cpp" />
     <ClCompile Include="src\main.cpp" />
     <ClCompile Include="src\NetworkRuntime.cpp" />
+    <ClCompile Include="src\DiagnosticSession.cpp" />
+    <ClCompile Include="src\ProtocolProfiles.cpp" />
+    <ClCompile Include="src\ProtocolV2Session.cpp" />
+    <ClCompile Include="..\Shared\ProtocolV2.cpp" />
+    <ClCompile Include="..\Shared\DiagnosticLoad.cpp" />
+    <ClCompile Include="..\Shared\ProtocolV2Packets.cpp" />
     <ClCompile Include="src\MigaClient.cpp" />
     <ClCompile Include="src\ServiceManager.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="include\NetworkRuntime.h" />
+    <ClInclude Include="..\Shared\DiagnosticLoad.h" />
+    <ClInclude Include="include\DiagnosticSession.h" />
+    <ClInclude Include="include\ProtocolProfiles.h" />
+    <ClInclude Include="include\ProtocolV2Session.h" />
+    <ClInclude Include="..\Shared\ProtocolV2.h" />
+    <ClInclude Include="..\Shared\ProtocolV2Packets.h" />
     <ClInclude Include="include\runtime\DnsClassifier.h" />
+    <ClInclude Include="include\runtime\SyntheticDnsStore.h" />
+    <ClInclude Include="include\runtime\SyntheticDnsResolver.h" />
+    <ClInclude Include="include\runtime\SyntheticDnsWire.h" />
     <ClInclude Include="include\runtime\FlowTable.h" />
     <ClInclude Include="include\runtime\RuntimeConfig.h" />
     <ClInclude Include="include\runtime\RuntimeMailbox.h" />
@@ -232,7 +249,6 @@
     <ResourceCompile Include="miga_client.rc" />
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Remove="..\Shared\UdpPacketAssembler.cpp;$(MSBuildProjectDirectory)\..\Shared\UdpPacketAssembler.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\AsyncTunnelSender.cpp" />
@@ -244,6 +260,9 @@
     <ClCompile Include="src\TunnelRouteCache.cpp" />
     <ClCompile Include="src\WindowsProcessIdentity.cpp" />
     <ClCompile Include="src\runtime\DnsClassifier.cpp" />
+    <ClCompile Include="src\runtime\SyntheticDnsStore.cpp" />
+    <ClCompile Include="src\runtime\SyntheticDnsResolver.cpp" />
+    <ClCompile Include="src\runtime\SyntheticDnsWire.cpp" />
     <ClCompile Include="src\runtime\FlowTable.cpp" />
     <ClCompile Include="src\runtime\RuntimeConfig.cpp" />
     <ClCompile Include="src\runtime\RuntimeTypes.cpp" />

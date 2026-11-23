@@ -1,4 +1,60 @@
 #include "NetworkRuntimeImpl.h"
+#include "runtime/SyntheticDnsWire.h"
+#include <fstream>
+
+namespace {
+void TranslateDirect(uint8_t* bytes, const PacketView& view, WINDIVERT_ADDRESS& address,
+    uint32_t translatedIp, bool source, bool dirty = false) {
+    const auto original = source ? view.tuple.localIp : view.tuple.remoteIp;
+    const bool transportValid = view.tuple.protocol == 6 ? address.TCPChecksum : address.UDPChecksum;
+    if (!dirty && address.IPChecksum && transportValid &&
+        miga::v2::TranslateAddress(bytes, view.length, original, translatedIp, source))
+        return;
+    Write32(bytes + (source ? 12 : 16), translatedIp);
+    WinDivertHelperCalcChecksums(bytes, static_cast<UINT>(view.length), &address, 0);
+}
+
+constexpr uint16_t BootstrapDnsPort = 53;
+constexpr uint16_t BootstrapDnsPayload = 1232;
+constexpr size_t MaximumHostsBytes = 1024 * 1024;
+
+bool BootstrapAddress(uint32_t address) {
+    return address >= 0x01000000 && address < 0xe0000000 && !SyntheticDnsStore::Contains(address);
+}
+
+std::vector<uint32_t> BootstrapDnsServers() {
+    ULONG length = 0;
+    if (GetNetworkParams(nullptr, &length) != ERROR_BUFFER_OVERFLOW || !length || length > 1024 * 1024)
+        return {};
+    std::vector<uint8_t> buffer(length);
+    auto* info = reinterpret_cast<FIXED_INFO*>(buffer.data());
+    if (GetNetworkParams(info, &length) != NO_ERROR)
+        return {};
+    std::vector<uint32_t> servers;
+    for (const auto* item = &info->DnsServerList; item && servers.size() < 3; item = item->Next) {
+        in_addr address{};
+        if (inet_pton(AF_INET, item->IpAddress.String, &address) != 1)
+            continue;
+        const auto ip = ntohl(address.s_addr);
+        if (BootstrapAddress(ip) && std::find(servers.begin(), servers.end(), ip) == servers.end())
+            servers.push_back(ip);
+    }
+    return servers;
+}
+
+struct BootstrapSocket {
+    SOCKET handle = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    ~BootstrapSocket() { if (handle != INVALID_SOCKET) closesocket(handle); }
+};
+
+struct BootstrapScope {
+    std::atomic<uint64_t>& active;
+    explicit BootstrapScope(std::atomic<uint64_t>& tuple, uint64_t key) : active(tuple) {
+        active.store(key, std::memory_order_release);
+    }
+    ~BootstrapScope() { active.store(0, std::memory_order_release); }
+};
+}
 
 NetworkRuntime::NetworkRuntime(ConfigManager* config, Logger* logger) : impl_(std::make_unique<Impl>(config, logger)) {}
 NetworkRuntime::~NetworkRuntime() = default;
@@ -19,7 +75,7 @@ NetworkRuntime::Impl::Receive::~Receive() {
     if (operation.hEvent) CloseHandle(operation.hEvent);
 }
 
-NetworkRuntime::Impl::Impl(ConfigManager* source, Logger* output) : initial(source), logger(output) {}
+NetworkRuntime::Impl::Impl(ConfigManager* source, Logger* output) : initial(source), logger(output), syntheticDns(output) {}
 
 NetworkRuntime::Impl::~Impl() { Stop(); if (stop) CloseHandle(stop); }
 
@@ -72,7 +128,8 @@ void NetworkRuntime::Impl::SeedSockets() {
         }
     }
     QueryPerformanceCounter(&timestamp);
-    for (const auto& tuple : existingTcp) flows.Seed(tuple, timestamp.QuadPart, Clock::now());
+    for (const auto& tuple : existingTcp)
+        if (!SyntheticAddress(tuple.remoteIp)) flows.Seed(tuple, timestamp.QuadPart, Clock::now());
 }
 
 void NetworkRuntime::Impl::ConfigureProbes() {
@@ -115,11 +172,118 @@ void NetworkRuntime::Impl::Drop(const char* reason) {
     logger->logLazy(LOGGER_LEVEL_DEBUG, [&] {return std::string("routing_drop reason=") + reason;});
 }
 
+uint64_t NetworkRuntime::Impl::BootstrapDnsKey(const SocketTuple& tuple) {
+    return uint64_t(tuple.remoteIp) << 16 | tuple.localPort;
+}
+
+std::optional<uint32_t> NetworkRuntime::Impl::BootstrapHosts(std::string_view contents, std::string_view name) {
+    if (contents.starts_with("\xef\xbb\xbf"))
+        contents.remove_prefix(3);
+    while (!contents.empty()) {
+        const auto newline = contents.find('\n');
+        auto line = contents.substr(0, newline);
+        contents.remove_prefix(newline == std::string_view::npos ? contents.size() : newline + 1);
+        line = line.substr(0, line.find('#'));
+        const auto token = [&] {
+            const auto first = line.find_first_not_of(" \t\r");
+            if (first == std::string_view::npos) {
+                line = {};
+                return std::string_view{};
+            }
+            line.remove_prefix(first);
+            const auto end = line.find_first_of(" \t\r");
+            const auto value = line.substr(0, end);
+            line.remove_prefix(value.size());
+            return value;
+        };
+        const auto ip = token();
+        if (ip.empty() || ip.size() >= INET_ADDRSTRLEN)
+            continue;
+        in_addr address{};
+        if (inet_pton(AF_INET, std::string(ip).c_str(), &address) != 1 || !BootstrapAddress(ntohl(address.s_addr)))
+            continue;
+        for (auto alias = token(); !alias.empty(); alias = token()) {
+            if (NormalizeSyntheticDnsName(alias) == name)
+                return ntohl(address.s_addr);
+        }
+    }
+    return std::nullopt;
+}
+
+std::optional<uint32_t> NetworkRuntime::Impl::ResolveBootstrapHostname(std::string_view host) {
+    const auto name = NormalizeSyntheticDnsName(host);
+    if (!name)
+        return std::nullopt;
+    wchar_t systemDirectory[MAX_PATH]{};
+    const auto size = GetSystemDirectoryW(systemDirectory, MAX_PATH);
+    if (size && size < MAX_PATH) {
+        const auto hostsPath = std::filesystem::path(systemDirectory) / L"drivers" / L"etc" / L"hosts";
+        std::ifstream hosts(hostsPath, std::ios::binary | std::ios::ate);
+        const auto length = hosts.tellg();
+        if (length >= 0 && length <= static_cast<std::streamoff>(MaximumHostsBytes)) {
+            std::string contents(static_cast<size_t>(length), '\0');
+            hosts.seekg(0);
+            if (hosts.read(contents.data(), static_cast<std::streamsize>(contents.size()))) {
+                if (const auto address = BootstrapHosts(contents, *name))
+                    return address;
+            }
+        }
+    }
+
+    for (const auto server : BootstrapDnsServers()) {
+        if (WaitForSingleObject(stop, 0) != WAIT_TIMEOUT)
+            break;
+        BootstrapSocket channel;
+        if (channel.handle == INVALID_SOCKET)
+            continue;
+        const BOOL exclusive = TRUE;
+        const DWORD timeout = 1250;
+        sockaddr_in local{}; local.sin_family = AF_INET;
+        sockaddr_in destination{}; destination.sin_family = AF_INET;
+        destination.sin_port = htons(BootstrapDnsPort);
+        destination.sin_addr.s_addr = htonl(server);
+        if (setsockopt(channel.handle, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, reinterpret_cast<const char*>(&exclusive),
+                sizeof(exclusive)) != 0 ||
+            setsockopt(channel.handle, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeout),
+                sizeof(timeout)) != 0 ||
+            bind(channel.handle, reinterpret_cast<const sockaddr*>(&local), sizeof(local)) != 0 ||
+            connect(channel.handle, reinterpret_cast<const sockaddr*>(&destination), sizeof(destination)) != 0)
+            continue;
+        int localSize = sizeof(local);
+        if (getsockname(channel.handle, reinterpret_cast<sockaddr*>(&local), &localSize) != 0 || !local.sin_port)
+            continue;
+        const BootstrapScope direct(bootstrapDnsTuple, BootstrapDnsKey({17, ntohl(local.sin_addr.s_addr),
+            ntohs(local.sin_port), server, BootstrapDnsPort}));
+        uint16_t id = 0;
+        miga::v2::Random(reinterpret_cast<uint8_t*>(&id), sizeof(id));
+        const auto query = BuildSyntheticDnsQuery(*name, 1, id, BootstrapDnsPayload);
+        if (query.empty() || send(channel.handle, reinterpret_cast<const char*>(query.data()), static_cast<int>(query.size()), 0)
+            != static_cast<int>(query.size()))
+            continue;
+        std::array<uint8_t, BootstrapDnsPayload> response{};
+        const auto received = recv(channel.handle, reinterpret_cast<char*>(response.data()), static_cast<int>(response.size()), 0);
+        if (received < 12 || Read16(response.data()) != id)
+            continue;
+        const auto parsed = ReadSyntheticDnsResponse(std::span(response).first(static_cast<size_t>(received)));
+        if (!parsed || parsed->name != *name)
+            continue;
+        for (const auto& [address, ttl] : parsed->addresses)
+            if (BootstrapAddress(address))
+                return address;
+    }
+    return std::nullopt;
+}
+
 std::shared_ptr<Configuration> NetworkRuntime::Impl::Prepare(const std::vector<ServerConfig>& servers, uint16_t mss, int level,
-    const std::shared_ptr<const Configuration>& previous, std::unordered_map<size_t, TunnelRouteCache::Route>& ready) {
+    const std::string& fullRoutingProfileId, bool dnsResolverEnabled, uint32_t dnsResolverReservedThrough, const std::shared_ptr<const Configuration>& previous, std::unordered_map<size_t, TunnelRouteCache::Route>& ready) {
     auto result = std::make_shared<Configuration>();
     result->version = ++nextConfiguration; result->mss = mss; result->logLevel = level;
+    result->dnsResolverEnabled = dnsResolverEnabled && fullRoutingProfileId.empty();
+    result->dnsResolverReserveRange = dnsResolverReservedThrough != 0;
+    result->dnsResolverReservedThrough = dnsResolverReservedThrough;
     std::unordered_set<size_t> reused;
+    std::vector<std::shared_ptr<Transport>> newTransports;
+    auto newSessions = std::make_shared<std::vector<std::weak_ptr<miga::v2::ProtocolV2Session>>>();
     for (const auto& rules : servers) {
         std::shared_ptr<Transport> transport;
         if (previous) for (const auto& old : previous->servers)
@@ -127,14 +291,19 @@ std::shared_ptr<Configuration> NetworkRuntime::Impl::Prepare(const std::vector<S
         if (!transport) {
             transport = std::make_shared<Transport>();
             transport->id = ++nextServer;
-            if (!transport->transform.Initialize(rules.xorKeyBase64, rules.swapKeyBase64)) return {};
             in_addr address{};
             if (inet_pton(AF_INET, rules.serverIP.c_str(), &address) != 1) {
-                addrinfo hint{}; hint.ai_family = AF_INET; hint.ai_socktype = SOCK_DGRAM;
-                addrinfo* resolved = nullptr;
-                if (getaddrinfo(rules.serverIP.c_str(), nullptr, &hint, &resolved) != 0) return {};
-                address = reinterpret_cast<sockaddr_in*>(resolved->ai_addr)->sin_addr;
-                freeaddrinfo(resolved);
+                if (dnsResolverReservedThrough || (previous && previous->dnsResolverReserveRange)) {
+                    const auto resolved = ResolveBootstrapHostname(rules.serverIP);
+                    if (!resolved) { Error("tunnel_endpoint_dns_failed", WSAHOST_NOT_FOUND); return {}; }
+                    address.s_addr = htonl(*resolved);
+                } else {
+                    addrinfo hint{}; hint.ai_family = AF_INET; hint.ai_socktype = SOCK_DGRAM;
+                    addrinfo* resolved = nullptr;
+                    if (getaddrinfo(rules.serverIP.c_str(), nullptr, &hint, &resolved) != 0) return {};
+                    address = reinterpret_cast<sockaddr_in*>(resolved->ai_addr)->sin_addr;
+                    freeaddrinfo(resolved);
+                }
             }
             transport->destination = address.s_addr;
             transport->reservation = ::socket(AF_INET, SOCK_DGRAM, 0);
@@ -151,10 +320,23 @@ std::shared_ptr<Configuration> NetworkRuntime::Impl::Prepare(const std::vector<S
         TunnelRouteCache::Route route;
         const auto error = windowsRoutes.Resolve(transport->destination, route);
         if (error != NO_ERROR) Error("tunnel_route_failed", error);
+        if (!transport->session) {
+            miga::v2::Invitation invitation;
+            if (!ProtocolProfiles::Load(rules.profileId, invitation)) return {};
+            transport->session = std::make_shared<miga::v2::ProtocolV2Session>(invitation, transport->destination, transport->reservation);
+            transport->session->SetMaximumPayload(route.mtu > 28 ? route.mtu - 28 : 0);
+            newTransports.push_back(transport);
+            newSessions->push_back(transport->session);
+        }
         ready.emplace(transport->id, route);
         reused.insert(transport->id);
+        if (!fullRoutingProfileId.empty() && rules.profileId == fullRoutingProfileId)
+            result->fullRoutingServerId = transport->id;
         result->servers.push_back({rules, std::move(transport)});
     }
+    if (previous && !newSessions->empty()) preparingSessions.store(newSessions);
+    for (const auto& transport : newTransports)
+        if (!transport->session->Start(ntohl(ready.at(transport->id).path.source))) return {};
     result->Index();
     return result;
 }
@@ -171,14 +353,56 @@ void NetworkRuntime::Impl::RefreshRoutes() {
     }
     routeCache = updates;
     networkCommands.Push([this, version = current->version, updates = std::move(updates)]() mutable {
-        if (config && config->version == version) { routes = std::move(updates); ResumeRoutes(); }
+        if (config && config->version == version) {
+            ApplyRoutes(*config, std::move(updates));
+            ResumeRoutes();
+        }
     });
     routeRefreshPending.store(false);
+}
+
+void NetworkRuntime::Impl::ApplyRoutes(const Configuration& current, std::unordered_map<size_t, TunnelRouteCache::Route> updates) {
+    for (const auto& server : current.servers) {
+        const auto next = updates.find(server.transport->id);
+        if (next == updates.end() || !server.transport->session) continue;
+        auto& route = next->second;
+        const auto previous = routes.find(server.transport->id);
+        if (previous != routes.end()) {
+            const auto& old = previous->second;
+            if (route.revision < old.revision || (route.revision == old.revision && route.checked < old.checked))
+                route = old;
+            if (!route.mtu)
+                route.path = old.path;
+            else if (old.path.source && route.path != old.path)
+                server.transport->session->RequestResume();
+        }
+        server.transport->session->SetMaximumPayload(route.mtu > 28 ? route.mtu - 28 : 0);
+    }
+    routes = std::move(updates);
 }
 
 void NetworkRuntime::Impl::QueueRouteRefresh() {
     if (!routeRefreshPending.exchange(true) && !windowsCommands.TryPush([this] {RefreshRoutes();}))
         routeRefreshPending.store(false);
+}
+
+DWORD NetworkRuntime::Impl::DnsWait() {
+    auto deadline = syntheticDns.NextDeadline();
+    if (deadline == (Clock::time_point::max)()) return INFINITE;
+    if (deadline <= Clock::now()) {
+        const auto current = published.load();
+        if (!current) return INFINITE;
+        SyntheticDnsResolver::Outputs output;
+        syntheticDns.Cleanup(Clock::now(), *current, buffers, output);
+        if (!output.empty()) networkCommands.Push([this, current, output = std::move(output)] {
+            if (prepared || config != current) return;
+            for (const auto& item : output) Send(item.packet, item.route, true);
+        });
+        deadline = syntheticDns.NextDeadline();
+        if (deadline == (Clock::time_point::max)()) return INFINITE;
+    }
+    const auto delay = std::chrono::ceil<std::chrono::milliseconds>(deadline - Clock::now()).count();
+    return delay > 0 ? static_cast<DWORD>(delay) : 0;
 }
 
 void NetworkRuntime::Impl::Maintenance() {
@@ -261,17 +485,26 @@ void NetworkRuntime::Impl::SocketLoop() {
                 if (address.IPv6 || (address.Socket.Protocol != 6 && address.Socket.Protocol != 17)) continue;
                 SocketTuple tuple{address.Socket.Protocol, address.Socket.LocalAddr[0], address.Socket.LocalPort,
                     address.Socket.RemoteAddr[0], address.Socket.RemotePort};
+                const auto pid = address.Socket.ProcessId;
+                const bool observesOwner = address.Event == WINDIVERT_EVENT_SOCKET_BIND ||
+                    address.Event == WINDIVERT_EVENT_SOCKET_CONNECT || address.Event == WINDIVERT_EVENT_SOCKET_ACCEPT;
+                auto identity = observesOwner ? processes.Get(pid, LoadWindowsProcessIdentity) : ProcessOwner{};
                 logger->logLazy(LOGGER_LEVEL_DEBUG, [&] {
+                    auto process = identity;
+                    if (!process) {
+                        const auto owner = directory.Find(tuple, address.Timestamp, false, Clock::now());
+                        if (owner && owner->owner->endpointId == address.Socket.EndpointId && owner->owner->process->pid == pid)
+                            process = owner->owner->process;
+                    }
                     return "socket_event type=" + std::to_string(address.Event) + Describe(tuple) +
-                        " pid=" + std::to_string(address.Socket.ProcessId) + " endpoint_id=" + std::to_string(address.Socket.EndpointId) +
+                        " pid=" + std::to_string(pid) + " process=" + LogValue(process ? process->Name() : "unknown") +
+                        " endpoint_id=" + std::to_string(address.Socket.EndpointId) +
                         " parent_endpoint_id=" + std::to_string(address.Socket.ParentEndpointId) +
                         " event_timestamp_qpc=" + std::to_string(address.Timestamp);
                 });
                 if (address.Event == WINDIVERT_EVENT_SOCKET_CLOSE)
-                    directory.Close(tuple, address.Socket.EndpointId, address.Socket.ProcessId, address.Timestamp, Clock::now());
-                else if (address.Event == WINDIVERT_EVENT_SOCKET_BIND || address.Event == WINDIVERT_EVENT_SOCKET_CONNECT ||
-                    address.Event == WINDIVERT_EVENT_SOCKET_ACCEPT) {
-                    auto identity = processes.Get(address.Socket.ProcessId, LoadWindowsProcessIdentity);
+                    directory.Close(tuple, address.Socket.EndpointId, pid, address.Timestamp, Clock::now());
+                else if (observesOwner) {
                     directory.Observe(tuple, std::make_shared<const SocketOwner>(SocketOwner{
                         std::move(identity), address.Socket.EndpointId, address.Timestamp, false,
                         address.Event == WINDIVERT_EVENT_SOCKET_BIND ? SocketOrigin::Bind :
@@ -305,32 +538,59 @@ void NetworkRuntime::Impl::Request(const FlowKey& key) {
         auto active = published.load();
         if (!active || active->version != current->version) {
             networkCommands.Push([this, key, request, version = current->version] {
-                RouteDecision stale; stale.request = request; stale.configVersion = version; Classified(key, stale, false, {});
+                RouteDecision stale; stale.request = request; stale.configVersion = version; Classified(key, stale, false, {}, {});
             });
             return;
         }
         const auto now = Clock::now();
+        const bool synthetic = SyntheticDnsResolver::Contains(*current, packet.view.tuple.remoteIp);
         auto owner = directory.Find(packet.view.tuple, packet.address.Timestamp, packet.view.syn, now);
         RouteDecision decision;
         decision.request = request; decision.configVersion = current->version;
         decision.owner = owner;
         std::vector<DnsClassifier::Output> dnsOutput;
+        std::string processName;
         bool dnsQuery = false;
-        if (owner) {
+        if (synthetic) {
+            if (owner) {
+                const auto& process = owner->owner->process;
+                processName = process->Name();
+                std::optional<size_t> serverOverride;
+                FlowRoute forcedRoute;
+                if (process->pid == 4 || process->pid == ownPid || _stricmp(processName.c_str(), "MIGA Agent.exe") == 0)
+                    serverOverride = 0;
+                else if (diagnostics.enabled.load(std::memory_order_relaxed) && diagnostics.Route(process, forcedRoute))
+                    serverOverride = forcedRoute.serverId;
+                syntheticDns.Route(packet, *current, processName, buffers, now, decision, dnsOutput, serverOverride);
+                if (decision.route.translatedIp && serverOverride)
+                    decision.reason = *serverOverride ? "diagnostic_override" : "synthetic_direct_bypass";
+            } else {
+                decision.route = {FlowRoute::Kind::Unavailable};
+                decision.reason = "synthetic_owner_unavailable";
+            }
+        } else if (owner) {
             const auto pid = owner->owner->process->pid;
             if (pid != 4 && pid != ownPid) {
-                const auto name = owner->owner->process->Name();
-                dnsQuery = packet.view.tuple.protocol == 17 && packet.view.tuple.remotePort == 53;
-                if (dnsQuery) dnsOutput = dns.Query(packet, *current, name, buffers, now);
-                else if (!(packet.view.tuple.protocol == 6 && !packet.view.syn)) {
-                    if (const auto* server = dns.Select(*current, name, packet.view.tuple.remoteIp, now))
+                processName = owner->owner->process->Name();
+                const bool bypass = _stricmp(processName.c_str(), "MIGA Agent.exe") == 0;
+                const bool forced = !bypass && !Local(packet.view.tuple.remoteIp) &&
+                    diagnostics.enabled.load(std::memory_order_relaxed) && diagnostics.Route(owner->owner->process, decision.route);
+                if (forced) decision.reason = "diagnostic_override";
+                if (bypass) decision.reason = "agent_control";
+                dnsQuery = !bypass && !forced && packet.view.tuple.protocol == 17 && packet.view.tuple.remotePort == 53;
+                if (dnsQuery) dnsOutput = dns.Query(packet, *current, processName, buffers, now);
+                else if (!bypass && !forced && !(packet.view.tuple.protocol == 6 && !packet.view.syn)) {
+                    if (const auto* server = dns.Select(*current, processName, packet.view.tuple.remoteIp, now, &decision.reason))
                         decision.route = {FlowRoute::Kind::Tunnel, server->transport->id,
                             dns.Translate(packet.view.tuple.remoteIp, server->transport->id, now)};
                 }
             }
         }
-        networkCommands.Push([this, key, decision, dnsQuery, dnsOutput = std::move(dnsOutput)]() mutable {
-            Classified(key, decision, dnsQuery, std::move(dnsOutput));
+        if (processName.empty() && owner && logger->isEnabled(LOGGER_LEVEL_DEBUG))
+            processName = owner->owner->process->Name();
+        networkCommands.Push([this, key, decision, dnsQuery, dnsOutput = std::move(dnsOutput),
+            processName = std::move(processName)]() mutable {
+            Classified(key, decision, dnsQuery, std::move(dnsOutput), processName);
         });
     })) {group.retryQueued = true; classificationRetries.push_back(key); return;}
     group.outstanding = true; group.request = request;
@@ -350,16 +610,32 @@ Packet NetworkRuntime::Impl::Take(Waiting& group) {
     --pendingPackets; pendingBytes -= packet.bytes->size(); return packet;
 }
 
-void NetworkRuntime::Impl::Classified(const FlowKey& key, const RouteDecision& decision, bool dnsQuery, std::vector<DnsClassifier::Output> output) {
+void NetworkRuntime::Impl::Classified(const FlowKey& key, const RouteDecision& decision, bool dnsQuery,
+    std::vector<DnsClassifier::Output> output, const std::string& processName) {
     auto found = waiting.find(key);
     if (found == waiting.end() || found->second.request != decision.request) return;
     auto& group = found->second; group.outstanding = false;
     if (prepared) return;
     if (decision.configVersion != config->version) {Request(key); return;}
     const auto& first = group.packets.front();
-    auto latest = directory.Find(first.view.tuple, first.address.Timestamp, first.view.syn, Clock::now());
-    if (!decision.owner || !latest || latest->owner != decision.owner->owner) {
-        if (latest) Request(key);
+    if (!decision.ownerIndependent) {
+        const auto latest = directory.Find(first.view.tuple, first.address.Timestamp, first.view.syn, Clock::now());
+        if (!decision.owner || !latest || latest->owner != decision.owner->owner) {
+            if (latest) Request(key);
+            return;
+        }
+    }
+    if (decision.resolutionPending) {
+        for (auto& item : output) Send(item.packet, item.route, true);
+        return;
+    }
+    if (decision.owner && diagnostics.enabled.load(std::memory_order_relaxed) &&
+        (diagnostics.Selected(decision.owner->owner->process) || diagnostics.TracksPort(first.view.tuple)))
+        diagnostics.Observe(first.view.tuple, decision.owner->owner->process, decision.route, decision.reason);
+    if (SyntheticAddress(first.view.tuple.remoteIp) &&
+        decision.route.kind == FlowRoute::Kind::Unavailable) {
+        while (!group.packets.empty()) {Take(group); Drop(decision.reason);}
+        RemoveWaiting(key);
         return;
     }
     if (dnsQuery) {
@@ -370,11 +646,13 @@ void NetworkRuntime::Impl::Classified(const FlowKey& key, const RouteDecision& d
         if (!flows.Commit(first.view, first.address.Timestamp, decision, Clock::now())) return;
         group.readyGeneration = flows.Lookup(first.view, first.address.Timestamp, Clock::now()).generation;
         logger->logLazy(LOGGER_LEVEL_DEBUG, [&] {
-            return "route_created" + Describe(first.view, first.address) +
-                " pid=" + std::to_string(decision.owner->owner->process->pid) +
+            auto description = "route_created" + Describe(first.view, first.address) +
+                " generation=" + std::to_string(group.readyGeneration) + " server_id=" + std::to_string(decision.route.serverId);
+            if (decision.owner) description += " pid=" + std::to_string(decision.owner->owner->process->pid) +
+                " process=" + LogValue(processName.empty() ? "unknown" : processName) +
                 " endpoint_id=" + std::to_string(decision.owner->owner->endpointId) +
-                " generation=" + std::to_string(group.readyGeneration) + " server_id=" + std::to_string(decision.route.serverId) +
                 " owner_timestamp_qpc=" + std::to_string(decision.owner->owner->timestamp);
+            return description;
         });
         ScheduleReady(key, group);
         return;
@@ -436,9 +714,16 @@ void NetworkRuntime::Impl::ExpireWaiting() {
             --packetBudget;
             group.request = ++nextRequest; group.outstanding = false;
             auto packet = Take(group);
+            if (SyntheticAddress(packet.view.tuple.remoteIp)) {
+                Drop("synthetic_resolution_timeout");
+                continue;
+            }
             auto result = flows.Expire(packet.view, packet.address.Timestamp, now);
+            if (!result.owner && diagnostics.enabled.load(std::memory_order_relaxed) && diagnostics.TracksPort(packet.view.tuple))
+                diagnostics.ObserveUnowned(packet.view.tuple);
             logger->logLazy(LOGGER_LEVEL_DEBUG, [&] {return std::string("pending_timeout reason=") + result.reason + Describe(packet.view, packet.address);});
-            if (result.action == FlowTable::Action::Send) {
+            if (result.action == FlowTable::Action::Send && !(diagnostics.enabled.load(std::memory_order_relaxed) &&
+                diagnostics.TracksPort(packet.view.tuple) && diagnostics.RejectFallback(packet.view.tuple, result.route))) {
                 logger->recordWarning(NetworkWarning::PendingPidFallback);
                 Send(packet, result.route, false);
             } else Drop(result.reason);
@@ -454,7 +739,7 @@ void NetworkRuntime::Impl::ResumeRoutes() {
     while (budget-- && !routeWaiting.empty()) {
         auto item = std::move(routeWaiting.front()); routeWaiting.pop_front();
         const auto found = routes.find(item.route.serverId);
-        const bool valid = found != routes.end() && found->second.source && found->second.revision == windowsRoutes.Revision();
+        const bool valid = found != routes.end() && found->second.mtu && found->second.revision == windowsRoutes.Revision();
         if (!valid && Clock::now() < item.expires && config->ById(item.route.serverId)) {
             routeWaiting.push_back(std::move(item)); continue;
         }
@@ -466,16 +751,19 @@ void NetworkRuntime::Impl::ResumeRoutes() {
 }
 
 void NetworkRuntime::Impl::Send(const Packet& packet, const FlowRoute& route, bool dirty, bool resumed) {
+    if (diagnostics.enabled.load(std::memory_order_relaxed) && diagnostics.TracksPort(packet.view.tuple) &&
+        diagnostics.RejectFallback(packet.view.tuple, route)) { Drop("diagnostic_route_unconfirmed"); return; }
     auto* bytes = packet.bytes->data();
     auto address = packet.address;
     if (route.kind == FlowRoute::Kind::Direct) {
-        if (dirty) WinDivertHelperCalcChecksums(bytes, static_cast<UINT>(packet.view.length), &address, 0);
+        if (route.translatedIp) TranslateDirect(bytes, packet.view, address, route.translatedIp, false, dirty);
+        else if (dirty) WinDivertHelperCalcChecksums(bytes, static_cast<UINT>(packet.view.length), &address, 0);
         reinject.Send(network, bytes, packet.view.length, &address, 1); ++sentDirect; return;
     }
     const auto* server = config->ById(route.serverId);
     if (route.kind != FlowRoute::Kind::Tunnel || !server) {Drop("route_server_unavailable"); return;}
     auto ready = routes.find(route.serverId);
-    if (ready == routes.end() || !ready->second.source || ready->second.revision != windowsRoutes.Revision() ||
+    if (ready == routes.end() || !ready->second.mtu || ready->second.revision != windowsRoutes.Revision() ||
         (!resumed && routePendingServers.count(route.serverId))) {
         if (routeWaiting.size() >= 1024 || packet.bytes->size() > 4 * 1024 * 1024 - routePendingBytes) {
             Drop("interface_route_queue_full"); return;
@@ -485,7 +773,7 @@ void NetworkRuntime::Impl::Send(const Packet& packet, const FlowRoute& route, bo
         routePendingBytes += packet.bytes->size(); ++routePendingServers[route.serverId];
         QueueRouteRefresh(); return;
     }
-    if (packet.view.length > 65507) {Drop("tunnel_packet_too_large"); return;}
+    if (packet.view.length > 65535) {Drop("tunnel_packet_too_large"); return;}
     auto work = packet.bytes.use_count() == 1 ? packet.bytes : buffers.Copy(bytes, packet.view.length);
     Transmit(work->data(), packet.view, address, route, dirty, *server, ready->second);
 }
@@ -493,29 +781,93 @@ void NetworkRuntime::Impl::Send(const Packet& packet, const FlowRoute& route, bo
 void NetworkRuntime::Impl::Transmit(uint8_t* work, const PacketView& view, const WINDIVERT_ADDRESS& address, const FlowRoute& route,
     bool dirty, const Server& server, const TunnelRouteCache::Route& ready) {
     if (route.translatedIp) {Write32(work + 16, route.translatedIp); dirty = true;}
-    dirty |= ClampMss(work, view, config->mss);
-    dirty |= !address.IPChecksum || (view.tuple.protocol == 6 ? !address.TCPChecksum : !address.UDPChecksum);
-    if (dirty) WinDivertHelperCalcChecksums(work, static_cast<UINT>(view.length), nullptr, 0);
+    DiagnosticSession::PacketOptions options;
+    if (diagnostics.enabled.load(std::memory_order_relaxed) && diagnostics.TracksPort(view.tuple))
+        options = diagnostics.Options(view.tuple, server.transport->id, work, view.length);
+    if (!options.preserveMss) dirty |= ClampMss(work, view, config->mss);
+    if (options.dontFragment) {
+        if (view.length + 36 > ready.mtu) {
+            diagnostics.RejectBeforeSend(options.session);
+            return;
+        }
+        Write16(work + 6, 0x4000);
+        dirty = true;
+    }
+    if (!options.preserveMss && view.tuple.protocol == 6 && view.syn) {
+        const auto overhead = uint32_t(36 + view.header + size_t(work[view.header + 12] >> 4) * 4);
+        if (ready.mtu > overhead) dirty |= ClampMss(work, view, static_cast<uint16_t>((std::min)(uint32_t(config->mss), ready.mtu - overhead)));
+    }
     const auto& transport = server.transport;
-    const auto port = std::uniform_int_distribution<uint16_t>(server.rules.portStart, server.rules.portEnd)(rng);
-    transport->transform.Encrypt(work, view.length, port);
+    auto state = transport->session->Snapshot();
+    if (!state || !state->addresses.count(view.tuple.localIp)) {
+        transport->session->RequestAddress(view.tuple.localIp);
+        if (sessionWaiting.size() >= 1024 || view.length > 4 * 1024 * 1024 - sessionWaitingBytes) { Drop("session_queue_full"); return; }
+        sessionWaiting.push_back({{buffers.Copy(work, view.length), address, view, Clock::now()}, route, dirty}); sessionWaitingBytes += view.length;
+        return;
+    }
+    if (options.probe.run) diagnostics.load.Record(miga::diagnostics::LoadCounters::Selected, options.probe);
+    WinDivertHelperCalcChecksums(work, static_cast<UINT>(view.length), nullptr, 0);
     static const auto addresses = [] {
         std::array<WINDIVERT_ADDRESS, 64> values{};
         for (auto& value : values) {value.Outbound = 1; value.IPChecksum = 1; value.UDPChecksum = 1;}
         return values;
     }();
-    datagram.Build(work, view.length, ready.source, transport->destination,
-        transport->localPort, port, ++packetId, ready.mtu,
-        [&](const uint8_t* data, size_t size, size_t count) {return tunnel.Send(network, data, size, addresses.data(), count);});
+    const auto sendBatch = [&](const uint8_t* data, size_t bytes, size_t count) {
+        if (options.session) {
+            diagnostics.Submitted(options.session);
+            return tunnel.SendObserved(network, data, bytes, addresses.data(), count,
+                [this, id = options.session, sequence = options.sequence, probe = options.probe](bool success) {
+                    diagnostics.Sent(id, success, sequence);
+                    if (probe.run) diagnostics.load.Record(miga::diagnostics::LoadCounters::WireSent, probe, success);
+                });
+        }
+        return tunnel.Send(network, data, bytes, addresses.data(), count);
+    };
+    if (state) {
+        const auto transmit = [&](uint8_t* packet, size_t length) {
+            if (!miga::v2::TranslateAddress(packet, length, view.tuple.localIp, state->addresses.at(view.tuple.localIp), true)) return false;
+            const size_t maximumPayload = ready.mtu > 28 ? ready.mtu - 28 : 0;
+            const auto capacity = (std::max)(length + 8, (std::min)(size_t(256), maximumPayload));
+            return datagram.BuildGenerated(capacity, [&](uint8_t* output, size_t available) {
+                return miga::v2::EncryptDataInto(state->keys.dataC2S, state->keys.prefixC2S,
+                    packet, length, output, available, maximumPayload);
+            }, ready.path.source, transport->destination, transport->localPort, state->port, ++packetId,
+                ready.mtu, sendBatch, options.dontFragment);
+        };
+        if (view.length > miga::v2::MaxInner) {
+            std::vector<miga::v2::Bytes> fragments; miga::v2::Bytes icmp;
+            if (!miga::v2::FragmentInner(work, view.length, fragments, icmp)) {Drop("v2_fragment_invalid"); return;}
+            if (!icmp.empty()) {
+                auto reply = address; reply.Outbound = 0; reply.IPChecksum = 1;
+                reinject.Send(network, icmp.data(), icmp.size(), &reply, 1); return;
+            }
+            for (auto& fragment : fragments) if (!transmit(fragment.data(), fragment.size())) {Drop("v2_send_failed"); return;}
+        } else if (!transmit(work, view.length)) {Drop("v2_send_failed"); return;}
+        transport->session->MarkActivity();
+    }
     ++sentTunnel;
+}
+
+void NetworkRuntime::Impl::DrainSessions() {
+    const auto now = Clock::now(); const auto count = (std::min)(size_t(128), sessionWaiting.size());
+    for (size_t n = 0; n < count; ++n) {
+        auto pending = std::move(sessionWaiting.front()); sessionWaiting.pop_front(); sessionWaitingBytes -= pending.packet.view.length;
+        const auto* server = config->ById(pending.route.serverId);
+        if (!server || now - pending.packet.received >= std::chrono::seconds(30)) {Drop("session_not_ready"); continue;}
+        const auto state = server->transport->session->Snapshot();
+        if (!state || !state->addresses.count(pending.packet.view.tuple.localIp)) {
+            sessionWaitingBytes += pending.packet.view.length; sessionWaiting.push_back(std::move(pending)); continue;
+        }
+        Send(pending.packet, pending.route, pending.dirty);
+    }
 }
 
 void NetworkRuntime::Impl::SendCaptured(uint8_t* bytes, const PacketView& view, const WINDIVERT_ADDRESS& address, const FlowRoute& route) {
     const auto* server = config->ById(route.serverId);
     if (route.kind != FlowRoute::Kind::Tunnel || !server) {Drop("route_server_unavailable"); return;}
-    if (view.length > 65507) {Drop("tunnel_packet_too_large"); return;}
+    if (view.length > 65535) {Drop("tunnel_packet_too_large"); return;}
     auto ready = routes.find(route.serverId);
-    if (ready != routes.end() && ready->second.source && ready->second.revision == windowsRoutes.Revision() &&
+    if (ready != routes.end() && ready->second.mtu && ready->second.revision == windowsRoutes.Revision() &&
         !routePendingServers.count(route.serverId)) Transmit(bytes, view, address, route, false, *server, ready->second);
     else Send({buffers.Copy(bytes, view.length), address, view, Clock::now()}, route, false);
 }
@@ -526,11 +878,20 @@ void NetworkRuntime::Impl::Inbound(uint8_t* bytes, size_t size, WINDIVERT_ADDRES
         const auto found = config->inboundPorts.find(view.tuple.remotePort);
         if (found != config->inboundPorts.end()) {
             const auto& server = config->servers[found->second];
-            if (htonl(view.tuple.localIp) == server.transport->destination && view.tuple.localPort >= server.rules.portStart &&
-                view.tuple.localPort <= server.rules.portEnd) remote = &server;
+            auto state = server.transport->session->Snapshot();
+            if (htonl(view.tuple.localIp) == server.transport->destination &&
+                (state && view.tuple.localPort == state->port)) remote = &server;
         }
     }
     if (!remote) {
+        if (syntheticDns.Port() && view.tuple.protocol == 17 && view.tuple.remotePort == syntheticDns.Port()) {
+            SyntheticResponse(bytes, address, view, 0);
+            return;
+        }
+        if (config->fullRoutingServerId && !Local(view.tuple.localIp)) {
+            Drop("full_routing_direct_inbound");
+            return;
+        }
         if (view.tuple.protocol == 17 && view.tuple.localPort == 53 && config->hasDomainRules) {
             Packet packet{buffers.Copy(bytes, view.length), address, view, Clock::now()};
             if (!classifierCommands.TryPush([this, packet = std::move(packet)]() mutable {
@@ -538,57 +899,253 @@ void NetworkRuntime::Impl::Inbound(uint8_t* bytes, size_t size, WINDIVERT_ADDRES
                 dns.Response(std::move(packet), 0, *active, Clock::now());
             })) ++dnsObservationsLost;
         }
-        flows.Inbound(view, address.Timestamp, 0, Clock::now());
+        if (auto original = flows.Inbound(view, address.Timestamp, 0, Clock::now(), config->dnsResolverEnabled)) {
+            TranslateDirect(bytes, view, address, *original, true);
+        }
         reinject.Send(network, bytes, size, &address, 1); ++sentDirect; return;
+    }
+    if (config->fullRoutingServerId && remote->transport->id != config->fullRoutingServerId) {
+        Drop("full_routing_wrong_server");
+        return;
     }
     const auto length = Read16(bytes + view.header + 4) - 8;
     auto* inner = bytes + view.header + 8;
     if (length < 28) {Drop("invalid_tunnel_payload"); return;}
-    remote->transport->transform.Decrypt(inner, length, view.tuple.localPort);
+    const auto decodedState = remote->transport->session->Snapshot();
+    {
+        const auto& state = decodedState;
+        if (!state || !miga::v2::DecryptData(state->keys.dataS2C, state->keys.prefixS2C, inner, length, decryptedV2)) {Drop("v2_invalid_payload"); return;}
+        inner = decryptedV2.data();
+        if (decryptedV2.size() < 20 || (inner[0] >> 4) != 4) {Drop("v2_invalid_response"); return;}
+        const auto virtualIp = miga::v2::Get32(inner + 16);
+        const auto original = std::find_if(state->addresses.begin(), state->addresses.end(), [&](const auto& item) { return item.second == virtualIp; });
+        if (original == state->addresses.end() || !miga::v2::TranslateAddress(inner, decryptedV2.size(), virtualIp, original->first, false)) {Drop("v2_unknown_address"); return;}
+    }
+    size_t innerLength = decryptedV2.size();
+    if (Read16(inner + 6) & 0x3fff) {
+        const auto& state = decodedState;
+        if (!state) {Drop("v2_session_unavailable"); return;}
+        miga::v2::Bytes identity; miga::v2::Put64(identity, uint64_t(remote->transport->id));
+        identity.insert(identity.end(), state->session.begin(), state->session.end()); miga::v2::Put64(identity, state->generation);
+        const std::string context(reinterpret_cast<const char*>(identity.data()), identity.size());
+        const auto result = innerReassembler.Add(inner, innerLength, innerReassembled, context);
+        if (result == miga::v2::Ipv4Reassembler::Result::Waiting) return;
+        if (result == miga::v2::Ipv4Reassembler::Result::Rejected) {Drop("v2_fragment_invalid"); return;}
+        inner = innerReassembled.data(); innerLength = innerReassembled.size();
+    }
     PacketView decoded;
-    if (!decoded.Read(inner, length)) {Drop("invalid_inner_packet"); return;}
-    if (auto original = flows.Reverse(decoded.IncomingTuple(), remote->transport->id, address.Timestamp, Clock::now())) {
+    if (!decoded.Read(inner, innerLength)) {Drop("invalid_inner_packet"); return;}
+    if (syntheticDns.Port() && decoded.tuple.protocol == 17 && decoded.tuple.remotePort == syntheticDns.Port()) {
+        SyntheticResponse(inner, address, decoded, remote->transport->id);
+        return;
+    }
+    const auto serverId = remote->transport->id;
+    const auto now = Clock::now();
+    const bool legacyDnsResponse = !config->fullRoutingServerId && decoded.tuple.protocol == 17 && decoded.tuple.localPort == 53;
+    const auto original = legacyDnsResponse ? flows.Reverse(decoded.IncomingTuple(), serverId, address.Timestamp, now)
+        : flows.Inbound(decoded, address.Timestamp, serverId, now, true);
+    if (original) {
         Write32(inner + 12, *original); decoded.tuple.localIp = *original;
     }
-    ClampMss(inner, decoded, config->mss);
-    const auto serverId = remote->transport->id;
-    if (decoded.tuple.protocol == 17 && decoded.tuple.localPort == 53) {
+    if (!(decoded.tuple.protocol == 6 && (decoded.tcp.flags & 2) && diagnostics.enabled.load(std::memory_order_relaxed) &&
+        diagnostics.TracksPort(decoded.IncomingTuple()) &&
+        diagnostics.Options(decoded.IncomingTuple(), remote->transport->id).preserveMss)) {
+        uint16_t maximum = config->mss;
+        if (decodedState && decoded.tuple.protocol == 6 && decoded.syn) {
+            const auto route = routes.find(remote->transport->id);
+            const auto overhead = uint32_t(36 + decoded.header + size_t(inner[decoded.header + 12] >> 4) * 4);
+            if (route != routes.end() && route->second.mtu > overhead)
+                maximum = static_cast<uint16_t>((std::min)(uint32_t(maximum), route->second.mtu - overhead));
+        }
+        ClampMss(inner, decoded, maximum);
+    }
+    if (legacyDnsResponse) {
         Packet packet{buffers.Copy(inner, decoded.length), address, decoded, Clock::now()};
             if (!classifierCommands.TryPush([this, packet = std::move(packet), serverId]() mutable {
-            auto active = published.load(); if (!active || !active->ById(serverId)) return;
+            auto active = published.load();
+            if (!active || active->fullRoutingServerId || !active->ById(serverId)) return;
             auto response = dns.Response(std::move(packet), serverId, *active, Clock::now());
             if (response) networkCommands.Push([this, packet = std::move(*response), serverId]() mutable {
-                if (!config->ById(serverId)) return;
+                if (config->fullRoutingServerId || !config->ById(serverId)) return;
                 flows.Inbound(packet.view, packet.address.Timestamp, serverId, Clock::now());
                 Send(packet, {}, true);
             });
         })) Drop("dns_queue_full");
         return;
     }
-    flows.Inbound(decoded, address.Timestamp, serverId, Clock::now());
     WinDivertHelperCalcChecksums(inner, static_cast<UINT>(decoded.length), &address, 0);
-    reinject.Send(network, inner, decoded.length, &address, 1); ++sentDirect;
+    miga::diagnostics::Probe loadProbe;
+    if (diagnostics.enabled.load(std::memory_order_relaxed) && diagnostics.TracksPort(decoded.IncomingTuple()) &&
+        diagnostics.load.enabled.load(std::memory_order_relaxed) && miga::diagnostics::ReadProbePacket(inner, decoded.length, loadProbe)) {
+        diagnostics.load.Record(miga::diagnostics::LoadCounters::ClientReceived, loadProbe);
+        reinject.SendObserved(network, inner, decoded.length, &address, 1, [this, loadProbe](bool success) {
+            diagnostics.load.Record(miga::diagnostics::LoadCounters::Reinject, loadProbe, success);
+        });
+    } else reinject.Send(network, inner, decoded.length, &address, 1);
+    ++sentDirect;
 }
 
 void NetworkRuntime::Impl::PacketReceived(uint8_t* bytes, size_t size, WINDIVERT_ADDRESS address) {
     ++captured;
+    if (size >= 20 && (bytes[0] >> 4) == 4 && (Read16(bytes + 6) & 0x3fff) && (bytes[9] == 6 || bytes[9] == 17)) {
+        const auto result = reassembler.Add(bytes, size, reassembledV2);
+        if (result == miga::v2::Ipv4Reassembler::Result::Rejected) {Drop("ipv4_fragment_invalid"); return;}
+        if (result == miga::v2::Ipv4Reassembler::Result::Waiting) return;
+        bytes = reassembledV2.data(); size = reassembledV2.size();
+        if (config->dnsResolverEnabled) address.TCPChecksum = address.UDPChecksum = 0;
+    }
     PacketView view;
-    if (!view.Read(bytes, size)) {reinject.Send(network, bytes, size, &address, 1); return;}
+    if (!view.Read(bytes, size)) {
+        if (address.Outbound && size >= 20 && (bytes[0] >> 4) == 4 && SyntheticAddress(Read32(bytes + 16)))
+            Drop("synthetic_invalid_packet");
+        else if (config->fullRoutingServerId) Drop("full_routing_invalid_packet");
+        else reinject.Send(network, bytes, size, &address, 1);
+        return;
+    }
     logger->logLazy(LOGGER_LEVEL_DEBUG, [&] {return "packet_received" + Describe(view, address);});
+    if (view.tuple.protocol == 17 && (view.tuple.remotePort == BootstrapDnsPort || view.tuple.localPort == BootstrapDnsPort)) {
+        const auto tuple = address.Outbound && view.tuple.remotePort == BootstrapDnsPort ? view.tuple : view.IncomingTuple();
+        const auto active = bootstrapDnsTuple.load(std::memory_order_acquire);
+        if (active && tuple.remotePort == BootstrapDnsPort && BootstrapDnsKey(tuple) == active) {
+            reinject.Send(network, bytes, view.length, &address, 1);
+            if (address.Outbound) ++sentDirect;
+            return;
+        }
+    }
+    if (view.tuple.protocol == 17 && !(address.Outbound && SyntheticAddress(view.tuple.remoteIp))) {
+        const auto tuple = address.Outbound ? view.tuple : view.IncomingTuple();
+        if (diagnostics.DirectProbeMatches(tuple)) {
+            reinject.Send(network, bytes, size, &address, 1);
+            if (address.Outbound) ++sentDirect;
+            return;
+        }
+        const auto matches = [&](const auto& session) {
+            return session && session->IsControlTuple(tuple.remoteIp, tuple.remotePort, tuple.localPort, address.Outbound != 0);
+        };
+        for (const auto& server : config->servers) {
+            if (matches(server.transport->session)) {
+                reinject.Send(network, bytes, size, &address, 1);
+                return;
+            }
+        }
+        if (const auto sessions = preparingSessions.load()) {
+            for (const auto& candidate : *sessions) {
+                if (matches(candidate.lock())) {
+                    reinject.Send(network, bytes, size, &address, 1);
+                    return;
+                }
+            }
+        }
+    }
     if (!address.Outbound) {Inbound(bytes, size, address, view); return;}
-    if (Local(view.tuple.remoteIp)) {reinject.Send(network, bytes, size, &address, 1); ++sentDirect; return;}
+    Outbound(bytes, address, view, true);
+}
+
+void NetworkRuntime::Impl::SyntheticResponse(uint8_t* bytes, const WINDIVERT_ADDRESS& address, const PacketView& view,
+    size_t server) {
+    if (!config->dnsResolverEnabled) return;
+    auto current = config;
+    Packet packet{buffers.Copy(bytes, view.length), address, view, Clock::now()};
+    if (!classifierCommands.TryPush([this, packet = std::move(packet), current, server] {
+        const auto active = published.load();
+        if (active != current) return;
+        SyntheticDnsResolver::Outputs output;
+        uint32_t wakeAddress = 0;
+        syntheticDns.Response(packet, server, *current, buffers, Clock::now(), output, wakeAddress);
+        if (output.empty() && !wakeAddress) return;
+        networkCommands.Push([this, current, output = std::move(output), wakeAddress] {
+            if (prepared || config != current) return;
+            for (const auto& item : output) Send(item.packet, item.route, true);
+            if (wakeAddress) RetrySynthetic(wakeAddress);
+        });
+    })) Drop("synthetic_dns_queue_full");
+}
+
+void NetworkRuntime::Impl::RetrySynthetic(uint32_t ip) {
+    for (auto& [key, group] : waiting)
+        if (key.dstIp == ip && !group.readyGeneration) Request(key);
+}
+
+void NetworkRuntime::Impl::Outbound(uint8_t* bytes, WINDIVERT_ADDRESS address, const PacketView& view, bool allowSyntheticDns) {
+    const bool synthetic = SyntheticAddress(view.tuple.remoteIp);
+    if (synthetic && !config->dnsResolverEnabled) {Drop("synthetic_dns_disabled"); return;}
+    if (allowSyntheticDns && config->dnsResolverEnabled && !synthetic && view.tuple.protocol == 17 && view.tuple.remotePort == 53) {
+        auto current = config;
+        Packet packet{buffers.Copy(bytes, view.length), address, view, Clock::now()};
+        if (!classifierCommands.TryPush([this, packet = std::move(packet), current] {
+            const auto active = published.load();
+            if (active != current) return;
+            SyntheticDnsResolver::Outputs output;
+            const auto now = Clock::now();
+            const auto owner = directory.Find(packet.view.tuple, packet.address.Timestamp, false, now);
+            const auto* server = owner ? current->Process(owner->owner->process->Name()) : nullptr;
+            const auto handled = syntheticDns.Query(packet, *current, buffers, now, output,
+                server ? server->transport->id : 0);
+            if (handled && output.empty()) return;
+            networkCommands.Push([this, packet, current, handled, output = std::move(output)] {
+                if (prepared || config != current) return;
+                if (!handled) Outbound(packet.bytes->data(), packet.address, packet.view, false);
+                else for (const auto& item : output) Send(item.packet, item.route, true);
+            });
+        })) Drop("synthetic_dns_queue_full");
+        return;
+    }
+    if (diagnostics.enabled.load(std::memory_order_relaxed) && diagnostics.TracksPort(view.tuple))
+        diagnostics.ObserveProbe(view.tuple, bytes, view.length);
+    if (Local(view.tuple.remoteIp)) {
+        if (diagnostics.enabled.load(std::memory_order_relaxed) && diagnostics.TracksPort(view.tuple) &&
+            diagnostics.RejectFallback(view.tuple, {})) { Drop("diagnostic_destination_local"); return; }
+        const bool privateDns = view.tuple.protocol == 17 && view.tuple.remotePort == 53 &&
+            PrivateIpv4(view.tuple.remoteIp) &&
+            (config->fullRoutingServerId || config->hasDomainRules || !config->processes.empty());
+        if (!privateDns) {
+            reinject.Send(network, bytes, view.length, &address, 1); ++sentDirect; return;
+        }
+        if (config->fullRoutingServerId) {
+            DnsMessage message;
+            if (!message.Read(bytes, view) || message.response) {
+                reinject.Send(network, bytes, view.length, &address, 1); ++sentDirect; return;
+            }
+        }
+    }
+    if (config->fullRoutingServerId && !synthetic) {
+        const FlowRoute route{FlowRoute::Kind::Tunnel, config->fullRoutingServerId, 0};
+        if (diagnostics.enabled.load(std::memory_order_relaxed)) {
+            const auto owner = directory.Find(view.tuple, address.Timestamp, view.syn, Clock::now());
+            if (owner && diagnostics.Selected(owner->owner->process))
+                diagnostics.Observe(view.tuple, owner->owner->process, route, "full_routing");
+            if (diagnostics.TracksPort(view.tuple) && diagnostics.RejectFallback(view.tuple, route)) {
+                Drop("diagnostic_route_unconfirmed");
+                return;
+            }
+        }
+        SendCaptured(bytes, view, address, route);
+        return;
+    }
     auto result = flows.Lookup(view, address.Timestamp, Clock::now());
     logger->logLazy(LOGGER_LEVEL_DEBUG, [&] {
         return std::string("route_lookup reason=") + result.reason + Describe(view, address) +
             " generation=" + std::to_string(result.generation) + " server_id=" + std::to_string(result.route.serverId);
     });
+    if (result.action == FlowTable::Action::Send && diagnostics.enabled.load(std::memory_order_relaxed)) {
+        if (result.owner && diagnostics.Selected(result.owner->owner->process))
+            diagnostics.Observe(view.tuple, result.owner->owner->process, result.route, result.reason);
+        if ((!result.owner || diagnostics.Selected(result.owner->owner->process)) &&
+            diagnostics.TracksPort(view.tuple) && diagnostics.RejectFallback(view.tuple, result.route)) {
+            Drop("diagnostic_route_unconfirmed"); return;
+        }
+    }
     const auto pending = waiting.find(FlowKey::From(view.tuple));
     const bool ordered = pending != waiting.end() && pending->second.readyGeneration == result.generation && result.generation;
     if (result.action == FlowTable::Action::Drop) {Drop(result.reason); return;}
     if (result.action == FlowTable::Action::Send && !ordered &&
-        !(view.tuple.protocol == 17 && view.tuple.remotePort == 53)) {
+        (synthetic || !(view.tuple.protocol == 17 && view.tuple.remotePort == 53))) {
+        if (synthetic && !result.route.translatedIp) {Drop("synthetic_route_unavailable"); return;}
         if (result.route.kind == FlowRoute::Kind::Direct) {
-            reinject.Send(network, bytes, size, &address, 1); ++sentDirect;
+            if (result.route.translatedIp) {
+                TranslateDirect(bytes, view, address, result.route.translatedIp, false);
+            }
+            reinject.Send(network, bytes, view.length, &address, 1); ++sentDirect;
         } else SendCaptured(bytes, view, address, result.route);
         return;
     }
@@ -613,11 +1170,43 @@ void NetworkRuntime::Impl::ApplyPrepared() {
     if (!prepared) return;
     tunnel.Reap(); reinject.Reap();
     if (tunnel.Busy() || reinject.Busy()) return;
-    config = std::move(prepared->config); routes = std::move(prepared->routes);
+    if (!prepared->config->dnsResolverEnabled) {
+        auto& next = *prepared->config;
+        next.dnsResolverReservedThrough = (std::max)(next.dnsResolverReservedThrough, syntheticDns.LastAllocated());
+        next.dnsResolverReserveRange = next.dnsResolverReservedThrough != 0;
+    }
+    const bool routingChanged = config->fullRoutingServerId != prepared->config->fullRoutingServerId ||
+        config->dnsResolverReserveRange != prepared->config->dnsResolverReserveRange ||
+        config->dnsResolverEnabled != prepared->config->dnsResolverEnabled;
+    config = std::move(prepared->config);
+    ApplyRoutes(*config, std::move(prepared->routes));
+    if (routingChanged) {
+        flows.Clear();
+        waiting.clear(); waitingPorts.clear(); waitingDeadlines.Clear(); pendingPackets = pendingBytes = 0;
+        readyWaiting.clear(); classificationRetries.clear();
+        routeWaiting.clear(); routePendingServers.clear(); routePendingBytes = 0;
+        routeResumeAt = (Clock::time_point::max)();
+        sessionWaiting.clear(); sessionWaitingBytes = 0;
+    }
     restartRules.emplace(); restartRules->reserve(config->servers.size());
-    for (const auto& server : config->servers) restartRules->push_back(server.rules);
+    restartFullRoutingProfileId.clear();
+    for (const auto& server : config->servers) {
+        restartRules->push_back(server.rules);
+        if (server.transport->id == config->fullRoutingServerId) restartFullRoutingProfileId = server.rules.profileId;
+    }
     restartMss = config->mss; restartLogLevel = config->logLevel;
+    restartDnsResolverEnabled = config->dnsResolverEnabled;
     published.store(config);
+    if (auto sessions = preparingSessions.load()) {
+        const auto active = [&](const auto& candidate) {
+            const auto session = candidate.lock();
+            return !session || std::any_of(config->servers.begin(), config->servers.end(), [&](const auto& server) {
+                return server.transport->session == session;
+            });
+        };
+        if (std::all_of(sessions->begin(), sessions->end(), active))
+            preparingSessions.compare_exchange_strong(sessions, {});
+    }
     std::unordered_set<size_t> ids;
     for (const auto& server : config->servers) ids.insert(server.transport->id);
     flows.Servers(ids);
@@ -645,7 +1234,7 @@ void NetworkRuntime::Impl::NetworkLoop() {
                 auto found = waiting.find(key); if (found != waiting.end()) found->second.retryQueued = false;
                 Request(key);
             }
-            DrainReady(); ExpireWaiting();
+            DrainReady(); ExpireWaiting(); DrainSessions();
             if (Clock::now() >= routeResumeAt) ResumeRoutes();
         }
         auto& current = receive[index];
@@ -681,6 +1270,7 @@ void NetworkRuntime::Impl::NetworkLoop() {
             (std::min)(waitingDeadlines.Next(now + std::chrono::hours(24)), routeResumeAt);
         auto wait = static_cast<DWORD>((std::min)(int64_t(busy ? 10 : INFINITE - 1),
             (std::max)(int64_t(0), std::chrono::duration_cast<std::chrono::milliseconds>(due - now).count())));
+        if (!sessionWaiting.empty()) wait = (std::min)(wait, DWORD(20));
         if (!readyWaiting.empty() && !prepared) wait = 0;
         if (!classificationRetries.empty() && !prepared) wait = (std::min)(wait, DWORD(1));
         HANDLE events[]{stop, receive[index].operation.hEvent, networkCommands.Event()};
@@ -706,9 +1296,18 @@ bool NetworkRuntime::Impl::Start() {
     ResetEvent(stop);
     networkCommands.Reset(); classifierCommands.Reset(); windowsCommands.Reset(); socketCommands.Reset();
     if (windowsRoutes.Start() != NO_ERROR || !reinject.Reset() || !tunnel.Reset()) return false;
+    const auto dnsEnabled = restartRules ? restartDnsResolverEnabled : initial->GetDnsResolverEnabled();
+    const auto dnsGuard = syntheticDns.Preflight(dnsEnabled);
+    if (!dnsGuard) {
+        Error("synthetic_dns_init_failed", ERROR_NOT_READY);
+        Stop();
+        return false;
+    }
     config = Prepare(restartRules ? *restartRules : initial->GetServers(),
         restartRules ? restartMss : initial->GetTunnelMaxMss(),
-        restartRules ? restartLogLevel : initial->GetLogLevel(), {}, routes);
+        restartRules ? restartLogLevel : initial->GetLogLevel(),
+        restartRules ? restartFullRoutingProfileId : initial->GetFullRoutingProfileId(),
+        dnsEnabled, *dnsGuard, {}, routes);
     if (!config) return false;
     published.store(config);
     socket = api.open("protocol == 6 or protocol == 17", WINDIVERT_LAYER_SOCKET, 0,
@@ -724,7 +1323,7 @@ bool NetworkRuntime::Impl::Start() {
     reinject.SetErrorHandler([this](DWORD code) {Error("reinject_send_failed", code);});
     tunnel.SetErrorHandler([this](DWORD code) {Error("tunnel_send_failed", code);});
     running.store(true);
-    classifierThread = std::thread([this] {Worker(classifierCommands);});
+    classifierThread = std::thread([this] {Worker(classifierCommands, &Impl::DnsWait);});
     windowsThread = std::thread([this] {Worker(windowsCommands);});
     maintenanceThread = std::thread([this] {try {Maintenance();} catch (...) {Error("maintenance_thread_failed", ERROR_NOT_ENOUGH_MEMORY); Halt();}});
     networkThread = std::thread([this] {
@@ -733,6 +1332,52 @@ bool NetworkRuntime::Impl::Start() {
             tunnel.RequestStop(); reinject.RequestStop(); tunnel.Drain(); reinject.Drain();
         }
     });
+    profiles.Start([this](const std::string& profile) {
+        const auto active = published.load();
+        if (active) for (const auto& server : active->servers)
+            if (server.rules.profileId == profile && server.transport->session)
+                return server.transport->session->Status();
+        return std::string();
+    }, [this](const std::string& profile) {
+        const auto active = published.load();
+        if (active) for (const auto& server : active->servers) {
+            if (server.rules.profileId != profile || !server.transport->session) continue;
+            const auto bytes = server.transport->session->OpenDiagnostics();
+            if (bytes.size() != 66) return std::string();
+            const auto address = ntohl(server.transport->destination);
+            const auto host = std::to_string(address >> 24) + "." + std::to_string((address >> 16) & 255) + "." +
+                std::to_string((address >> 8) & 255) + "." + std::to_string(address & 255);
+            return DiagnosticSession::Json{{"ok", true}, {"host", host},
+                {"port", miga::v2::Get16(bytes.data())},
+                {"fingerprint", miga::v2::Base64(bytes.data() + 2, 32)},
+                {"ticket", miga::v2::Base64(bytes.data() + 34, 32)}}.dump();
+        }
+        return std::string();
+    });
+    diagnostics.Start([this](DWORD pid, const DiagnosticSession::Json& request) {
+        using Json = DiagnosticSession::Json;
+        const auto target = request.value("target_pid", pid);
+        if (target != pid && request.value("mode", "tunnel") != "rules")
+            return Json{{"ok", false}, {"error", "external_process_requires_rules_mode"}};
+        auto owner = processes.Get(target, LoadWindowsProcessIdentity);
+        if (!owner->isAlive()) return Json{{"ok", false}, {"error", "process_unavailable"}};
+        const auto profileValue = request.find("profile_id");
+        const auto profile = profileValue != request.end() && profileValue->is_string() ? profileValue->get<std::string>() : std::string();
+        const auto force = request.value("mode", "tunnel") == "tunnel";
+        auto active = published.load();
+        const Server* selected = nullptr;
+        if (active) for (const auto& item : active->servers) {
+            if (profile.empty() || item.rules.profileId != profile) continue;
+            if (selected) return Json{{"ok", false}, {"error", "ambiguous_server"}};
+            selected = &item;
+        }
+        if (selected && selected->transport->session && selected->transport->session->Status() == "ready") {
+            diagnostics.Configure(owner, selected->transport->id, force);
+            return Json{{"ok", true}, {"pid", owner->pid}, {"server_id", selected->transport->id}, {"mode", force ? "tunnel" : "rules"}};
+        }
+        diagnostics.Configure(owner, 0, false);
+        return Json{{"ok", true}, {"pid", owner->pid}, {"local_only", true}, {"mode", "rules"}};
+    });
     logger->log(LOGGER_LEVEL_INFO, "network_runtime_started");
     return true;
 }
@@ -740,12 +1385,14 @@ bool NetworkRuntime::Impl::Start() {
 void NetworkRuntime::Impl::Stop() {
     const bool active = running.load() || network != INVALID_HANDLE_VALUE || socket != INVALID_HANDLE_VALUE;
     running.store(false);
+    profiles.Stop();
     SetEvent(stop);
     networkCommands.Close(); classifierCommands.Close(); windowsCommands.Close(); socketCommands.Close();
     if (network != INVALID_HANDLE_VALUE) api.shutdown(network, WINDIVERT_SHUTDOWN_RECV);
     if (socket != INVALID_HANDLE_VALUE) api.shutdown(socket, WINDIVERT_SHUTDOWN_RECV);
     for (auto* thread : {&networkThread, &socketThread, &classifierThread, &windowsThread, &maintenanceThread})
         if (thread->joinable()) thread->join();
+    diagnostics.Stop();
     if (active) {lastSummary = Clock::now() - std::chrono::seconds(5); Summary();}
     windowsRoutes.Stop();
     if (network != INVALID_HANDLE_VALUE) api.close(network);
@@ -755,9 +1402,12 @@ void NetworkRuntime::Impl::Stop() {
     waiting.clear(); waitingPorts.clear(); waitingDeadlines.Clear(); pendingPackets = pendingBytes = 0;
     readyWaiting.clear(); classificationRetries.clear(); routePendingServers.clear(); routeRefreshPending.store(false); processes.Clear();
     routeResumeAt = (Clock::time_point::max)();
+    sessionWaiting.clear(); sessionWaitingBytes = 0; reassembler.Clear(); innerReassembler.Clear();
     dropSamples.clear();
     flows.Clear(); directory.Clear(); dns.Clear(); routes.clear(); routeCache.clear(); routeWaiting.clear(); routePendingBytes = 0; prepared.reset(); config.reset();
     published.store({});
+    preparingSessions.store({});
+    syntheticDns.Stop();
     if (winsock) {WSACleanup(); winsock = false;}
     if (active) logger->log(LOGGER_LEVEL_INFO, "network_runtime_stopped");
 }
@@ -771,9 +1421,17 @@ bool NetworkRuntime::Impl::Reload(const std::string& path) {
         if (!next.Load(path)) {completion->set_value(false); return;}
         auto servers = next.GetServers(); const auto mss = next.GetTunnelMaxMss(); const auto level = next.GetLogLevel();
         auto previous = published.load();
-        if (!windowsCommands.Push([this, servers = std::move(servers), mss, level, previous, completion] {
+        auto fullProfileId = next.GetFullRoutingProfileId();
+        const auto resolverEnabled = next.GetDnsResolverEnabled();
+        const auto dnsGuard = syntheticDns.Preflight(resolverEnabled);
+        if (!dnsGuard) {
+            Error("synthetic_dns_init_failed", ERROR_NOT_READY);
+            completion->set_value(false);
+            return;
+        }
+        if (!windowsCommands.Push([this, servers = std::move(servers), mss, level, fullProfileId = std::move(fullProfileId), resolverEnabled, dnsGuard, previous, completion] {
             Prepared next;
-            next.config = Prepare(servers, mss, level, previous, next.routes); next.completion = completion;
+            next.config = Prepare(servers, mss, level, fullProfileId, resolverEnabled, *dnsGuard, previous, next.routes); next.completion = completion;
             if (!next.config) {completion->set_value(false); return;}
             if (!networkCommands.Push([this, next = std::move(next)]() mutable {
                 if (prepared) {next.completion->set_value(false); return;}

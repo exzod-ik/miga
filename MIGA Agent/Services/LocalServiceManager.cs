@@ -25,21 +25,19 @@ namespace MIGA_Agent.Services
         public void Start()
         {
             using var sc = new ServiceController(ServiceName);
-            if (sc.Status != ServiceControllerStatus.Running && sc.Status != ServiceControllerStatus.StartPending)
-            {
-                sc.Start();
-                sc.WaitForStatus(ServiceControllerStatus.Running, TimeSpan.FromSeconds(30));
-            }
+            var status = sc.Status;
+            if (status == ServiceControllerStatus.Running) return;
+            if (status != ServiceControllerStatus.StartPending) sc.Start();
+            sc.WaitForStatus(ServiceControllerStatus.Running, TimeSpan.FromSeconds(30));
         }
 
         public void Stop()
         {
             using var sc = new ServiceController(ServiceName);
-            if (sc.Status != ServiceControllerStatus.Stopped && sc.Status != ServiceControllerStatus.StopPending)
-            {
-                sc.Stop();
-                sc.WaitForStatus(ServiceControllerStatus.Stopped, TimeSpan.FromSeconds(30));
-            }
+            var status = sc.Status;
+            if (status == ServiceControllerStatus.Stopped) return;
+            if (status != ServiceControllerStatus.StopPending) sc.Stop();
+            sc.WaitForStatus(ServiceControllerStatus.Stopped, TimeSpan.FromSeconds(30));
         }
         public void ReloadConfig()
         {

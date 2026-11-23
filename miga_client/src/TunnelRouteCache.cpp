@@ -24,22 +24,24 @@ void TunnelRouteCache::Stop() {
 DWORD TunnelRouteCache::Resolve(uint32_t destination, Route& route) const {
     const auto revision = revision_.load();
     const auto now = std::chrono::steady_clock::now();
-    if (route.source && route.revision == revision && now - route.checked < std::chrono::seconds(5)) return NO_ERROR;
+    if (route.mtu && route.revision == revision && now - route.checked < std::chrono::seconds(5)) return NO_ERROR;
+    route = {{}, 0, revision, now};
     SOCKADDR_INET target{};
     target.Ipv4.sin_family = AF_INET;
     target.Ipv4.sin_addr.s_addr = destination;
     SOCKADDR_INET source{};
     MIB_IPFORWARD_ROW2 best{};
     auto code = GetBestRoute2(nullptr, 0, nullptr, &target, 0, &best, &source);
-    if (code != NO_ERROR) { route = {}; return code; }
+    if (code != NO_ERROR) return code;
     MIB_IPINTERFACE_ROW network{};
     InitializeIpInterfaceEntry(&network);
     network.Family = AF_INET;
     network.InterfaceLuid = best.InterfaceLuid;
     code = GetIpInterfaceEntry(&network);
-    if (code != NO_ERROR) { route = {}; return code; }
-    if (source.Ipv4.sin_addr.s_addr == 0 || network.NlMtu < 68) { route = {}; return ERROR_BAD_NETPATH; }
-    route = { source.Ipv4.sin_addr.s_addr, network.NlMtu, revision, now };
+    if (code != NO_ERROR) return code;
+    if (source.Ipv4.sin_addr.s_addr == 0 || network.NlMtu < 68) return ERROR_BAD_NETPATH;
+    route.path = {source.Ipv4.sin_addr.s_addr, best.InterfaceLuid.Value, best.NextHop.Ipv4.sin_addr.s_addr};
+    route.mtu = network.NlMtu;
     return NO_ERROR;
 }
 

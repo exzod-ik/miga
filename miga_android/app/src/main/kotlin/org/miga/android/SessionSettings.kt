@@ -28,8 +28,6 @@ class SessionSettings(
     val serverIp: Int get() = first.serverIp
     val firstPort: Int get() = first.firstPort
     val lastPort: Int get() = first.lastPort
-    val xorKey: ByteArray get() = first.xorKey.copyOf()
-    val swapKey: ByteArray get() = first.swapKey.copyOf()
 }
 
 class ServerSession(
@@ -37,14 +35,8 @@ class ServerSession(
     val serverIp: Int,
     val firstPort: Int,
     val lastPort: Int,
-    xorKey: ByteArray,
-    swapKey: ByteArray,
-) {
-    private val xorSnapshot = xorKey.copyOf()
-    private val swapSnapshot = swapKey.copyOf()
-    val xorKey: ByteArray get() = xorSnapshot.copyOf()
-    val swapKey: ByteArray get() = swapSnapshot.copyOf()
-}
+    val invitation: String,
+)
 
 object PendingSession {
     private data class Entry(val requestId: Long, val settings: SessionSettings)
@@ -71,17 +63,12 @@ object SessionValidator {
         return Triple(octets.joinToString(".") { it.toInt().toString() }, start, end)
     }
 
-    fun keyBase64(value: String, bytes: Int): ByteArray {
-        val decoded = try { Base64.getDecoder().decode(value.trim()) }
-        catch (_: IllegalArgumentException) { throw IllegalArgumentException("Key must be valid Base64") }
-        require(decoded.size == bytes) { "Key must decode to exactly $bytes bytes" }
-        return decoded
-    }
-
-    fun server(profile: ServerProfile, secret: SecretKeys): ServerSession {
+    fun server(profile: ServerProfile, secret: InvitationSecret): ServerSession {
+        require(!profile.requiresInvitation) { "Введите новое приглашение miga2 для сервера ${profile.name}" }
         val (address, first, last) = endpoint(profile.address, profile.firstPort.toString(), profile.lastPort.toString())
-        require(secret.xor.size == 128 && secret.swap.size == 8) { "Stored key length is invalid; replace the keys" }
+        val invitation = parseServerQr(secret.invitation)
+        require(invitation.address == address && invitation.firstPort == first && invitation.lastPort == last) { "Invitation endpoint mismatch" }
         val ip = address.split('.').fold(0) { result, part -> (result shl 8) or part.toInt() }
-        return ServerSession(address, ip, first, last, secret.xor.copyOf(), secret.swap.copyOf())
+        return ServerSession(address, ip, first, last, secret.invitation)
     }
 }

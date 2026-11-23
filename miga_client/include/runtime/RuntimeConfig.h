@@ -3,7 +3,7 @@
 #include "RuntimeTypes.h"
 #include "../ConfigManager.h"
 #include "../TunnelRouteCache.h"
-#include "Encryption.h"
+#include "../ProtocolV2Session.h"
 #include <cctype>
 
 namespace miga::runtime {
@@ -12,7 +12,7 @@ struct Transport {
     uint32_t destination = 0;
     uint16_t localPort = 0;
     SOCKET reservation = INVALID_SOCKET;
-    Encryption transform;
+    std::shared_ptr<miga::v2::ProtocolV2Session> session;
     ~Transport();
 };
 struct Server {
@@ -27,13 +27,18 @@ struct Configuration {
     std::unordered_map<std::string, size_t> processes;
     std::unordered_map<size_t, size_t> transports;
     std::unordered_map<uint16_t, size_t> inboundPorts;
+    bool dnsResolverEnabled = false;
+    bool dnsResolverReserveRange = false;
+    uint32_t dnsResolverReservedThrough = 0xc613ffff;
     bool hasDomainRules = false;
+    size_t fullRoutingServerId = 0;
     void Index();
     static std::string Lower(std::string value);
     const Server* Process(const std::string& name) const;
     const Server* Domain(const std::string& name) const;
     const Server* ById(size_t id) const;
 };
+bool PrivateIpv4(uint32_t ip);
 bool Local(uint32_t ip);
 uint16_t Read16(const uint8_t* data);
 uint32_t Read32(const uint8_t* data);

@@ -1,8 +1,12 @@
 #pragma once
 
 #include "NetworkRuntime.h"
+#include "DiagnosticSession.h"
+#include "ProtocolProfiles.h"
+#include "ProtocolV2Packets.h"
 #include "runtime/FlowTable.h"
 #include "runtime/DnsClassifier.h"
+#include "runtime/SyntheticDnsResolver.h"
 #include "runtime/RuntimeMailbox.h"
 #include "AsyncTunnelSender.h"
 #include "TunnelDatagram.h"
@@ -10,7 +14,6 @@
 #include "Ipv4Batch.h"
 #include "runtime/WindowsSnapshot.h"
 #include <future>
-#include <random>
 #include <thread>
 #include <string_view>
 
@@ -49,6 +52,15 @@ struct NetworkRuntime::Impl {
         std::unordered_map<size_t, TunnelRouteCache::Route> routes;
         std::shared_ptr<std::promise<bool>> completion;
     };
+    DiagnosticSession diagnostics;
+    ProtocolProfiles profiles;
+    struct SessionWaiting { Packet packet; FlowRoute route; bool dirty; };
+    std::deque<SessionWaiting> sessionWaiting;
+    size_t sessionWaitingBytes = 0;
+    miga::v2::Bytes decryptedV2, reassembledV2;
+    miga::v2::Ipv4Reassembler reassembler, innerReassembler;
+    miga::v2::Bytes innerReassembled;
+    void DrainSessions();
     ConfigManager* initial;
     Logger* logger;
     std::atomic<bool> running{false};
@@ -70,8 +82,13 @@ struct NetworkRuntime::Impl {
     std::optional<Prepared> prepared;
     std::optional<std::vector<ServerConfig>> restartRules;
     uint16_t restartMss = 1400;
+    std::string restartFullRoutingProfileId;
+    bool restartDnsResolverEnabled = false;
+    std::atomic<std::shared_ptr<const std::vector<std::weak_ptr<miga::v2::ProtocolV2Session>>>> preparingSessions;
+    std::atomic<uint64_t> bootstrapDnsTuple{0};
     int restartLogLevel = LOGGER_LEVEL_WARNING;
     DnsClassifier dns;
+    SyntheticDnsResolver syntheticDns;
     std::unordered_map<size_t, TunnelRouteCache::Route> routes, routeCache;
     std::unordered_map<FlowKey, Waiting, FlowKeyHash> waiting;
     std::unordered_multimap<uint32_t, FlowKey> waitingPorts;
@@ -90,7 +107,6 @@ struct NetworkRuntime::Impl {
     uint16_t packetId = 0;
     bool winsock = false;
     DWORD ownPid = GetCurrentProcessId();
-    std::mt19937 rng{std::random_device{}()};
     std::atomic<uint64_t> captured{0}, sentDirect{0}, sentTunnel{0}, deferred{0}, dropped{0};
     struct DropSample {uint64_t count = 0; std::chrono::system_clock::time_point first;};
     std::unordered_map<std::string_view, DropSample> dropSamples;
@@ -108,9 +124,14 @@ struct NetworkRuntime::Impl {
     void SeedSockets();
     void ConfigureProbes();
     void Drop(const char* reason);
+    static uint64_t BootstrapDnsKey(const SocketTuple& tuple);
+    static std::optional<uint32_t> BootstrapHosts(std::string_view contents, std::string_view name);
+    std::optional<uint32_t> ResolveBootstrapHostname(std::string_view name);
     std::shared_ptr<Configuration> Prepare(const std::vector<ServerConfig>& servers, uint16_t mss, int level,
+        const std::string& fullRoutingProfileId, bool dnsResolverEnabled, uint32_t dnsResolverReservedThrough,
         const std::shared_ptr<const Configuration>& previous, std::unordered_map<size_t, TunnelRouteCache::Route>& ready);
-    void Worker(auto& mailbox) {
+    DWORD DnsWait();
+    void Worker(auto& mailbox, DWORD (Impl::*nextWait)() = nullptr) {
         HANDLE events[]{stop, mailbox.Event()};
         while (WaitForSingleObject(stop, 0) == WAIT_TIMEOUT) {
             std::function<void()> action;
@@ -120,10 +141,16 @@ struct NetworkRuntime::Impl {
                 action = {};
                 if (WaitForSingleObject(stop, 0) != WAIT_TIMEOUT) return;
             }
-            WaitForMultipleObjects(2, events, FALSE, INFINITE);
+            DWORD timeout = INFINITE;
+            if (nextWait) {
+                try { timeout = (this->*nextWait)(); }
+                catch (...) { Error("runtime_task_failed", ERROR_NOT_ENOUGH_MEMORY); timeout = 100; }
+            }
+            WaitForMultipleObjects(2, events, FALSE, timeout);
         }
     }
     void RefreshRoutes();
+    void ApplyRoutes(const Configuration& current, std::unordered_map<size_t, TunnelRouteCache::Route> updates);
     void QueueRouteRefresh();
     void Maintenance();
     void Summary();
@@ -132,7 +159,8 @@ struct NetworkRuntime::Impl {
     void Request(const FlowKey& key);
     void RemoveWaiting(const FlowKey& key);
     Packet Take(Waiting& group);
-    void Classified(const FlowKey& key, const RouteDecision& decision, bool dnsQuery, std::vector<DnsClassifier::Output> output);
+    void Classified(const FlowKey& key, const RouteDecision& decision, bool dnsQuery,
+        std::vector<DnsClassifier::Output> output, const std::string& processName);
     void ScheduleReady(const FlowKey& key, Waiting& group);
     void DrainReady();
     void Defer(const uint8_t* bytes, size_t size, const WINDIVERT_ADDRESS& address, const PacketView& view);
@@ -144,6 +172,12 @@ struct NetworkRuntime::Impl {
     void SendCaptured(uint8_t* bytes, const PacketView& view, const WINDIVERT_ADDRESS& address, const FlowRoute& route);
     void Inbound(uint8_t* bytes, size_t size, WINDIVERT_ADDRESS address, PacketView view);
     void PacketReceived(uint8_t* bytes, size_t size, WINDIVERT_ADDRESS address);
+    void Outbound(uint8_t* bytes, WINDIVERT_ADDRESS address, const PacketView& view, bool allowSyntheticDns);
+    void SyntheticResponse(uint8_t* bytes, const WINDIVERT_ADDRESS& address, const PacketView& view, size_t server);
+    void RetrySynthetic(uint32_t ip);
+    bool SyntheticAddress(uint32_t ip) const {
+        return SyntheticDnsResolver::Contains(*config, ip);
+    }
     bool Issue(Receive& receive);
     void ApplyPrepared();
     void NetworkLoop();

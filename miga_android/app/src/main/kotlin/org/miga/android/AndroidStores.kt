@@ -45,7 +45,7 @@ class DataStoreSettings(private val context: Context) : SettingsStore {
 class KeystoreSecretStore(context: Context) : SecretStore by DispatchingSecretStore(KeystoreFiles(context))
 
 private class KeystoreFiles(private val context: Context) : BlockingSecretStore {
-    private val alias = "miga_profile_keys_v1"
+    private val alias = "miga_profile_invitations_v2"
 
     private fun directory(): File = File(context.noBackupFilesDir, "secrets")
         .also { check(it.isDirectory || it.mkdirs()) }
@@ -70,33 +70,34 @@ private class KeystoreFiles(private val context: Context) : BlockingSecretStore 
         return generator.generateKey()
     }
 
-    override fun put(ref: String, keys: SecretKeys) {
-        require(keys.xor.size == 128 && keys.swap.size == 8) { "Invalid key length" }
+    override fun put(ref: String, keys: InvitationSecret) {
+        parseServerQr(keys.invitation)
         val target = file(ref)
         check(!target.exists()) { "Secret reference already exists" }
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
         cipher.init(Cipher.ENCRYPT_MODE, key(true)) // Provider creates a fresh random IV.
         cipher.updateAAD(ref.toByteArray(Charsets.UTF_8))
-        val ciphertext = cipher.doFinal(keys.xor + keys.swap)
+        val ciphertext = cipher.doFinal(keys.invitation.toByteArray(Charsets.UTF_8))
         val iv = cipher.iv
         check(iv.size == 12) { "Unsupported nonce length" }
         val temporary = File.createTempFile("key-", ".tmp", directory())
         try {
-            temporary.writeBytes(byteArrayOf(1) + iv + ciphertext)
+            temporary.writeBytes(byteArrayOf(2) + iv + ciphertext)
             check(temporary.renameTo(target)) { "Could not save keys" }
         } finally { temporary.delete() }
     }
 
-    override fun get(ref: String): SecretKeys {
+    override fun get(ref: String): InvitationSecret {
         try {
             val data = file(ref).readBytes()
-            if (data.size != 1 + 12 + 136 + 16 || data[0] != 1.toByte()) throw SecretUnavailable()
+            if (data.size !in 30..4125 || data[0] != 2.toByte()) throw SecretUnavailable()
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
             cipher.init(Cipher.DECRYPT_MODE, key(false), GCMParameterSpec(128, data.copyOfRange(1, 13)))
             cipher.updateAAD(ref.toByteArray(Charsets.UTF_8))
             val plain = cipher.doFinal(data.copyOfRange(13, data.size))
-            if (plain.size != 136) throw SecretUnavailable()
-            return SecretKeys(plain.copyOfRange(0, 128), plain.copyOfRange(128, 136))
+            val invitation = plain.toString(Charsets.UTF_8)
+            parseServerQr(invitation)
+            return InvitationSecret(invitation)
         } catch (_: Exception) { throw SecretUnavailable() }
     }
 

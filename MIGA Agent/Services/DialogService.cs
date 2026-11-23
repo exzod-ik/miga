@@ -92,8 +92,9 @@ namespace MIGA_Agent.Services
             var dialog = new Window
             {
                 Title = title,
-                Width = 400,
-                Height = 180,
+                Width = 440,
+                SizeToContent = SizeToContent.Height,
+                ShowInTaskbar = false,
                 WindowStartupLocation = WindowStartupLocation.CenterOwner,
                 Owner = Application.Current.MainWindow,
                 ResizeMode = ResizeMode.NoResize
@@ -108,10 +109,15 @@ namespace MIGA_Agent.Services
             var promptText = new System.Windows.Controls.TextBlock
             {
                 Text = prompt,
-                Margin = new Thickness(0, 0, 0, 10),
                 TextWrapping = System.Windows.TextWrapping.Wrap
             };
-            System.Windows.Controls.Grid.SetRow(promptText, 0);
+            var promptView = new System.Windows.Controls.ScrollViewer
+            {
+                Content = promptText,
+                MaxHeight = 180,
+                VerticalScrollBarVisibility = System.Windows.Controls.ScrollBarVisibility.Auto,
+                Margin = new Thickness(0, 0, 0, 10)
+            };
 
             var inputBox = new System.Windows.Controls.TextBox
             {
@@ -125,13 +131,13 @@ namespace MIGA_Agent.Services
                 Orientation = System.Windows.Controls.Orientation.Horizontal,
                 HorizontalAlignment = System.Windows.HorizontalAlignment.Right
             };
-            var okButton = new System.Windows.Controls.Button { Content = "OK", Width = 75, Margin = new Thickness(0, 0, 10, 0) };
-            var cancelButton = new System.Windows.Controls.Button { Content = "Отмена", Width = 75 };
+            var okButton = new System.Windows.Controls.Button { Content = "OK", MinWidth = 75, Padding = new Thickness(10, 5, 10, 5), Margin = new Thickness(0, 0, 10, 0) };
+            var cancelButton = new System.Windows.Controls.Button { Content = "Отмена", MinWidth = 75, Padding = new Thickness(10, 5, 10, 5) };
             buttonPanel.Children.Add(okButton);
             buttonPanel.Children.Add(cancelButton);
             System.Windows.Controls.Grid.SetRow(buttonPanel, 2);
 
-            grid.Children.Add(promptText);
+            grid.Children.Add(promptView);
             grid.Children.Add(inputBox);
             grid.Children.Add(buttonPanel);
 
@@ -163,7 +169,10 @@ namespace MIGA_Agent.Services
             {
                 Title = title,
                 Width = 500,
-                Height = 400,
+                Height = 355,
+                MinWidth = 400,
+                MinHeight = 290,
+                ShowInTaskbar = false,
                 WindowStartupLocation = WindowStartupLocation.CenterOwner,
                 Owner = Application.Current.MainWindow,
                 ResizeMode = ResizeMode.CanResize
@@ -178,10 +187,15 @@ namespace MIGA_Agent.Services
             var promptText = new System.Windows.Controls.TextBlock
             {
                 Text = prompt,
-                Margin = new Thickness(0, 0, 0, 10),
                 TextWrapping = System.Windows.TextWrapping.Wrap
             };
-            System.Windows.Controls.Grid.SetRow(promptText, 0);
+            var promptView = new System.Windows.Controls.ScrollViewer
+            {
+                Content = promptText,
+                MaxHeight = 105,
+                VerticalScrollBarVisibility = System.Windows.Controls.ScrollBarVisibility.Auto,
+                Margin = new Thickness(0, 0, 0, 10)
+            };
 
             var inputBox = new System.Windows.Controls.TextBox
             {
@@ -199,13 +213,13 @@ namespace MIGA_Agent.Services
                 Orientation = System.Windows.Controls.Orientation.Horizontal,
                 HorizontalAlignment = System.Windows.HorizontalAlignment.Right
             };
-            var okButton = new System.Windows.Controls.Button { Content = "OK", Width = 75, Margin = new Thickness(0, 0, 10, 0), IsDefault = true };
-            var cancelButton = new System.Windows.Controls.Button { Content = "Отмена", Width = 75, IsCancel = true };
+            var okButton = new System.Windows.Controls.Button { Content = "OK", MinWidth = 75, Padding = new Thickness(10, 5, 10, 5), Margin = new Thickness(0, 0, 10, 0), IsDefault = true };
+            var cancelButton = new System.Windows.Controls.Button { Content = "Отмена", MinWidth = 75, Padding = new Thickness(10, 5, 10, 5), IsCancel = true };
             buttonPanel.Children.Add(okButton);
             buttonPanel.Children.Add(cancelButton);
             System.Windows.Controls.Grid.SetRow(buttonPanel, 2);
 
-            grid.Children.Add(promptText);
+            grid.Children.Add(promptView);
             grid.Children.Add(inputBox);
             grid.Children.Add(buttonPanel);
 

@@ -23,6 +23,11 @@
 @rem
 @rem ##########################################################################
 
+if defined MIGA_ANDROID_WORKSPACE goto gradleWrapped
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0gradle-run.ps1" %*
+exit /b %ERRORLEVEL%
+
+:gradleWrapped
 @rem Set local scope for the variables, and ensure extensions are enabled
 setlocal EnableExtensions
 

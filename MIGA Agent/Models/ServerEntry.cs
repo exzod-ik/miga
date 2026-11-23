@@ -10,14 +10,28 @@ namespace MIGA_Agent.Models
     /// </summary>
     public class ServerEntry
     {
+        [JsonPropertyName("protocol")]
+        public int Protocol { get; set; } = 2;
+
+        [JsonPropertyName("enabled")]
+        public bool Enabled { get; set; } = true;
+
+        [JsonPropertyName("profile_id")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string? ProfileId { get; set; }
+
+        [JsonPropertyName("requires_invitation")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+        public bool RequiresInvitation { get; set; }
+
+        [JsonPropertyName("connection_name")]
+        public string ConnectionName { get; set; } = string.Empty;
+
         [JsonPropertyName("server_ip")]
         public string ServerIp { get; set; } = string.Empty;
 
-        [JsonPropertyName("server_ports")]
-        public PortRange ServerPorts { get; set; } = new PortRange();
-
-        [JsonPropertyName("encryption")]
-        public EncryptionKeys Encryption { get; set; } = new EncryptionKeys();
+        [JsonPropertyName("control_ports")]
+        public PortRange ControlPorts { get; set; } = new PortRange();
 
         [JsonPropertyName("redirect_processes")]
         public List<string> RedirectProcesses { get; set; } = new List<string>();

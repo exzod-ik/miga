@@ -1,4 +1,4 @@
-﻿using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using System;
 using System.Windows;
@@ -11,18 +11,43 @@ namespace MIGA_Agent
     public partial class App : Application
     {
         private static IHost? _host;
+        private Mutex? instance;
+        private bool ownsInstance;
 
         public static IServiceProvider Services => _host?.Services ?? throw new InvalidOperationException("Host is not built.");
 
         protected override async void OnStartup(StartupEventArgs e)
         {
             base.OnStartup(e);
+            try
+            {
+                instance = new Mutex(false, @"Global\MIGA.Client.Gui.v2");
+                try { ownsInstance = instance.WaitOne(0); } catch (AbandonedMutexException) { ownsInstance = true; }
+            }
+            catch (UnauthorizedAccessException) { ownsInstance = false; }
+            if (!ownsInstance)
+            {
+                MessageBox.Show("MIGA Client уже открыт. Закройте текущее окно и повторите открытие приглашения из MIGA Admin.", "MIGA Client", MessageBoxButton.OK, MessageBoxImage.Information);
+                Shutdown();
+                return;
+            }
 
             _host = CreateHostBuilder().Build();
             await _host.StartAsync();
 
             var mainWindow = Services.GetRequiredService<MainWindow>();
             mainWindow.Show();
+            if (e.Args.Length == 2 && e.Args[0] == "--invitation-pipe")
+            {
+                try
+                {
+                    string value = await InvitationHandoff.ReceiveAsync(e.Args[1]);
+                    var viewModel = Services.GetRequiredService<MainViewModel>();
+                    await viewModel.Initialization;
+                    await viewModel.AddInvitationAsync(value);
+                }
+                catch { Services.GetRequiredService<IDialogService>().ShowError("Не удалось получить приглашение из MIGA Admin."); }
+            }
         }
 
         private static IHostBuilder CreateHostBuilder()
@@ -33,10 +58,6 @@ namespace MIGA_Agent
                     // Регистрация сервисов
                     services.AddSingleton<ILocalServiceManager, LocalServiceManager>();
                     services.AddSingleton<IClientConfigService, ClientConfigService>();
-
-                    // SSH-менеджер создаётся отдельно для каждой вкладки сервера
-                    services.AddTransient<ISshManager, SshManager>();
-                    services.AddSingleton<Func<ISshManager>>(sp => () => sp.GetRequiredService<ISshManager>());
 
                     services.AddSingleton<NotificationCenter>();
                     services.AddSingleton<IDialogService, DialogService>();
@@ -54,6 +75,8 @@ namespace MIGA_Agent
                 await _host.StopAsync();
                 _host.Dispose();
             }
+            if (ownsInstance) instance?.ReleaseMutex();
+            instance?.Dispose();
             base.OnExit(e);
         }
     }

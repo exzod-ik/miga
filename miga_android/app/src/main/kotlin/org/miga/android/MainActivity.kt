@@ -50,7 +50,8 @@ class MainActivity : ComponentActivity() {
                 onRoutesVisible = ::routesVisible,
                 onScanServer = {
                     qrScanner.launch(ScanOptions().setDesiredBarcodeFormats(ScanOptions.QR_CODE)
-                        .setPrompt(getString(R.string.scan_server_prompt)).setBeepEnabled(false))
+                        .setPrompt(getString(R.string.scan_server_prompt)).setBeepEnabled(false)
+                        .setOrientationLocked(false))
                 }, scannedServer = scannedServer.value,
                 onScanConsumed = { scannedServer.value = null })
         }

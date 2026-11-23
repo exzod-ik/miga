@@ -27,6 +27,7 @@ data class ServerProfile(
     val firstPort: Int,
     val lastPort: Int,
     val secretRef: String,
+    val requiresInvitation: Boolean = false,
 )
 
 enum class CaptureMode { ASSIGNED_APPS, PUBLIC_IPV4_RULES }
@@ -35,7 +36,7 @@ data class SavedIpv4Rule(val id: String, val profileId: String, val expression: 
 data class SavedDomainRule(val id: String, val profileId: String, val pattern: String)
 
 data class SavedSettings(
-    val schemaVersion: Int = 4,
+    val schemaVersion: Int = 6,
     val profiles: List<ServerProfile> = emptyList(),
     val activeProfileId: String? = null,
     val assignments: Map<String, String> = emptyMap(),
@@ -47,7 +48,7 @@ data class SavedSettings(
     val selectedPackages: Set<String> get() = assignments.keys
 }
 
-data class SecretKeys(val xor: ByteArray, val swap: ByteArray)
+data class InvitationSecret(val invitation: String)
 
 interface SettingsStore {
     suspend fun read(): String?
@@ -55,8 +56,8 @@ interface SettingsStore {
 }
 
 interface SecretStore {
-    suspend fun put(ref: String, keys: SecretKeys)
-    suspend fun get(ref: String): SecretKeys
+    suspend fun put(ref: String, keys: InvitationSecret)
+    suspend fun get(ref: String): InvitationSecret
     suspend fun delete(ref: String)
 }
 
@@ -78,6 +79,7 @@ object SettingsCodec {
                 out.writeInt(profile.firstPort)
                 out.writeInt(profile.lastPort)
                 out.writeUTF(profile.secretRef)
+                out.writeBoolean(profile.requiresInvitation)
             }
             out.writeBoolean(settings.activeProfileId != null)
             settings.activeProfileId?.let(out::writeUTF)
@@ -107,11 +109,12 @@ object SettingsCodec {
             if (bytes.size > 1_000_000) throw SettingsCorrupt("Settings are too large")
             val input = DataInputStream(ByteArrayInputStream(bytes))
             val version = input.readInt()
-            if (version !in 1..4) throw SettingsCorrupt("Unsupported settings version $version; settings were kept")
+            if (version !in 1..6) throw SettingsCorrupt("Unsupported settings version $version; settings were kept")
             val count = input.readInt()
             if (count !in 0..100) throw SettingsCorrupt("Invalid profile count")
             val profiles = List(count) {
-                ServerProfile(input.readUTF(), input.readUTF(), input.readUTF(), input.readInt(), input.readInt(), input.readUTF())
+                ServerProfile(input.readUTF(), input.readUTF(), input.readUTF(), input.readInt(), input.readInt(), input.readUTF(),
+                    if (version >= 6) input.readBoolean() else version < 5)
             }
             val active = if (input.readBoolean()) input.readUTF() else null
             val selectedCount = input.readInt()
@@ -138,7 +141,7 @@ object SettingsCodec {
                 List(size) { SavedDomainRule(input.readUTF(), input.readUTF(), input.readUTF()) }
             } else emptyList()
             if (input.available() != 0) throw SettingsCorrupt("Invalid settings document")
-            return SavedSettings(4, profiles, active, assignments, dns, mode, rules, domains).also(::validate)
+            return SavedSettings(6, profiles, active, assignments, dns, mode, rules, domains).also(::validate)
         } catch (ex: SettingsCorrupt) {
             throw ex
         } catch (_: Exception) {
@@ -147,7 +150,7 @@ object SettingsCodec {
     }
 
     fun validate(settings: SavedSettings) {
-        if (settings.schemaVersion != 4) throw SettingsCorrupt("Unsupported settings version; settings were kept")
+        if (settings.schemaVersion != 6) throw SettingsCorrupt("Unsupported settings version; settings were kept")
         if (settings.profiles.size > 100 || settings.profiles.map { it.id }.toSet().size != settings.profiles.size ||
             settings.profiles.map { it.secretRef }.toSet().size != settings.profiles.size) throw SettingsCorrupt("Invalid profiles")
         settings.profiles.forEach {
@@ -194,25 +197,39 @@ class SettingsRepository(
     private val isSessionActive: () -> Boolean,
 ) {
     private val mutex = Mutex()
-    suspend fun load(): SavedSettings = mutex.withLock { SettingsCodec.decode(settingsStore.read()) }
+    suspend fun load(): SavedSettings = mutex.withLock {
+        val raw = settingsStore.read()
+        val saved = SettingsCodec.decode(raw)
+        val encoded = SettingsCodec.encode(saved)
+        if (raw != null && raw != encoded) {
+            requireDisconnected()
+            currentCoroutineContext().ensureActive()
+            withContext(NonCancellable) { settingsStore.write(encoded) }
+        }
+        saved
+    }
 
     private fun requireDisconnected() {
         check(!isSessionActive()) { "Disconnect the tunnel before changing settings" }
     }
 
     suspend fun saveProfile(id: String?, name: String, address: String, first: String, last: String,
-                            replacement: SecretKeys?): SavedSettings = mutex.withLock {
+                            replacement: InvitationSecret?): SavedSettings = mutex.withLock {
         requireDisconnected()
         val old = SettingsCodec.decode(settingsStore.read())
         val existing = old.profiles.firstOrNull { it.id == id }
         require(id == null || existing != null) { "Profile no longer exists" }
         require(name.isNotBlank() && name.length <= 80) { "Enter a profile name (up to 80 characters)" }
         val endpoint = SessionValidator.endpoint(address, first, last)
-        require(existing != null || replacement != null) { "Enter both keys" }
-        replacement?.let { require(it.xor.size == 128 && it.swap.size == 8) { "Invalid key length" } }
+        require(existing != null || replacement != null) { "Import a v2 invitation" }
+        require(replacement != null || (existing!!.address == endpoint.first && existing.firstPort == endpoint.second && existing.lastPort == endpoint.third)) { "Import a new invitation to change the endpoint" }
+        replacement?.let {
+            val invitation = parseServerQr(it.invitation)
+            require(invitation.address == endpoint.first && invitation.firstPort == endpoint.second && invitation.lastPort == endpoint.third) { "Invitation endpoint mismatch" }
+        }
         val newRef = if (replacement != null) UUID.randomUUID().toString() else existing!!.secretRef
         val profile = ServerProfile(existing?.id ?: UUID.randomUUID().toString(), name.trim(), endpoint.first,
-            endpoint.second, endpoint.third, newRef)
+            endpoint.second, endpoint.third, newRef, existing?.requiresInvitation == true && replacement == null)
         val profiles = if (existing == null) old.profiles + profile else old.profiles.map { if (it.id == id) profile else it }
         val updated = old.copy(profiles = profiles, activeProfileId = old.activeProfileId ?: profile.id)
         val encoded = SettingsCodec.encode(updated)
@@ -238,7 +255,7 @@ class SettingsRepository(
             ?: throw IllegalArgumentException("Profile no longer exists")
         require(name.isNotBlank() && name.length <= 80) { "Enter a profile name (up to 80 characters)" }
         require(SessionValidator.endpoint(address, "1", "1").first == existing.address) {
-            "Server address changed; connect by SSH to load its settings"
+            "Server address changed; import a new v2 invitation"
         }
         val updated = old.copy(profiles = old.profiles.map { if (it.id == id) it.copy(name = name.trim()) else it })
         val encoded = SettingsCodec.encode(updated)
@@ -368,7 +385,12 @@ class SettingsRepository(
             if (mode == CaptureMode.PUBLIC_IPV4_RULES)
                 saved.ipv4Rules.map { it.profileId } + saved.domainRules.map { it.profileId }
             else emptySet()
-        val profiles = saved.profiles.filter { it.id in needed }.associate { profile ->
+        val required = saved.profiles.filter { it.id in needed }
+        val pending = required.filter { it.requiresInvitation }
+        require(pending.isEmpty()) {
+            "Введите новое приглашение miga2 для серверов: ${pending.joinToString { it.name }}. Правила сохранены."
+        }
+        val profiles = required.associate { profile ->
             profile.id to SessionValidator.server(profile, secretStore.get(profile.secretRef))
         }
         val rules = if (mode == CaptureMode.PUBLIC_IPV4_RULES)

@@ -73,3 +73,4 @@ Shared/nlohmann/json.hpp eol=lf
 # Например:
 # *.csproj text eol=crlf
 # *.sln text eol=crlf
+miga_android/gradlew eol=lf

@@ -1,35 +1,13 @@
-# TCP connection state tests
+# Server tests
 
-Tests exercise the production TCP state and IPv4/TCP parser without sockets, TUN, configuration files or privileges.
+Run `python3 miga_server/tests/ServerUpdateMigrationTests.py` for isolated installer configuration, legacy migration, v2 host preservation, active/stopped service behavior, rollback after install/readiness/partial-stop failures, continued restoration after a file failure, and exact legacy NAT cleanup. On Linux, set `MIGA_TEST_SERVER_BINARY` to a built server ELF to use its real `--version` output in the update and migration checks. System commands, systemd, firewall and RX rings are substituted; the tests do not install or deploy anything. `python3 miga_server/tests/InstallerIcmpCleanupTests.py` separately verifies exact legacy ICMP DROP cleanup.
 
-From the repository root on Linux:
+Run `python3 miga_server/tests/ServerInstallerIntegrationTests.py` for the actual shell/Python installer sequence with temporary filesystem paths and command adapters, including RX, binary replacement, sysctl, service start, ICMP cleanup, occupied control ports and subnet exhaustion failures. Package-manager entry points fail closed. Windows needs Git Bash (`MIGA_TEST_BASH` can override its path). Readiness tests execute the production polling functions with substituted sockets/process observations. See [UPGRADE_VALIDATION.md](UPGRADE_VALIDATION.md) for the validation matrix and the unverified real Linux/systemd boundary.
 
-```sh
-mkdir -p Build/tests
-g++ -std=c++17 -Wall -Wextra -Werror -I miga_server/include miga_server/tests/TcpConnectionStateTests.cpp miga_server/src/TcpConnectionState.cpp -o Build/tests/tcp-state-tests
-./Build/tests/tcp-state-tests
-```
+Protocol v2 isolated storage and session tests use the production SQLite store and complete Noise/UDP control runtime. The runtime test substitutes a Unix datagram socketpair for TUN and temporary executable stubs for iptables/conntrack; it does not initialize TUN, install rules or start the daemon service. It covers a wrong personal proof, real NK/BIND, lost READY recovered through STATUS, personal/global limits, two invitations with identical local addresses and ports, virtual-source and endpoint isolation, response ownership, ADD_ADDRESS retries, RESUME at the active-session limit, persisted replay rejection after restart, disconnect/revoke, stable routing snapshots during idle maintenance, client listing across multiple admin socket pages, and bounded child-command timeout. Do not compile tests with NDEBUG, because assertions execute the tested operations.
 
-From an x64 Visual Studio Developer Command Prompt:
+Run `python3 miga_server/tests/run-v2-tests.py` from a Linux checkout. It builds the pinned dependencies locally, compiles the SQLite store test, the common Windows/Linux wire-vector review, and the private runtime fixture, then executes them with C++17 and `-Wall -Wextra -Werror`. OpenSSL headers/libraries must already be available; set `MIGA_OPENSSL_PREFIX` for a local static installation. See [the runtime notes](../PROTOCOL_V2.md) for resource bounds and unverified live scenarios.
 
-```bat
-if not exist Build\tests mkdir Build\tests
-cl /nologo /std:c++17 /EHsc /W4 /WX /I miga_server\include miga_server\tests\TcpConnectionStateTests.cpp miga_server\src\TcpConnectionState.cpp /FoBuild\tests\ /FeBuild\tests\tcp-state-tests.exe
-Build\tests\tcp-state-tests.exe
-```
-
-A single FIN retains the 124-minute idle timeout. Two FINs, a reset or a retired mapping use a 4-minute idle timeout. Traffic in either direction refreshes the idle timer. Both FIN acknowledgments are tracked with wrapping sequence numbers; retransmissions retain their route. A new SYN with a different initial sequence number can get a new port after closing begins, while the old port remains reserved until cleanup.
-
-These tests do not replace Linux server compilation or TCP/UDP integration tests through TUN.
-
-Port pool and connection-key tests:
-
-```bat
-cl /nologo /std:c++17 /EHsc /W4 /WX /I miga_server\include miga_server\tests\PortPoolTests.cpp miga_server\src\ConnectionKey.cpp miga_server\src\PortPool.cpp /FoBuild\tests\ /FeBuild\tests\port-pool-tests.exe
-Build\tests\port-pool-tests.exe
-```
-
-On Linux, compile PortPoolTests.cpp with the same include path and compiler flags used above for TcpConnectionStateTests.cpp. The test exhausts and replenishes the full port range, checks single-free-port allocation, duplicate release, independent TCP/UDP pools and full five-tuple key equality.
 Interface IP cache tests (Linux only, no root, TUN or firewall changes):
 
 ```sh
@@ -55,22 +33,21 @@ g++ -std=c++17 -O2 -Wall -Wextra -Werror -I Shared miga_server/tests/ChecksumTes
 ./Build/tests/checksum-tests
 ```
 
-Checks cover every size from 0 through 65547 bytes against the previous contiguous-buffer checksum, split pseudoheader/payload, odd split positions, unaligned input, empty fragments, carry folding and a known checksum. These portable tests do not compile ServerCore or validate live TCP/UDP forwarding.
+Checks cover every size from 0 through 65547 bytes against the previous contiguous-buffer checksum, split pseudoheader/payload, odd split positions, unaligned input, empty fragments, carry folding and a known checksum. These portable tests do not validate live TCP/UDP forwarding.
 
-Tunnel ingress tests (portable C++17):
+Diagnostic control tests are included in `python3 miga_server/tests/run-v2-tests.py`. They exercise packet correlation, virtual destination isolation, real loopback TLS with the certificate fingerprint, wrong tickets, one-time use, expiry, revocation before/after authorization, and stop cleanup. No certificate files, root, daemon deployment or firewall changes are required. The runtime fixture verifies DiagnosticOpen over real authenticated v2 control and idempotent replies.
 
-```sh
-g++ -std=c++17 -Wall -Wextra -Werror -I miga_server/include miga_server/tests/TunnelIngressTests.cpp miga_server/src/TunnelIngress.cpp -o Build/tests/tunnel-ingress-tests
-./Build/tests/tunnel-ingress-tests
-```
+Network counter tests (Linux; no root, daemon changes or firewall):
 
-Tests cover IPv4 options, UDP port byte order and configured boundaries, short and empty datagrams, invalid lengths and fragments. Linux reassembles outer fragments before the raw socket filter. Return traffic uses raw UDP with IP_PKTINFO and IP_PMTUDISC_DONT so Linux can fragment according to the route. An end-to-end MTU check requires a Linux route with constrained MTU and a receiving client.
+~~~sh
+g++ -std=c++17 -Wall -Wextra -Werror -I miga_server/include -I Shared miga_server/tests/DiagnosticNetworkStatsTests.cpp miga_server/src/DiagnosticNetworkStats.cpp -o Build/tests/diagnostic-network-tests
+./Build/tests/diagnostic-network-tests
+~~~
 
-Linux raw packet path regression (requires CAP_NET_RAW; the constrained-MTU namespace also requires namespace/network administration privileges):
+Covers exact 64-bit deltas, reset/missing counters, boot/interface/socket replacement and unavailable socket statistics. Includes a read-only loopback snapshot. Report formatting tests: dotnet run --project miga_diagnostics/tests/ServerNetworkReportTests.csproj.
 
-```sh
-g++ -std=c++17 -O2 -pthread -I miga_server/include -I Shared miga_server/tests/ServerPacketPathTests.cpp miga_server/src/ServerCore.cpp miga_server/src/TunnelIngress.cpp Shared/InternetChecksum.cpp Shared/Encryption.cpp Shared/LogFormat.cpp Shared/LogTime.cpp Shared/Logger.cpp miga_server/src/ConnectionKey.cpp miga_server/src/InterfaceIpCache.cpp miga_server/src/PortPool.cpp miga_server/src/TcpConnectionState.cpp -o Build/tests/server-packet-path
-unshare -n sh -ec 'ip link set lo mtu 1280 up; exec Build/tests/server-packet-path'
-```
+Нагрузочная диагностика: `python3 tests/run-v2-tests.py diagnostic-load diagnostic-control runtime`. DiagnosticLoadTests проверяет ограничения, повреждённые пакеты, старые ступени, уникальные номера/повторы/перестановки, реальный loopback UDP в обе стороны с буфером 8 МиБ и повторную очистку. Firewall подменён; тест не проверяет настоящий TUN/WinDivert и сетевые потери между машинами.
 
-The test uses a private loopback network, a datagram socket pair in place of TUN, and real raw UDP receive/filter/send. It round-trips 4096-byte inner TCP and DNS/UDP packets, including restoration of the original DNS address and the outer source port. It does not install firewall rules or start the daemon.
+`python3 tests/InstallerIcmpCleanupTests.py` проверяет удаление старого ICMP DROP из установщика: точное совпадение, дубликаты, сохранённые правила, повторный запуск и ошибки iptables. Команды iptables подменены; сетевые правила машины не меняются.
+
+`python3 tests/ServerDependencyTests.py` проверяет общий Bash helper с подменой поиска команд и пакетных менеджеров: все зависимости уже есть, apt/dnf/yum, ошибки и таймауты, неподдерживаемый менеджер, systemd, проверку после установки и порядок подготовки до остановки. На Windows используется Git Bash (или MIGA_TEST_BASH). Реальные пакеты не устанавливаются; apt/systemd и сеть VPS этими тестами не проверяются. `python3 tests/ServerUpdateMigrationTests.py` проверяет миграцию и откат в изолированной файловой системе.

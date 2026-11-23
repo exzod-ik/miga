@@ -21,8 +21,13 @@ namespace MIGA_Agent.ViewModels
     /// </summary>
     public partial class MainViewModel : ObservableValidator
     {
+        public Task Initialization { get; }
+
         private string _savedLogLevel = "none";
         private string _savedTunnelMaxMss = "1400";
+        private bool _savedDnsResolverEnabled = true;
+        private string _savedRoutingMode = "split";
+        private string _savedFullRoutingProfileId = "";
 
         public IReadOnlyList<string> LogLevels { get; } = new[] { "none", "error", "warning", "info", "debug" };
 
@@ -32,7 +37,27 @@ namespace MIGA_Agent.ViewModels
         [Range(1, 65535, ErrorMessage = "MSS: целое число от 1 до 65535.")]
         private string _tunnelMaxMss = "1400";
 
-        public bool IsDirty => LogLevel != _savedLogLevel || TunnelMaxMss != _savedTunnelMaxMss;
+        [ObservableProperty]
+        private bool _dnsResolverEnabled = true;
+
+        [ObservableProperty]
+        [NotifyPropertyChangedFor(nameof(IsFullRouting))]
+        [NotifyPropertyChangedFor(nameof(CanEditRules))]
+        private string _routingMode = "split";
+
+        [ObservableProperty]
+        private ServerTabViewModel? _fullRoutingServer;
+
+        public bool IsFullRouting => RoutingMode == "full";
+        public bool CanEditRules => !IsFullRouting;
+        private string FullRoutingProfileId => IsFullRouting ? FullRoutingServer?.ProfileId ?? "" : "";
+
+        public bool IsDirty => LogLevel != _savedLogLevel || TunnelMaxMss != _savedTunnelMaxMss ||
+            DnsResolverEnabled != _savedDnsResolverEnabled || RoutingMode != _savedRoutingMode || FullRoutingProfileId != _savedFullRoutingProfileId;
+
+        partial void OnDnsResolverEnabledChanged(bool value) => NotifyClientSettingsChanged();
+        partial void OnRoutingModeChanged(string value) => NotifyClientSettingsChanged();
+        partial void OnFullRoutingServerChanged(ServerTabViewModel? value) => NotifyClientSettingsChanged();
 
         partial void OnLogLevelChanged(string value) => NotifyClientSettingsChanged();
         partial void OnTunnelMaxMssChanged(string value) => NotifyClientSettingsChanged();
@@ -44,29 +69,26 @@ namespace MIGA_Agent.ViewModels
             OnPropertyChanged(nameof(WindowTitle));
         }
 
-        private const string BaseWindowTitle = "Make Internet Greate Again";
+        private const string BaseWindowTitle = "MIGA Client";
 
         private readonly ILocalServiceManager _localService;
         private readonly IClientConfigService _configService;
-        private readonly Func<ISshManager> _sshFactory;
         private readonly IDialogService _dialogService;
 
         public MainViewModel(
             ILocalServiceManager localService,
             IClientConfigService configService,
-            Func<ISshManager> sshFactory,
             IDialogService dialogService)
         {
             _localService = localService;
             _configService = configService;
-            _sshFactory = sshFactory;
             _dialogService = dialogService;
 
             Servers = new ObservableCollection<ServerTabViewModel>();
 
             Servers.CollectionChanged += OnServersCollectionChanged;
 
-            Application.Current.Dispatcher.InvokeAsync(async () => await LoadInitialDataAsync());
+            Initialization = Application.Current.Dispatcher.InvokeAsync(LoadInitialDataAsync).Task.Unwrap();
         }
 
         // ========== Публичные свойства ==========
@@ -93,16 +115,19 @@ namespace MIGA_Agent.ViewModels
 
         // ========== Команды ==========
 
-        [RelayCommand]
+        [RelayCommand(CanExecute = nameof(CanRefreshServiceStatus))]
         private async Task RefreshServiceStatus() => await UpdateServiceStatusAsync();
+
+        private bool _serviceTransitionInProgress;
+        private bool CanRefreshServiceStatus() => !_serviceTransitionInProgress;
 
         [RelayCommand(CanExecute = nameof(CanStartLocalService))]
         private async Task StartLocalService() => await StartLocalServiceAsync();
-        private bool CanStartLocalService() => ServiceStatus == "Остановлена";
+        private bool CanStartLocalService() => !_serviceTransitionInProgress && ServiceStatus == "Остановлена";
 
         [RelayCommand(CanExecute = nameof(CanStopLocalService))]
         private async Task StopLocalService() => await StopLocalServiceAsync();
-        private bool CanStopLocalService() => ServiceStatus == "Работает";
+        private bool CanStopLocalService() => !_serviceTransitionInProgress && ServiceStatus == "Работает";
 
         [RelayCommand]
         private async Task ApplyConfiguration() => await ApplyConfigurationAsync();
@@ -118,65 +143,15 @@ namespace MIGA_Agent.ViewModels
             tab.IsDirty = true;
         }
 
-        [RelayCommand]
-        private void ImportServerFile()
+        public async Task AddInvitationAsync(string value)
         {
-            var dialog = new OpenFileDialog
-            {
-                Title = "Загрузить сервер из файла",
-                Filter = "Файл сервера M.I.G.A. (*.miga-server.json)|*.miga-server.json|JSON (*.json)|*.json",
-                CheckFileExists = true,
-                Multiselect = false
-            };
-            if (dialog.ShowDialog(Application.Current.MainWindow) != true)
-                return;
-
-            try
-            {
-                if (new FileInfo(dialog.FileName).Length > ServerSharePayload.MaxJsonLength)
-                    throw new InvalidDataException("Файл сервера слишком большой.");
-
-                var payload = ServerSharePayload.Parse(File.ReadAllText(dialog.FileName));
-                var existing = Servers.FirstOrDefault(tab =>
-                    string.Equals(tab.ServerIp, payload.Address, StringComparison.OrdinalIgnoreCase)
-                    && tab.ServerPortsStart == payload.FirstPort && tab.ServerPortsEnd == payload.LastPort
-                    && tab.XorKey == payload.XorKey && tab.SwapKey == payload.SwapKey);
-                if (existing != null)
-                {
-                    SelectedServer = existing;
-                    _dialogService.ShowWarning("Этот сервер уже добавлен.");
-                    return;
-                }
-
-                // На пустой конфигурации используем начальную пустую вкладку.
-                var placeholder = Servers.Count == 1 ? Servers[0] : null;
-                var tab = placeholder != null && !placeholder.IsDirty
-                    && string.IsNullOrWhiteSpace(placeholder.ServerIp)
-                    && string.IsNullOrEmpty(placeholder.XorKey)
-                    && string.IsNullOrEmpty(placeholder.SwapKey)
-                    && placeholder.ServerSshUser == "root"
-                    && string.IsNullOrEmpty(placeholder.ServerSshPassword)
-                    && !placeholder.IsSshConnected
-                    && placeholder.RedirectProcesses.Count == 0
-                    && placeholder.RedirectIps.Count == 0
-                    && placeholder.RedirectDomains.Count == 0
-                    ? placeholder : CreateServerTab();
-                tab.LoadFrom(payload.ToServerEntry());
-                if (tab != placeholder)
-                    Servers.Add(tab);
-                tab.IsDirty = true;
-                SelectedServer = tab;
-                RecalculateConflicts();
-                _dialogService.ShowInfo("Сервер добавлен. Примените конфигурацию, чтобы сохранить его.");
-            }
-            catch (InvalidDataException ex)
-            {
-                _dialogService.ShowWarning(ex.Message, "Неверный файл сервера");
-            }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-            {
-                _dialogService.ShowError($"Не удалось загрузить файл сервера: {ex.Message}");
-            }
+            var invitation = ProtocolV2Invitation.Parse(value);
+            if (!_dialogService.ShowYesNo($"Добавить новое подключение к {invitation.Host}? Существующие подключения и правила сохранятся.", "MIGA Client")) return;
+            var tab = CreateServerTab();
+            Servers.Add(tab);
+            SelectedServer = tab;
+            try { await tab.ApplyInvitationAsync(value); }
+            catch { UnhookTabHandlers(tab); Servers.Remove(tab); SelectedServer = Servers.FirstOrDefault(); throw; }
         }
 
         // ========== Инициализация ==========
@@ -209,7 +184,9 @@ namespace MIGA_Agent.ViewModels
             TunnelMaxMss = config.TunnelMaxMss.ToString();
             _savedLogLevel = LogLevel;
             _savedTunnelMaxMss = TunnelMaxMss;
-            NotifyClientSettingsChanged();
+            _savedDnsResolverEnabled = config.DnsResolverEnabled;
+            _savedRoutingMode = config.RoutingMode;
+            _savedFullRoutingProfileId = config.FullRoutingProfileId;
 
             foreach (var entry in config.Servers)
             {
@@ -223,6 +200,10 @@ namespace MIGA_Agent.ViewModels
                 Servers.Add(CreateServerTab());
 
             SelectedServer = Servers.FirstOrDefault();
+            DnsResolverEnabled = config.DnsResolverEnabled;
+            RoutingMode = config.RoutingMode;
+            FullRoutingServer = Servers.FirstOrDefault(tab => tab.CanUseForFullRouting && tab.ProfileId == config.FullRoutingProfileId);
+            NotifyClientSettingsChanged();
 
             // Подсветка пересечений, сохранённых в конфиге ранее
             RecalculateConflicts();
@@ -235,9 +216,8 @@ namespace MIGA_Agent.ViewModels
             var tab = new ServerTabViewModel(
                 _localService,
                 _dialogService,
-                _sshFactory(),
                 ReloadLocalServiceAsync,
-                SaveClientConfigAsync);
+                PersistInvitationConfigAsync);
 
             tab.RemoveRequested += OnTabRemoveRequested;
             tab.PropertyChanged += OnTabPropertyChanged;
@@ -259,13 +239,22 @@ namespace MIGA_Agent.ViewModels
 
         private void OnServersCollectionChanged(object? sender, NotifyCollectionChangedEventArgs e)
         {
+            if (FullRoutingServer != null && !Servers.Contains(FullRoutingServer))
+                FullRoutingServer = null;
             OnPropertyChanged(nameof(WindowTitle));
         }
 
         private void OnTabPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
         {
             if (e.PropertyName == nameof(ServerTabViewModel.IsDirty))
+            {
+                OnPropertyChanged(nameof(HasUnsavedChanges));
                 OnPropertyChanged(nameof(WindowTitle));
+            }
+            if (e.PropertyName == nameof(ServerTabViewModel.Enabled))
+                RecalculateConflicts();
+            if (ReferenceEquals(sender, FullRoutingServer) && e.PropertyName == nameof(ServerTabViewModel.ProfileId))
+                NotifyClientSettingsChanged();
         }
 
         private void OnTabItemsChanged(object? sender, NotifyCollectionChangedEventArgs e)
@@ -293,7 +282,6 @@ namespace MIGA_Agent.ViewModels
             }
 
             UnhookTabHandlers(tab);
-            tab.DisconnectSsh();
             Servers.Remove(tab);
 
             if (SelectedServer == null)
@@ -308,21 +296,43 @@ namespace MIGA_Agent.ViewModels
 
         // ========== Конфигурация ==========
 
+        private async Task<bool> PersistInvitationConfigAsync()
+        {
+            if (FullRoutingValidationError() != null)
+                return false;
+            await SaveClientConfigAsync();
+            return true;
+        }
+
         private async Task SaveClientConfigAsync()
         {
             ValidateAllProperties();
             if (HasErrors)
                 throw new InvalidOperationException("MSS должен быть целым числом от 1 до 65535.");
+            var draft = Servers.FirstOrDefault(tab => !tab.RequiresInvitation && string.IsNullOrWhiteSpace(tab.ProfileId) &&
+                (!string.IsNullOrWhiteSpace(tab.ConnectionName) || tab.RedirectProcesses.Count > 0 ||
+                    tab.RedirectIps.Count > 0 || tab.RedirectDomains.Count > 0));
+            if (draft != null)
+            {
+                SelectedServer = draft;
+                throw new InvalidOperationException($"Для сохранения вкладки «{draft.DisplayName}» добавьте приглашение.");
+            }
             string savedMssText = TunnelMaxMss;
             var config = new ClientConfig
             {
                 LogLevel = LogLevel,
                 TunnelMaxMss = int.Parse(TunnelMaxMss),
-                Servers = Servers.Select(t => t.ToServerEntry()).ToList()
+                DnsResolverEnabled = DnsResolverEnabled,
+                RoutingMode = RoutingMode,
+                FullRoutingProfileId = FullRoutingProfileId,
+                Servers = Servers.Where(t => t.RequiresInvitation || !string.IsNullOrWhiteSpace(t.ProfileId)).Select(t => t.ToServerEntry()).ToList()
             };
             await _configService.SaveAsync(config);
             _savedLogLevel = config.LogLevel;
             _savedTunnelMaxMss = savedMssText;
+            _savedDnsResolverEnabled = config.DnsResolverEnabled;
+            _savedRoutingMode = config.RoutingMode;
+            _savedFullRoutingProfileId = config.FullRoutingProfileId;
             NotifyClientSettingsChanged();
 
             // Всё записано в файл — сбрасываем признак несохранённых изменений
@@ -354,8 +364,16 @@ namespace MIGA_Agent.ViewModels
                         // Пользователь отменил запись — окно остаётся открытым
                         return false;
                     }
-                    await SaveClientConfigAsync();
-                    return true;
+                    try
+                    {
+                        await SaveClientConfigAsync();
+                        return true;
+                    }
+                    catch (Exception error)
+                    {
+                        _dialogService.ShowError($"Не удалось сохранить конфигурацию: {error.Message}");
+                        return false;
+                    }
 
                 case UnsavedChangesDecision.Discard:
                     return true;
@@ -367,7 +385,7 @@ namespace MIGA_Agent.ViewModels
 
         /// <summary>
         /// Применение всей конфигурации: проверка пересечений, сохранение,
-        /// применение серверной части для подключённых вкладок, перезапуск службы.
+        /// перезапуск службы.
         /// </summary>
         private async Task ApplyConfigurationAsync()
         {
@@ -386,16 +404,14 @@ namespace MIGA_Agent.ViewModels
                     return;
             }
 
-            await SaveClientConfigAsync();
-
-            if (Servers.Any(t => t.IsSshConnected))
+            try
             {
-                foreach (var tab in Servers.ToList())
-                    await tab.ApplyServerConfigIfConnectedAsync();
+                await SaveClientConfigAsync();
             }
-            else
+            catch (Exception error)
             {
-                _dialogService.ShowInfo("Конфигурация клиента сохранена. Для применения на сервере установите SSH-подключение на нужной вкладке.");
+                _dialogService.ShowError($"Не удалось сохранить конфигурацию: {error.Message}");
+                return;
             }
 
             await ReloadLocalServiceAsync();
@@ -404,11 +420,27 @@ namespace MIGA_Agent.ViewModels
         private bool ValidateClientSettings()
         {
             ValidateAllProperties();
-            if (!HasErrors)
-                return true;
-
-            _dialogService.ShowError("MSS должен быть целым числом от 1 до 65535.");
+            if (HasErrors)
+            {
+                _dialogService.ShowError("MSS должен быть целым числом от 1 до 65535.");
+                return false;
+            }
+            var routingError = FullRoutingValidationError();
+            if (routingError == null) return true;
+            _dialogService.ShowError(routingError);
             return false;
+        }
+
+        private string? FullRoutingValidationError()
+        {
+            if (!IsFullRouting) return null;
+            if (FullRoutingServer?.CanUseForFullRouting != true)
+                return "Выберите включённое подключение с приглашением для полного перенаправления.";
+            if (Servers.Any(server => server.Enabled && server.RequiresInvitation))
+                return "Добавьте приглашения для включённых подключений, перенесённых из старой конфигурации, или отключите эти подключения.";
+            if (Servers.Count(server => server.Enabled && server.ProfileId == FullRoutingProfileId) != 1)
+                return "Выбранное приглашение используется в нескольких подключениях. Удалите дубликаты.";
+            return null;
         }
 
         // ========== Проверка пересечений ==========
@@ -451,9 +483,10 @@ namespace MIGA_Agent.ViewModels
                 }
             }
 
-            RecalculateCategory(RedirectKind.Process, tabs);
-            RecalculateCategory(RedirectKind.Ip, tabs);
-            RecalculateCategory(RedirectKind.Domain, tabs);
+            var enabledTabs = tabs.Where(tab => tab.Enabled).ToList();
+            RecalculateCategory(RedirectKind.Process, enabledTabs);
+            RecalculateCategory(RedirectKind.Ip, enabledTabs);
+            RecalculateCategory(RedirectKind.Domain, enabledTabs);
         }
 
         private void RecalculateCategory(RedirectKind kind, List<ServerTabViewModel> tabs)
@@ -478,10 +511,12 @@ namespace MIGA_Agent.ViewModels
                 foreach (var (tab, item) in owners)
                 {
                     var others = owners
+                        .Where(o => o.Tab != tab)
                         .Select(o => o.Tab.DisplayName)
-                        .Where(n => !string.Equals(n, tab.DisplayName, StringComparison.Ordinal))
                         .Distinct()
                         .ToList();
+                    if (others.Count == 0)
+                        continue;
 
                     item.IsConflicting = true;
                     item.ConflictTooltip =
@@ -494,6 +529,7 @@ namespace MIGA_Agent.ViewModels
         private List<string> GetConflictIssues()
         {
             var issues = new List<string>();
+            if (IsFullRouting) return issues;
             issues.AddRange(GetCategoryIssues(RedirectKind.Process));
             issues.AddRange(GetCategoryIssues(RedirectKind.Ip));
             issues.AddRange(GetCategoryIssues(RedirectKind.Domain));
@@ -502,32 +538,36 @@ namespace MIGA_Agent.ViewModels
 
         private IEnumerable<string> GetCategoryIssues(RedirectKind kind)
         {
-            var map = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+            var map = new Dictionary<string, List<ServerTabViewModel>>(StringComparer.OrdinalIgnoreCase);
 
-            foreach (var tab in Servers)
+            foreach (var tab in Servers.Where(tab => tab.Enabled))
             {
                 foreach (var item in ItemsOf(tab, kind))
                 {
                     if (!map.TryGetValue(item.Value, out var list))
-                        map[item.Value] = list = new List<string>();
-                    if (!list.Contains(tab.DisplayName))
-                        list.Add(tab.DisplayName);
+                        map[item.Value] = list = new List<ServerTabViewModel>();
+                    if (!list.Contains(tab))
+                        list.Add(tab);
                 }
             }
 
-            foreach (var (value, serversList) in map.Where(kv => kv.Value.Count > 1))
+            foreach (var (value, tabs) in map.Where(kv => kv.Value.Count > 1))
             {
-                yield return $"{KindName(kind)} \"{value}\" назначен нескольким серверам: {string.Join(", ", serversList)}";
+                yield return $"{KindName(kind)} \"{value}\" назначен нескольким серверам: {string.Join(", ", tabs.Select(tab => tab.DisplayName))}";
             }
         }
 
         // ========== Локальная служба ==========
 
+        private long _serviceStatusRequest;
+
         private async Task UpdateServiceStatusAsync()
         {
+            var request = ++_serviceStatusRequest;
             try
             {
-                var status = _localService.GetStatus();
+                var status = await Task.Run(_localService.GetStatus);
+                if (request != _serviceStatusRequest) return;
                 ServiceStatus = status switch
                 {
                     System.ServiceProcess.ServiceControllerStatus.Running => "Работает",
@@ -543,6 +583,7 @@ namespace MIGA_Agent.ViewModels
             }
             catch (Exception ex)
             {
+                if (request != _serviceStatusRequest) return;
                 ServiceStatus = "Ошибка";
                 _dialogService.ShowError($"Не удалось получить статус службы: {ex.Message}");
             }
@@ -552,32 +593,41 @@ namespace MIGA_Agent.ViewModels
             (StopLocalServiceCommand as IAsyncRelayCommand)?.NotifyCanExecuteChanged();
         }
 
-        private async Task StartLocalServiceAsync()
-        {
-            try
-            {
-                _localService.Start();
-                await UpdateServiceStatusAsync();
-                _dialogService.ShowInfo("Служба запущена");
-            }
-            catch (Exception ex)
-            {
-                _dialogService.ShowError($"Ошибка запуска службы: {ex.Message}");
-            }
-        }
+        private Task StartLocalServiceAsync() => ChangeServiceStateAsync(
+            _localService.Start, "Запускается…", "Служба запущена", "Ошибка запуска службы");
 
-        private async Task StopLocalServiceAsync()
+        private Task StopLocalServiceAsync() => ChangeServiceStateAsync(
+            _localService.Stop, "Останавливается…", "Служба остановлена", "Ошибка остановки службы");
+
+        private async Task ChangeServiceStateAsync(Action operation, string pending, string success, string failure)
         {
+            if (_serviceTransitionInProgress) return;
+            _serviceTransitionInProgress = true;
+            ++_serviceStatusRequest;
+            ServiceStatus = pending;
+            RefreshServiceStatusCommand.NotifyCanExecuteChanged();
+            StartLocalServiceCommand.NotifyCanExecuteChanged();
+            StopLocalServiceCommand.NotifyCanExecuteChanged();
+
+            string? error = null;
             try
             {
-                _localService.Stop();
-                await UpdateServiceStatusAsync();
-                _dialogService.ShowInfo("Служба остановлена");
+                await Task.Run(operation);
             }
             catch (Exception ex)
             {
-                _dialogService.ShowError($"Ошибка остановки службы: {ex.Message}");
+                error = ex.Message;
             }
+            finally
+            {
+                await UpdateServiceStatusAsync();
+                _serviceTransitionInProgress = false;
+                RefreshServiceStatusCommand.NotifyCanExecuteChanged();
+                StartLocalServiceCommand.NotifyCanExecuteChanged();
+                StopLocalServiceCommand.NotifyCanExecuteChanged();
+            }
+            if (error == null) _dialogService.ShowInfo(success);
+            else _dialogService.ShowError(error, failure);
         }
 
         private async Task<bool> ReloadLocalServiceAsync()

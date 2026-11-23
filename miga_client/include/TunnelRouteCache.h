@@ -10,8 +10,14 @@
 
 class TunnelRouteCache {
 public:
-    struct Route {
+    struct Path {
         uint32_t source = 0;
+        uint64_t interfaceLuid = 0;
+        uint32_t nextHop = 0;
+        bool operator==(const Path&) const = default;
+    };
+    struct Route {
+        Path path;
         uint32_t mtu = 0;
         uint64_t revision = 0;
         std::chrono::steady_clock::time_point checked{};

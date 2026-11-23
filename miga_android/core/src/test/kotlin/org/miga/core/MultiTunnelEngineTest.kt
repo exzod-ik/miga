@@ -75,9 +75,13 @@ class MultiTunnelEngineTest {
         Checksum.writeIpv4(bytes, 20)
         return bytes
     }
-    private val codec = LegacyMigaCodec(ByteArray(128), ByteArray(8))
+    private class TestCodec(override val port: Int = 6000) : SessionCodec {
+        override fun encode(packet: ByteArray, port: Int) = ByteArray(8) + packet
+        override fun decode(datagram: ByteArray, port: Int) = datagram.copyOfRange(8, datagram.size)
+    }
+    private val codec = TestCodec()
     private fun server(id: String, generation: Long, transport: Transport, ip: Int, port: Int) =
-        ServerTransport(id, generation, transport, codec, ip, port, port, { port })
+        ServerTransport(id, generation, transport, TestCodec(port), ip)
 
     private fun awaitStat(queue: LinkedBlockingQueue<TunnelStats>, predicate: (TunnelStats) -> Boolean) {
         val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
@@ -423,6 +427,8 @@ class MultiTunnelEngineTest {
             Ipv4Packet.put16(unchecksummed, 10, 0)
             Ipv4Packet.put16(unchecksummed, 26, 0)
             secondary.input.add(ReceivedDatagram(codec.encode(unchecksummed, 7000), 0x05050505, 7000))
+            assertNull(device.output.poll(150, TimeUnit.MILLISECONDS))
+            secondary.input.add(ReceivedDatagram(codec.encode(packet(0x08080808, 0x0afe5302, 443, 1001), 7000), 0x05050505, 7000))
             val restored = device.output.poll(2, TimeUnit.SECONDS)
             assertEquals(0x08080808, FlowKey.from(Ipv4Packet.parse(restored)!!).sourceIp)
         } finally { engine.close() }
@@ -506,6 +512,70 @@ class MultiTunnelEngineTest {
             val retained = codec.decode(auxiliary.output.poll(2, TimeUnit.SECONDS), 7000)
             assertEquals(0x09090909, FlowKey.from(Ipv4Packet.parse(retained)!!).destinationIp)
             assertNull(auxiliary.output.poll(100, TimeUnit.MILLISECONDS))
+        } finally { engine.close() }
+    }
+
+    @Test fun identicalRewrittenTuplesAreIsolatedByServerAndGeneration() {
+        val device = Device()
+        val primary = Transport()
+        val one = Transport()
+        val two = Transport()
+        val vpnIp = 0x0afe5302
+        val dnsIp = 0x01010101
+        val first = 0x08080808
+        val second = 0x07070707
+        val wireIp = 0x09090909
+        val engine = MultiTunnelEngine(device, { flow ->
+            when (flow.destinationIp) { first -> 1; second -> 2; else -> 3 }
+        }, mapOf(1 to "one", 2 to "two", 3 to "primary"), "primary",
+            { 1000 }, { _, _, _ -> }, { _, _ -> })
+        fun answer(transport: Transport, ip: Int, port: Int, localPort: Int, address: Int, domain: String) {
+            val query = codec.decode(transport.output.poll(2, TimeUnit.SECONDS), port)
+            val id = DnsParser.parse(query.copyOfRange(28, query.size))!!.id
+            val response = packet(dnsIp, vpnIp, 53, localPort,
+                payload = dnsSet(id, true, listOf(address), domain))
+            transport.input.add(ReceivedDatagram(codec.encode(response, port), ip, port))
+        }
+        fun reply(transport: Transport, ip: Int, port: Int, expected: Int) {
+            val response = packet(wireIp, vpnIp, 443, 12346)
+            transport.input.add(ReceivedDatagram(codec.encode(response, port), ip, port))
+            val restored = Ipv4Packet.parse(device.output.poll(2, TimeUnit.SECONDS))!!
+            assertEquals(expected, FlowKey.from(restored).sourceIp)
+        }
+        engine.start()
+        try {
+            engine.attach(server("primary", 1, primary, 0x04040404, 6000))
+            engine.attach(server("one", 1, one, 0x05050505, 7000))
+            engine.attach(server("two", 1, two, 0x06060606, 8000))
+            listOf(first, second).forEachIndexed { index, address ->
+                val domain = "srv$index.example.com"
+                val port = 12340 + index
+                device.input.add(packet(vpnIp, dnsIp, port, 53,
+                    payload = dnsSet(index, false, emptyList(), domain)))
+                answer(one, 0x05050505, 7000, port, wireIp, domain)
+                answer(two, 0x06060606, 8000, port, wireIp, domain)
+                answer(primary, 0x04040404, 6000, port, address, domain)
+                assertNotNull(device.output.poll(2, TimeUnit.SECONDS))
+            }
+            device.input.add(packet(vpnIp, first, 12346, 443))
+            device.input.add(packet(vpnIp, second, 12346, 443))
+            val sentOne = codec.decode(one.output.poll(2, TimeUnit.SECONDS), 7000)
+            val sentTwo = codec.decode(two.output.poll(2, TimeUnit.SECONDS), 8000)
+            assertContentEquals(sentOne, sentTwo)
+            assertEquals(wireIp, FlowKey.from(Ipv4Packet.parse(sentOne)!!).destinationIp)
+
+            reply(two, 0x06060606, 8000, second)
+            reply(one, 0x05050505, 7000, first)
+            reply(one, 0x05050505, 7000, first)
+            reply(two, 0x06060606, 8000, second)
+
+            engine.detach("two", 1)
+            val replacement = Transport()
+            engine.attach(server("two", 2, replacement, 0x06060606, 8000))
+            val stale = packet(wireIp, vpnIp, 443, 12346)
+            replacement.input.add(ReceivedDatagram(codec.encode(stale, 8000), 0x06060606, 8000))
+            assertNull(device.output.poll(100, TimeUnit.MILLISECONDS))
+            reply(one, 0x05050505, 7000, first)
         } finally { engine.close() }
     }
 

@@ -1,18 +1,18 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
+    <AssemblyName>MIGA Client</AssemblyName>
     <TargetFramework>net10.0-windows</TargetFramework>
     <RootNamespace>MIGA_Agent</RootNamespace>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWPF>true</UseWPF>
     <ApplicationIcon>Icon.ico</ApplicationIcon>
-	<BaseIntermediateOutputPath>$(SolutionDir)Build\MIGA Agent</BaseIntermediateOutputPath>
-    <BaseOutputPath>$(SolutionDir)Build\MIGA Agent</BaseOutputPath>
     <ApplicationManifest>app.manifest</ApplicationManifest>
-    <AssemblyVersion>1.2.5.0</AssemblyVersion>
-    <FileVersion>1.2.5.0</FileVersion>
+    <AssemblyVersion>1.3.0.0</AssemblyVersion>
+    <Version>1.3.0</Version>
+    <FileVersion>1.3.0.0</FileVersion>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|AnyCPU'">
@@ -21,17 +21,20 @@
 
   <ItemGroup>
     <None Remove="Icon.ico" />
+    <Compile Remove="tests\**\*.cs" />
+    <Compile Remove="Services\SshManager.cs;Services\ISshManager.cs;Helpers\ServerConfigUpdate.cs;Helpers\PasswordBoxAssistant.cs;Views\Dialogs\ProtocolV2ClientsWindow.cs" />
   </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.2" />
     <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.11" />
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.11" />
-    <PackageReference Include="Ookii.Dialogs.Wpf" Version="5.0.1" />
     <PackageReference Include="QRCoder" Version="1.8.0" />
-    <PackageReference Include="SSH.NET" Version="2026.0.0" />
+    <PackageReference Include="Ookii.Dialogs.Wpf" Version="5.0.1" />
+
     <PackageReference Include="System.ServiceProcess.ServiceController" Version="10.0.11" />
     <PackageReference Include="System.Text.Json" Version="10.0.11" />
+    <PackageReference Include="ZXing.Net" Version="0.16.11" />
   </ItemGroup>
 
   <ItemGroup>
@@ -40,7 +43,19 @@
     </Resource>
   </ItemGroup>
   
-  <Target Name="CleanWpfTempFolders" AfterTargets="CoreClean">
-    <RemoveDir Directories="$(BaseIntermediateOutputPath)\**\*_wpftmp*" />
+  <ItemGroup>
+    <ProjectReference Include="..\miga_diagnostics\miga_diagnostics.csproj" ReferenceOutputAssembly="false" Private="false">
+      <GlobalPropertiesToRemove Condition="'$(SelfContained)' == 'false'">PublishSingleFile</GlobalPropertiesToRemove>
+    </ProjectReference>
+  </ItemGroup>
+
+  <Target Name="CopyDiagnosticsForLocalRun" AfterTargets="Build" Condition="'$(PublishSingleFile)' != 'true'">
+    <MSBuild Projects="..\miga_diagnostics\miga_diagnostics.csproj" Targets="GetTargetPath" Properties="Configuration=$(Configuration);TargetFramework=$(TargetFramework);RuntimeIdentifier=$(RuntimeIdentifier)">
+      <Output TaskParameter="TargetOutputs" ItemName="DiagnosticsAssembly" />
+    </MSBuild>
+    <ItemGroup>
+      <DiagnosticsFiles Include="@(DiagnosticsAssembly);@(DiagnosticsAssembly->'%(RootDir)%(Directory)%(Filename).exe');@(DiagnosticsAssembly->'%(RootDir)%(Directory)%(Filename).deps.json');@(DiagnosticsAssembly->'%(RootDir)%(Directory)%(Filename).runtimeconfig.json')" />
+    </ItemGroup>
+    <Copy SourceFiles="@(DiagnosticsFiles)" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" />
   </Target>
 </Project>

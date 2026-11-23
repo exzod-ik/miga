@@ -1,0 +1,21 @@
+{
+  "libsodium": {
+    "version": "1.0.22",
+    "source": "https://download.libsodium.org/libsodium/releases/libsodium-1.0.22.tar.gz",
+    "archive": "libsodium-1.0.22.tar.gz",
+    "sha256": "adbdd8f16149e81ac6078a03aca6fc03b592b89ef7b5ed83841c086191be3349"
+  },
+  "noise_c": {
+    "revision": "cfe25410979a87391bb9ac8d4d4bef64e9f268c6",
+    "source": "https://github.com/rweather/noise-c/archive/cfe25410979a87391bb9ac8d4d4bef64e9f268c6.tar.gz",
+    "archive": "noise-c-cfe25410979a87391bb9ac8d4d4bef64e9f268c6.tar.gz",
+    "sha256": "d95cdd666124e9d1175c0c24024d7cabcd71149a9dbfe0de3aca43c562f7ac12"
+  },
+  "sqlite": {
+    "version": "3.54.1",
+    "source": "https://sqlite.org/2026/sqlite-amalgamation-3540100.zip",
+    "archive": "sqlite-amalgamation-3540100.zip",
+    "sha256": "0a9c8e34352dad46006aa82836d5383bff9dc6bc9ce5a60553c05aa30e6ad1f9",
+    "sha3_256": "92281c86e2957f9b9305890f9ac04204caa7b677cc868dc326d942689df28e30"
+  }
+}

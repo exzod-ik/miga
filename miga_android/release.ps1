@@ -1,6 +1,7 @@
 param(
     [switch] $CreateKey,
-    [switch] $RevealPassword
+    [switch] $RevealPassword,
+    [switch] $SkipCoreTests
 )
 
 $ErrorActionPreference = 'Stop'
@@ -69,8 +70,9 @@ try {
     $env:MIGA_RELEASE_STORE_PASSWORD = $password
     $env:MIGA_RELEASE_KEY_ALIAS = $keyAlias
     $env:MIGA_RELEASE_KEY_PASSWORD = $password
-    & (Join-Path $PSScriptRoot 'gradlew.bat') -g (Join-Path $env:USERPROFILE '.gradle') --offline `
-        :core:test :app:testDebugUnitTest :app:lintDebug :app:assembleRelease --console=plain
+    $tasks = @(':app:testDebugUnitTest', ':app:lintRelease', ':app:assembleRelease', ':app:bundleRelease')
+    if (-not $SkipCoreTests) { $tasks = @(':core:test') + $tasks }
+    & (Join-Path $PSScriptRoot 'gradlew.bat') -p $PSScriptRoot -g (Join-Path $env:USERPROFILE '.gradle') --offline @tasks --console=plain
     if ($LASTEXITCODE -ne 0) { throw "Release build failed with exit code $LASTEXITCODE" }
 } finally {
     [Array]::Clear($plainBytes, 0, $plainBytes.Length)

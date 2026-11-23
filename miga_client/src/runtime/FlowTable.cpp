@@ -17,10 +17,12 @@ FlowTable::Decision FlowTable::Lookup(const PacketView& packet, int64_t timestam
     if (found == flows_.end()) return {};
     auto& flow = found->second;
     if (timestamp < flow.first) return {Action::Drop, {}, flow.id, {}, "older_flow_generation"};
-    const auto revision = sockets_.Version(packet.tuple);
-    if (revision != flow.socketVersion) {
-        RefreshSuccessor(flow, packet.tuple, now);
-        flow.socketVersion = revision;
+    if (!flow.ownerIndependent) {
+        const auto revision = sockets_.Version(packet.tuple);
+        if (revision != flow.socketVersion) {
+            RefreshSuccessor(flow, packet.tuple, now);
+            flow.socketVersion = revision;
+        }
     }
     const bool replaced = flow.successor && flow.successor->owner->timestamp <= timestamp &&
         (!flow.owner || flow.successor->owner != flow.owner->owner);
@@ -31,7 +33,7 @@ FlowTable::Decision FlowTable::Lookup(const PacketView& packet, int64_t timestam
         return {Action::Send, flow.route, flow.id, flow.owner, "saved_tcp_route"};
     }
     if (packet.tuple.protocol == 17 && !replaced && now < Due(flow, 17) &&
-        ((flow.owner && flow.owner->Eligible(packet.tuple, timestamp, false, Millis(now))) ||
+        (flow.ownerIndependent || (flow.owner && flow.owner->Eligible(packet.tuple, timestamp, false, Millis(now))) ||
             (!flow.owner && flow.route.kind == FlowRoute::Kind::Direct))) {
         Touch(flow, packet.tuple, timestamp, now, nullptr, false);
         return {Action::Send, flow.route, flow.id, flow.owner, "saved_udp_route"};
@@ -48,8 +50,8 @@ bool FlowTable::Commit(const PacketView& packet, int64_t timestamp, const RouteD
     const auto key = FlowKey::From(packet.tuple);
     auto existing = flows_.find(key);
     if (existing == flows_.end() && flows_.size() >= 65536) return false;
-    const auto revision = sockets_.Version(packet.tuple);
-    if (decision.owner) {
+    const auto revision = decision.ownerIndependent ? 0 : sockets_.Version(packet.tuple);
+    if (!decision.ownerIndependent && decision.owner) {
         if (!decision.owner->Eligible(packet.tuple, timestamp, packet.syn, Millis(now))) return false;
         auto latest = sockets_.Find(packet.tuple, timestamp, packet.syn, now);
         if (!latest || latest->owner != decision.owner->owner) return false;
@@ -57,33 +59,35 @@ bool FlowTable::Commit(const PacketView& packet, int64_t timestamp, const RouteD
     if (existing != flows_.end()) {
         auto& old = existing->second;
         if (timestamp < old.first) return false;
-        if (packet.tuple.protocol == 6 && old.owner && decision.owner &&
+        if (!decision.ownerIndependent && packet.tuple.protocol == 6 && old.owner && decision.owner &&
             old.owner->owner != decision.owner->owner && !packet.syn) return false;
-        if (packet.tuple.protocol == 6 && old.owner && decision.owner &&
+        if (!decision.ownerIndependent && packet.tuple.protocol == 6 && old.owner && decision.owner &&
             old.owner->owner == decision.owner->owner && packet.syn && old.syn &&
             *old.syn != packet.tcp.sequence) return false;
     }
-    if (decision.route.kind == FlowRoute::Kind::Tunnel && decision.route.translatedIp) {
-        auto wire = key; wire.dstIp = decision.route.translatedIp;
-        auto reverse = reverse_.find({wire, decision.route.serverId});
-        if (reverse != reverse_.end() && !(reverse->second == key)) return false;
+    const auto& route = decision.route;
+    auto wire = key;
+    if (route.translatedIp) wire.dstIp = route.translatedIp;
+    auto reverse = reverse_.find({wire, route.serverId});
+    if (reverse != reverse_.end() && !(reverse->second == key)) return false;
+    if (!(wire == key)) {
+        auto native = flows_.find(wire);
+        if (native != flows_.end() && native->second.route.serverId == route.serverId &&
+            !native->second.route.translatedIp) return false;
     }
     if (existing != flows_.end()) RemoveReverse(key, existing->second);
     Flow flow;
     flow.id = ++nextId_;
     flow.first = timestamp;
-    flow.owner = decision.owner;
+    if (!decision.ownerIndependent) flow.owner = decision.owner;
+    flow.ownerIndependent = decision.ownerIndependent;
     flow.route = decision.route;
     flow.lastSeen = now;
     flow.socketVersion = revision;
     if (packet.tuple.protocol == 6 && packet.syn) flow.syn = packet.tcp.sequence;
     Touch(flow, packet.tuple, timestamp, now, packet.tuple.protocol == 6 ? &packet.tcp : nullptr, false);
     flows_.insert_or_assign(key, std::move(flow));
-    const auto& committed = flows_.at(key);
-    if (committed.route.kind == FlowRoute::Kind::Tunnel && committed.route.translatedIp) {
-        auto wire = key; wire.dstIp = committed.route.translatedIp;
-        reverse_[{wire, committed.route.serverId}] = key;
-    }
+    if (route.translatedIp) reverse_.insert_or_assign({wire, route.serverId}, key);
     deadlines_.Set(key, Due(flows_.at(key), packet.tuple.protocol));
     return true;
 }
@@ -93,30 +97,49 @@ FlowTable::Decision FlowTable::Expire(const PacketView& packet, int64_t timestam
     if (decision.action == Action::Send || decision.action == Action::Drop) return decision;
     auto found = flows_.find(FlowKey::From(packet.tuple));
     if (found != flows_.end() && (found->second.route.kind != FlowRoute::Kind::Direct ||
-        (packet.tuple.protocol == 6 && (packet.syn || found->second.successor))))
-        return {Action::Drop, {}, found->second.id, {}, packet.tuple.protocol == 6 ?
-            "tcp_generation_unresolved" : "known_tunnel_owner_unresolved"};
+        found->second.route.translatedIp || (packet.tuple.protocol == 6 && (packet.syn || found->second.successor)))) {
+        const char* reason = "tcp_generation_unresolved";
+        if (packet.tuple.protocol != 6) reason = found->second.route.kind == FlowRoute::Kind::Direct ?
+            "known_translated_owner_unresolved" : "known_tunnel_owner_unresolved";
+        return {Action::Drop, {}, found->second.id, {}, reason};
+    }
     if (found == flows_.end() && !Commit(packet, timestamp, {}, now))
-        return {Action::Drop, {}, 0, {}, "flow_capacity"};
+        return {Action::Drop, {}, 0, {}, flows_.size() >= 65536 ? "flow_capacity" : "flow_wire_collision"};
     return {Action::Send, {}, flows_.at(FlowKey::From(packet.tuple)).id, {}, "owner_deadline_direct"};
 }
 
-void FlowTable::Inbound(const PacketView& packet, int64_t timestamp, size_t server, Clock::time_point now) {
+std::optional<uint32_t> FlowTable::Inbound(const PacketView& packet, int64_t timestamp, size_t server,
+    Clock::time_point now, bool reverse) {
     auto tuple = packet.IncomingTuple();
-    auto found = flows_.find(FlowKey::From(tuple));
-    if (found == flows_.end()) return;
+    auto key = FlowKey::From(tuple);
+    bool translated = false;
+    if (reverse) {
+        const auto mapping = reverse_.find({key, server});
+        if (mapping != reverse_.end()) {
+            key = mapping->second;
+            tuple.remoteIp = key.dstIp;
+            translated = true;
+        }
+    }
+    auto found = flows_.find(key);
+    if (found == flows_.end()) return {};
     auto& flow = found->second;
-    if (timestamp < flow.first || !Usable(flow, tuple.protocol, now)) return;
+    if (timestamp < flow.first || !Usable(flow, tuple.protocol, now)) return {};
     if (flow.route.kind == FlowRoute::Kind::Unavailable ||
-        (flow.route.kind == FlowRoute::Kind::Tunnel ? flow.route.serverId != server : server != 0)) return;
-    const auto revision = sockets_.Version(tuple);
-    if (revision != flow.socketVersion) {
-        RefreshSuccessor(flow, tuple, now);
-        flow.socketVersion = revision;
+        (flow.route.kind == FlowRoute::Kind::Tunnel ? flow.route.serverId != server : server != 0) ||
+        (reverse && !translated && flow.route.translatedIp)) return {};
+    if (!flow.ownerIndependent) {
+        const auto revision = sockets_.Version(tuple);
+        if (revision != flow.socketVersion) {
+            RefreshSuccessor(flow, tuple, now);
+            flow.socketVersion = revision;
+        }
     }
     if (flow.successor && timestamp >= flow.successor->owner->timestamp &&
-        (!flow.owner || flow.successor->owner != flow.owner->owner)) return;
+        (!flow.owner || flow.successor->owner != flow.owner->owner)) return {};
     Touch(flow, tuple, timestamp, now, tuple.protocol == 6 ? &packet.tcp : nullptr, true);
+    if (translated) return key.dstIp;
+    return {};
 }
 
 void FlowTable::Servers(const std::unordered_set<size_t>& live) {
@@ -153,7 +176,7 @@ std::optional<uint32_t> FlowTable::Reverse(const SocketTuple& wire, size_t serve
     if (mapping == reverse_.end()) return {};
     auto found = flows_.find(mapping->second);
     if (found == flows_.end() || found->second.first > timestamp || !Usable(found->second, wire.protocol, now) ||
-        found->second.route.kind != FlowRoute::Kind::Tunnel) return {};
+        found->second.route.kind == FlowRoute::Kind::Unavailable) return {};
     return mapping->second.dstIp;
 }
 

@@ -21,10 +21,6 @@ class MigaViewModel(application: Application) : AndroidViewModel(application) {
     private val mutableMessage = MutableStateFlow("Loading settings")
     val message = mutableMessage.asStateFlow()
     val status = VpnState.status
-    private val sshConfig = ServerConfigSsh(application)
-    private var hostDecision: CompletableDeferred<Boolean>? = null
-    private val mutableHostQuestion = MutableStateFlow<String?>(null)
-    val hostQuestion = mutableHostQuestion.asStateFlow()
     internal val startCoordinator = StartCoordinator()
     internal var queuedRequestId: Long? = null
     internal var preparedSettings: SessionSettings? = null
@@ -36,48 +32,22 @@ class MigaViewModel(application: Application) : AndroidViewModel(application) {
     } }
 
     private fun safeMessage(ex: Exception): String = when (ex) {
-        is com.jcraft.jsch.JSchException -> "SSH connection failed: ${ex.message ?: "unknown error"}"
         is org.json.JSONException -> "Server configuration is invalid"
         is SettingsCorrupt, is SecretUnavailable, is IllegalArgumentException, is IllegalStateException ->
             ex.message ?: "Operation failed"
         else -> "Settings could not be saved or loaded (${ex.javaClass.simpleName})"
     }
 
-    fun saveProfile(id: String?, name: String, address: String, first: String, last: String,
-                    xorBase64: String, swapBase64: String, replaceKeys: Boolean, onSuccess: () -> Unit,
-                    onFailure: (String) -> Unit = {}) {
+    fun importInvitation(id: String?, name: String, value: String, onSuccess: () -> Unit, onFailure: (String) -> Unit) {
         change(onSuccess, onFailure) {
-            val keys = if (replaceKeys || id == null) SecretKeys(
-                SessionValidator.keyBase64(xorBase64, 128), SessionValidator.keyBase64(swapBase64, 8)) else null
-            repository.saveProfile(id, name, address, first, last, keys)
+            val invitation = parseServerQr(value.trim())
+            repository.saveProfile(id, name, invitation.address, invitation.firstPort.toString(),
+                invitation.lastPort.toString(), InvitationSecret(invitation.invitation))
         }
     }
 
-    fun importServer(id: String?, name: String, address: String, username: String, password: String,
-                     onSuccess: () -> Unit, onFailure: (String) -> Unit) {
-        change(onSuccess, onFailure) {
-            require(name.isNotBlank() && name.length <= 80) { "Enter a server name" }
-            // Validate the public address before any SSH connection is attempted.
-            val normalizedAddress = SessionValidator.endpoint(address, "1", "1").first
-            val existing = id?.let { profileId ->
-                repository.load().profiles.firstOrNull { it.id == profileId }
-                    ?: throw IllegalArgumentException("Profile no longer exists")
-            }
-            if (existing != null && normalizedAddress == existing.address)
-                return@change repository.renameProfile(existing.id, name, normalizedAddress)
-            val remote = sshConfig.fetch(address.trim(), username, password) { question ->
-                val decision = CompletableDeferred<Boolean>()
-                hostDecision = decision
-                mutableHostQuestion.value = question
-                try { decision.await() }
-                finally { hostDecision = null; mutableHostQuestion.value = null }
-            }
-            repository.saveProfile(id, name, address, remote.firstPort.toString(),
-                remote.lastPort.toString(), remote.keys)
-        }
-    }
-
-    fun answerHostQuestion(accept: Boolean) { hostDecision?.complete(accept) }
+    fun renameProfile(id: String, name: String, address: String, onSuccess: () -> Unit, onFailure: (String) -> Unit) =
+        change(onSuccess, onFailure) { repository.renameProfile(id, name, address) }
 
     fun deleteProfile(id: String) = change { repository.deleteProfile(id) }
     fun selectProfile(id: String) = change { repository.selectProfile(id) }

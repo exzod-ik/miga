@@ -12,8 +12,17 @@
             <RowDefinition Height="1*"/>
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
-        <TextBlock x:Name="MessageTextBlock" TextWrapping="Wrap" Margin="0,0,0,10"/>
-        <ListBox x:Name="IssuesList" Grid.Row="1" Margin="0,0,0,15">
+        <ScrollViewer MaxHeight="85" VerticalScrollBarVisibility="Auto" Margin="0,0,0,10">
+            <TextBlock x:Name="MessageTextBlock" TextWrapping="Wrap"/>
+        </ScrollViewer>
+        <ListBox x:Name="IssuesList" Grid.Row="1" Margin="0,0,0,15" MaxHeight="Infinity"
+                 ScrollViewer.HorizontalScrollBarVisibility="Disabled" ScrollViewer.VerticalScrollBarVisibility="Auto"
+                 VirtualizingPanel.ScrollUnit="Pixel">
+            <ListBox.ItemContainerStyle>
+                <Style TargetType="ListBoxItem" BasedOn="{StaticResource {x:Type ListBoxItem}}">
+                    <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+                </Style>
+            </ListBox.ItemContainerStyle>
             <ListBox.ItemTemplate>
                 <DataTemplate>
                     <TextBlock Text="{Binding}" TextWrapping="Wrap"/>
@@ -21,8 +30,8 @@
             </ListBox.ItemTemplate>
         </ListBox>
         <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right">
-            <Button x:Name="ApplyButton" Content="Все равно применить" Width="140" Margin="0,0,10,0" IsDefault="True" Click="ApplyButton_Click"/>
-            <Button x:Name="CancelButton" Content="Отмена" Width="75" IsCancel="True" Click="CancelButton_Click"/>
+            <Button x:Name="ApplyButton" Content="Все равно применить" Padding="10,5" MinWidth="140" Margin="0,0,10,0" IsDefault="True" Click="ApplyButton_Click"/>
+            <Button x:Name="CancelButton" Content="Отмена" Padding="10,5" MinWidth="75" IsCancel="True" Click="CancelButton_Click"/>
         </StackPanel>
     </Grid>
 </Window>

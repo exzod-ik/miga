@@ -34,6 +34,9 @@
   <ItemGroup>
     <ClInclude Include="include\NetworkRuntime.h" />
     <ClInclude Include="include\runtime\DnsClassifier.h" />
+    <ClInclude Include="include\runtime\SyntheticDnsStore.h" />
+    <ClInclude Include="include\runtime\SyntheticDnsResolver.h" />
+    <ClInclude Include="include\runtime\SyntheticDnsWire.h" />
     <ClInclude Include="include\runtime\FlowTable.h" />
     <ClInclude Include="include\runtime\RuntimeConfig.h" />
     <ClInclude Include="include\runtime\RuntimeMailbox.h" />
@@ -89,6 +92,9 @@
     <ClCompile Include="src\TunnelRouteCache.cpp" />
     <ClCompile Include="src\WindowsProcessIdentity.cpp" />
     <ClCompile Include="src\runtime\DnsClassifier.cpp" />
+    <ClCompile Include="src\runtime\SyntheticDnsStore.cpp" />
+    <ClCompile Include="src\runtime\SyntheticDnsResolver.cpp" />
+    <ClCompile Include="src\runtime\SyntheticDnsWire.cpp" />
     <ClCompile Include="src\runtime\FlowTable.cpp" />
     <ClCompile Include="src\runtime\RuntimeConfig.cpp" />
     <ClCompile Include="src\runtime\RuntimeTypes.cpp" />

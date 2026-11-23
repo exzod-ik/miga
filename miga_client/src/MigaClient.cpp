@@ -51,6 +51,10 @@ void CMigaClient::RunService() {
         return;
     }
 
+    if (!ServiceManager::FlushDnsCache()) {
+        const auto error = GetLastError();
+        m_Logger.log(LOGGER_LEVEL_WARNING, "dns_cache_flush_failed error=" + std::to_string(error));
+    }
     m_Logger.log(LOGGER_LEVEL_INFO, "client_running mode=service stop_action=signal");
 
     while (!m_StopRequested && m_NetworkRuntime.IsRunning()) {
@@ -80,10 +84,15 @@ void CMigaClient::RequestReloadConfig() {
 
 void CMigaClient::ReloadConfig() {
     m_Logger.log(LOGGER_LEVEL_INFO, "config_reloading");
-    if (m_NetworkRuntime.ReloadConfig(CONFIG_FILE_NAME))
-        m_Logger.log(LOGGER_LEVEL_INFO, "config_reloaded");
-    else
+    if (!m_NetworkRuntime.ReloadConfig(CONFIG_FILE_NAME)) {
         m_Logger.log(LOGGER_LEVEL_ERROR, "config_reload_failed");
+        return;
+    }
+    if (!ServiceManager::FlushDnsCache()) {
+        const auto error = GetLastError();
+        m_Logger.log(LOGGER_LEVEL_WARNING, "dns_cache_flush_failed error=" + std::to_string(error));
+    }
+    m_Logger.log(LOGGER_LEVEL_INFO, "config_reloaded");
 }
 extern CMigaClient* g_Client;
 

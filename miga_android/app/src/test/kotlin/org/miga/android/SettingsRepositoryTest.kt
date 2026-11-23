@@ -16,7 +16,7 @@ class SettingsRepositoryTest {
     @Test fun nativeAvailabilitySelectsCombinedCaptureRegardlessOfSavedMode() = runBlocking {
         val store = MemorySettings()
         val repository = SettingsRepository(store, MemorySecrets()) { false }
-        val profile = repository.saveProfile(null, "One", "8.8.8.8", "1000", "1000", keys).profiles.single()
+        val profile = repository.saveProfile(null, "One", "8.8.8.8", "12000", "12000", InvitationSecret(testInvitation("8.8.8.8", 12000, 12000))).profiles.single()
         repository.assignPackage("org.example.app", profile.id)
         repository.saveIpv4Rule(null, profile.id, "9.9.9.0/24")
         repository.saveDomainRule(null, profile.id, "example.org")
@@ -39,7 +39,7 @@ class SettingsRepositoryTest {
     @Test fun publicModeDoesNotRequireAssignedAppsButAssignedModeDoes() = runBlocking {
         val store = MemorySettings()
         val repository = SettingsRepository(store, MemorySecrets()) { false }
-        val profile = repository.saveProfile(null, "One", "8.8.8.8", "1000", "1000", keys).profiles.single()
+        val profile = repository.saveProfile(null, "One", "8.8.8.8", "12000", "12000", InvitationSecret(testInvitation("8.8.8.8", 12000, 12000))).profiles.single()
         repository.saveIpv4Rule(null, profile.id, "9.9.9.0/24")
         assertEquals(CaptureMode.PUBLIC_IPV4_RULES, repository.snapshot(emptySet(), true).captureMode)
         assertThrows(IllegalArgumentException::class.java) {
@@ -51,7 +51,7 @@ class SettingsRepositoryTest {
     @Test fun appOnlyRoutingExcludesUnassignedPackagesEvenWithNativeAndLegacyPublicMode() = runBlocking {
         val store = MemorySettings()
         val repository = SettingsRepository(store, MemorySecrets()) { false }
-        val profile = repository.saveProfile(null, "One", "8.8.8.8", "1000", "1000", keys).profiles.single()
+        val profile = repository.saveProfile(null, "One", "8.8.8.8", "12000", "12000", InvitationSecret(testInvitation("8.8.8.8", 12000, 12000))).profiles.single()
         repository.assignPackage("org.example.app", profile.id)
         store.value = SettingsCodec.encode(repository.load().copy(captureMode = CaptureMode.PUBLIC_IPV4_RULES))
         val session = repository.snapshot(setOf("org.example.app", "com.carshering"), true)
@@ -62,44 +62,9 @@ class SettingsRepositoryTest {
         assertTrue(session.domainRules.isEmpty())
     }
 
-    @Test fun legacySelectionMigratesToStableProfileAndPreservesSecretRef() = runBlocking {
-        val settings = MemorySettings()
-        val secrets = MemorySecrets()
-        val repository = SettingsRepository(settings, secrets) { false }
-        val profile = repository.saveProfile(null, "Old", "8.8.8.8", "6000", "6000", keys).profiles.single()
-        val raw = ByteArrayOutputStream()
-        DataOutputStream(raw).use { out ->
-            out.writeInt(1); out.writeInt(1)
-            out.writeUTF(profile.id); out.writeUTF(profile.name); out.writeUTF(profile.address)
-            out.writeInt(profile.firstPort); out.writeInt(profile.lastPort); out.writeUTF(profile.secretRef)
-            out.writeBoolean(true); out.writeUTF(profile.id)
-            out.writeInt(1); out.writeUTF("org.example.app")
-        }
-        settings.value = Base64.getEncoder().encodeToString(raw.toByteArray())
-        val migrated = repository.load()
-        assertEquals(4, migrated.schemaVersion)
-        assertEquals(profile.id, migrated.assignments["org.example.app"])
-        assertEquals(profile.id, migrated.dnsProfileId)
-        assertEquals(profile.secretRef, migrated.profiles.single().secretRef)
-        assertEquals(CaptureMode.ASSIGNED_APPS, migrated.captureMode)
-        assertTrue(migrated.ipv4Rules.isEmpty())
-        assertEquals(setOf(profile.id), repository.snapshot(setOf("org.example.app"), false).profiles.keys)
-        assertThrows(IllegalArgumentException::class.java) { runBlocking { repository.deleteProfile(profile.id) } }
-        assertEquals(profile.secretRef, repository.load().profiles.single().secretRef)
-    }
 
-    @Test fun sessionSnapshotDoesNotExposeMutableKeysOrAssignments() {
-        val xor = ByteArray(128) { 7 }
-        val swap = ByteArray(8) { 3 }
-        val assignments = mutableMapOf("org.example.app" to "one")
-        val session = SessionSettings(mapOf("one" to ServerSession("8.8.8.8", 0x08080808,
-            6000, 6000, xor, swap)), assignments, "one")
-        xor[0] = 0; swap[0] = 0; assignments.clear()
-        session.profiles.getValue("one").xorKey[0] = 0
-        assertEquals(7, session.profiles.getValue("one").xorKey[0].toInt())
-        assertEquals(3, session.profiles.getValue("one").swapKey[0].toInt())
-        assertEquals("one", session.assignments["org.example.app"])
-    }
+
+
     private class MemorySettings : SettingsStore {
         var value: String? = null
         var failWrite = false
@@ -116,45 +81,24 @@ class SettingsRepositoryTest {
         }
     }
     private class MemorySecrets : SecretStore {
-        val values = mutableMapOf<String, SecretKeys>()
+        val values = mutableMapOf<String, InvitationSecret>()
         var afterPut: (suspend () -> Unit)? = null
-        override suspend fun put(ref: String, keys: SecretKeys) {
+        override suspend fun put(ref: String, keys: InvitationSecret) {
             values[ref] = keys
             afterPut?.invoke()
         }
-        override suspend fun get(ref: String): SecretKeys = values[ref] ?: throw SecretUnavailable()
+        override suspend fun get(ref: String): InvitationSecret = values[ref] ?: throw SecretUnavailable()
         override suspend fun delete(ref: String) { values.remove(ref) }
     }
-    private val keys = SecretKeys(ByteArray(128) { it.toByte() }, ByteArray(8) { it.toByte() })
+    private val keys = InvitationSecret(testInvitation())
 
-    @Test fun versionTwoMigrationPreservesScopeDnsAndSecretReference() = runBlocking {
-        val settings = MemorySettings()
-        val repository = SettingsRepository(settings, MemorySecrets()) { false }
-        val profile = repository.saveProfile(null, "One", "8.8.8.8", "1000", "1000", keys).profiles.single()
-        val raw = ByteArrayOutputStream()
-        DataOutputStream(raw).use { out ->
-            out.writeInt(2); out.writeInt(1)
-            out.writeUTF(profile.id); out.writeUTF(profile.name); out.writeUTF(profile.address)
-            out.writeInt(profile.firstPort); out.writeInt(profile.lastPort); out.writeUTF(profile.secretRef)
-            out.writeBoolean(true); out.writeUTF(profile.id)
-            out.writeInt(1); out.writeUTF("org.example.app"); out.writeUTF(profile.id)
-            out.writeBoolean(true); out.writeUTF(profile.id)
-        }
-        settings.value = Base64.getEncoder().encodeToString(raw.toByteArray())
-        val restored = repository.load()
-        assertEquals(4, restored.schemaVersion)
-        assertEquals(CaptureMode.ASSIGNED_APPS, restored.captureMode)
-        assertEquals(profile.secretRef, restored.profiles.single().secretRef)
-        assertEquals(profile.id, restored.dnsProfileId)
-        assertEquals(profile.id, restored.assignments["org.example.app"])
-        assertEquals(restored, SettingsCodec.decode(SettingsCodec.encode(restored)))
-    }
+
 
     @Test fun domainOnlyProfilePersistsAndCannotBeDeleted() = runBlocking {
         val settings = MemorySettings()
         val repository = SettingsRepository(settings, MemorySecrets()) { false }
-        val profile = repository.saveProfile(null, "One", "8.8.8.8", "1000", "1000", keys).profiles.single()
-        val rule = repository.saveDomainRule(null, profile.id, "*.BÜCHER.Example.").domainRules.single()
+        val profile = repository.saveProfile(null, "One", "8.8.8.8", "12000", "12000", InvitationSecret(testInvitation("8.8.8.8", 12000, 12000))).profiles.single()
+        val rule = repository.saveDomainRule(null, profile.id, "*.B\u00dcCHER.Example.").domainRules.single()
         assertEquals("*.xn--bcher-kva.example", rule.pattern)
         assertEquals(profile.id, repository.load().dnsProfileId)
         assertThrows(IllegalArgumentException::class.java) { runBlocking { repository.deleteProfile(profile.id) } }
@@ -163,37 +107,13 @@ class SettingsRepositoryTest {
         assertEquals(1, repository.snapshot(emptySet(), true).domainRules.size)
     }
 
-    @Test fun versionThreeMigrationKeepsPublicCaptureAndIpv4Rule() = runBlocking {
-        val store = MemorySettings(); val secrets = MemorySecrets()
-        val repository = SettingsRepository(store, secrets) { false }
-        val profile = repository.saveProfile(null, "One", "8.8.8.8", "1000", "1000", keys).profiles.single()
-        val id = java.util.UUID.randomUUID().toString()
-        val raw = ByteArrayOutputStream()
-        DataOutputStream(raw).use { out ->
-            out.writeInt(3); out.writeInt(1)
-            out.writeUTF(profile.id); out.writeUTF(profile.name); out.writeUTF(profile.address)
-            out.writeInt(profile.firstPort); out.writeInt(profile.lastPort); out.writeUTF(profile.secretRef)
-            out.writeBoolean(true); out.writeUTF(profile.id)
-            out.writeInt(0)
-            out.writeBoolean(true); out.writeUTF(profile.id)
-            out.writeUTF(CaptureMode.PUBLIC_IPV4_RULES.name)
-            out.writeInt(1); out.writeUTF(id); out.writeUTF(profile.id); out.writeUTF("8.8.9.0/24")
-        }
-        store.value = Base64.getEncoder().encodeToString(raw.toByteArray())
-        val migrated = repository.load()
-        assertEquals(4, migrated.schemaVersion)
-        assertEquals(CaptureMode.PUBLIC_IPV4_RULES, migrated.captureMode)
-        assertEquals(profile.secretRef, migrated.profiles.single().secretRef)
-        assertEquals(id, migrated.ipv4Rules.single().id)
-        assertEquals(profile.id, migrated.dnsProfileId)
-        assertTrue(migrated.domainRules.isEmpty())
-    }
+
 
     @Test fun ipOnlyProfileRulesPersistAndCannotBeDeleted() = runBlocking {
         val settings = MemorySettings()
         val repository = SettingsRepository(settings, MemorySecrets()) { false }
-        val first = repository.saveProfile(null, "One", "8.8.8.8", "1000", "1000", keys).profiles.single()
-        val second = repository.saveProfile(null, "Two", "9.9.9.9", "2000", "2000", keys).profiles.last()
+        val first = repository.saveProfile(null, "One", "8.8.8.8", "12000", "12000", InvitationSecret(testInvitation("8.8.8.8", 12000, 12000))).profiles.single()
+        val second = repository.saveProfile(null, "Two", "9.9.9.9", "2000", "2000", InvitationSecret(testInvitation("9.9.9.9", 2000, 2000))).profiles.last()
         val rule = repository.saveIpv4Rule(null, second.id, "8.8.9.5/23").ipv4Rules.single()
         assertEquals("8.8.8.0/23", rule.expression)
         assertEquals(rule, repository.load().ipv4Rules.single())
@@ -219,22 +139,22 @@ class SettingsRepositoryTest {
         val settings = MemorySettings()
         val secrets = MemorySecrets()
         val repository = SettingsRepository(settings, secrets) { false }
-        val first = repository.saveProfile(null, "One", "8.8.8.8", "1000", "1001", keys).profiles.single()
-        val second = repository.saveProfile(null, "Two", "1.1.1.1", "2000", "2001", keys).profiles.last()
+        val first = repository.saveProfile(null, "One", "8.8.8.8", "12000", "12001", InvitationSecret(testInvitation("8.8.8.8", 12000, 12001))).profiles.single()
+        val second = repository.saveProfile(null, "Two", "1.1.1.1", "2000", "2001", InvitationSecret(testInvitation("1.1.1.1", 2000, 2001))).profiles.last()
         assertEquals(first.id, repository.load().activeProfileId)
-        assertEquals(first.id, repository.saveProfile(first.id, "Renamed", "8.8.4.4", "1000", "1002", null).profiles.first().id)
+        assertEquals(first.id, repository.saveProfile(first.id, "Renamed", "8.8.4.4", "12000", "12002", InvitationSecret(testInvitation("8.8.4.4", 12000, 12002))).profiles.first().id)
         assertEquals(second.id, repository.selectProfile(second.id).activeProfileId)
         assertEquals(first.id, repository.deleteProfile(second.id).activeProfileId)
         assertEquals("Renamed", repository.load().profiles.single().name)
         assertEquals(1, secrets.values.size)
         assertFalse(settings.value!!.contains("Renamed")) // document is encoded, and never contains keys
-        assertFalse(settings.value!!.contains(Base64.getEncoder().encodeToString(keys.xor)))
+        assertFalse(settings.value!!.contains(keys.invitation))
     }
 
     @Test fun renameKeepsEndpointAndSecretWithoutSshSettings() = runBlocking {
         val secrets = MemorySecrets()
         val repository = SettingsRepository(MemorySettings(), secrets) { false }
-        val original = repository.saveProfile(null, "One", "8.8.8.8", "2000", "2001", keys).profiles.single()
+        val original = repository.saveProfile(null, "One", "8.8.8.8", "2000", "2001", InvitationSecret(testInvitation("8.8.8.8", 2000, 2001))).profiles.single()
         val renamed = repository.renameProfile(original.id, "New name", "008.008.008.008").profiles.single()
         assertEquals(original.copy(name = "New name"), renamed)
         assertEquals(setOf(original.secretRef), secrets.values.keys)
@@ -248,11 +168,11 @@ class SettingsRepositoryTest {
         val settings = MemorySettings()
         val secrets = MemorySecrets()
         val repository = SettingsRepository(settings, secrets) { false }
-        val old = repository.saveProfile(null, "One", "8.8.8.8", "1000", "1000", keys)
+        val old = repository.saveProfile(null, "One", "8.8.8.8", "12000", "12000", InvitationSecret(testInvitation("8.8.8.8", 12000, 12000)))
         val before = settings.value
         settings.failWrite = true
         assertThrows(IllegalStateException::class.java) {
-            runBlocking { repository.saveProfile(old.profiles.single().id, "Changed", "8.8.4.4", "1000", "1000", keys) }
+            runBlocking { repository.saveProfile(old.profiles.single().id, "Changed", "8.8.4.4", "12000", "12000", InvitationSecret(testInvitation("8.8.4.4", 12000, 12000))) }
         }
         assertEquals(before, settings.value)
         assertTrue(old.profiles.single().secretRef in secrets.values)
@@ -271,20 +191,17 @@ class SettingsRepositoryTest {
     }
 
     @Test fun keysAndSelectionMustBeValid() = runBlocking {
-        assertThrows(IllegalArgumentException::class.java) { SessionValidator.keyBase64("not*base64", 128) }
-        assertThrows(IllegalArgumentException::class.java) { SessionValidator.keyBase64(Base64.getEncoder().encodeToString(ByteArray(127)), 128) }
-        assertThrows(IllegalArgumentException::class.java) { SessionValidator.keyBase64(Base64.getEncoder().encodeToString(ByteArray(7)), 8) }
         val settings = MemorySettings()
         val secrets = MemorySecrets()
         val repository = SettingsRepository(settings, secrets) { false }
-        val saved = repository.saveProfile(null, "One", "8.8.8.8", "1000", "1000", keys)
+        val saved = repository.saveProfile(null, "One", "8.8.8.8", "12000", "12000", InvitationSecret(testInvitation("8.8.8.8", 12000, 12000)))
         assertThrows(IllegalArgumentException::class.java) { runBlocking { repository.snapshot(setOf("org.example.app"), false) } }
         repository.togglePackage("org.example.app")
         assertThrows(IllegalArgumentException::class.java) { runBlocking { repository.snapshot(emptySet(), false) } }
         val snapshot = repository.snapshot(setOf("org.example.app"), false)
         assertEquals("8.8.8.8", snapshot.serverAddress)
         assertEquals(setOf("org.example.app"), snapshot.packages)
-        assertArrayEquals(keys.xor, snapshot.xorKey)
+        assertEquals(keys.invitation, snapshot.profiles.values.first().invitation)
         secrets.values.clear() // Testable boundary: lost key, not an Android Keystore test.
         assertThrows(SecretUnavailable::class.java) { runBlocking { repository.snapshot(setOf("org.example.app"), false) } }
         assertEquals(saved.profiles.single().id, repository.load().activeProfileId)
@@ -295,9 +212,9 @@ class SettingsRepositoryTest {
         val secrets = MemorySecrets()
         var active = false
         val repository = SettingsRepository(settings, secrets) { active }
-        val profile = repository.saveProfile(null, "One", "8.8.8.8", "1000", "1000", keys).profiles.single()
+        val profile = repository.saveProfile(null, "One", "8.8.8.8", "12000", "12000", InvitationSecret(testInvitation("8.8.8.8", 12000, 12000))).profiles.single()
         active = true
-        assertThrows(IllegalStateException::class.java) { runBlocking { repository.saveProfile(profile.id, "Edit", "8.8.8.8", "1000", "1000", null) } }
+        assertThrows(IllegalStateException::class.java) { runBlocking { repository.saveProfile(profile.id, "Edit", "8.8.8.8", "12000", "12000", null) } }
         assertThrows(IllegalStateException::class.java) { runBlocking { repository.deleteProfile(profile.id) } }
         assertThrows(IllegalStateException::class.java) { runBlocking { repository.selectProfile(profile.id) } }
         assertThrows(IllegalStateException::class.java) { runBlocking { repository.togglePackage("org.example.app") } }
@@ -311,7 +228,7 @@ class SettingsRepositoryTest {
         val reading = CompletableDeferred<Unit>()
         val continueRead = CompletableDeferred<Unit>()
         settings.beforeRead = { reading.complete(Unit); continueRead.await() }
-        val operation = async { repository.saveProfile(null, "New", "8.8.8.8", "1000", "1000", keys) }
+        val operation = async { repository.saveProfile(null, "New", "8.8.8.8", "12000", "12000", InvitationSecret(testInvitation("8.8.8.8", 12000, 12000))) }
         withTimeout(3000) { reading.await() }
         operation.cancel()
         continueRead.complete(Unit)
@@ -328,7 +245,7 @@ class SettingsRepositoryTest {
         val committed = CompletableDeferred<Unit>()
         val acknowledge = CompletableDeferred<Unit>()
         settings.afterCommit = { committed.complete(Unit); acknowledge.await() }
-        val operation = async { repository.saveProfile(null, "New", "8.8.8.8", "1000", "1000", keys) }
+        val operation = async { repository.saveProfile(null, "New", "8.8.8.8", "12000", "12000", InvitationSecret(testInvitation("8.8.8.8", 12000, 12000))) }
         withTimeout(3000) { committed.await() }
         operation.cancel()
         acknowledge.complete(Unit)
@@ -343,11 +260,11 @@ class SettingsRepositoryTest {
         val settings = MemorySettings()
         val secrets = MemorySecrets()
         val repository = SettingsRepository(settings, secrets) { false }
-        val previous = repository.saveProfile(null, "Old", "8.8.8.8", "1000", "1000", keys).profiles.single()
+        val previous = repository.saveProfile(null, "Old", "8.8.8.8", "12000", "12000", InvitationSecret(testInvitation("8.8.8.8", 12000, 12000))).profiles.single()
         val putDone = CompletableDeferred<Unit>()
         val continuePut = CompletableDeferred<Unit>()
         secrets.afterPut = { putDone.complete(Unit); continuePut.await() }
-        val operation = async { repository.saveProfile(previous.id, "New", "8.8.4.4", "1000", "1000", keys) }
+        val operation = async { repository.saveProfile(previous.id, "New", "8.8.4.4", "12000", "12000", InvitationSecret(testInvitation("8.8.4.4", 12000, 12000))) }
         withTimeout(3000) { putDone.await() }
         assertEquals(previous.secretRef, SettingsCodec.decode(settings.value).profiles.single().secretRef)
         assertTrue(previous.secretRef in secrets.values)
@@ -363,7 +280,7 @@ class SettingsRepositoryTest {
         val settings = MemorySettings()
         val secrets = MemorySecrets()
         val repository = SettingsRepository(settings, secrets) { false }
-        val profile = repository.saveProfile(null, "Old", "8.8.8.8", "1000", "1000", keys).profiles.single()
+        val profile = repository.saveProfile(null, "Old", "8.8.8.8", "12000", "12000", InvitationSecret(testInvitation("8.8.8.8", 12000, 12000))).profiles.single()
         val committed = CompletableDeferred<Unit>()
         val acknowledge = CompletableDeferred<Unit>()
         settings.afterCommit = { committed.complete(Unit); acknowledge.await() }
@@ -380,7 +297,7 @@ class SettingsRepositoryTest {
         val settings = MemorySettings()
         val secrets = MemorySecrets()
         val repository = SettingsRepository(settings, secrets) { false }
-        val profile = repository.saveProfile(null, "Old", "8.8.8.8", "1000", "1000", keys).profiles.single()
+        val profile = repository.saveProfile(null, "Old", "8.8.8.8", "12000", "12000", InvitationSecret(testInvitation("8.8.8.8", 12000, 12000))).profiles.single()
         settings.failWrite = true
         assertThrows(IllegalStateException::class.java) { runBlocking { repository.deleteProfile(profile.id) } }
         assertEquals(profile.id, repository.load().profiles.single().id)
@@ -391,8 +308,8 @@ class SettingsRepositoryTest {
         val caller = Thread.currentThread()
         val seen = mutableListOf<Thread>()
         val blocking = object : BlockingSecretStore {
-            override fun put(ref: String, keys: SecretKeys) { seen.add(Thread.currentThread()) }
-            override fun get(ref: String): SecretKeys { seen.add(Thread.currentThread()); return keys }
+            override fun put(ref: String, keys: InvitationSecret) { seen.add(Thread.currentThread()) }
+            override fun get(ref: String): InvitationSecret { seen.add(Thread.currentThread()); return keys }
             override fun delete(ref: String) { seen.add(Thread.currentThread()) }
         }
         Executors.newSingleThreadExecutor().asCoroutineDispatcher().use { dispatcher ->

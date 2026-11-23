@@ -12,11 +12,13 @@
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
-        <TextBlock x:Name="MessageTextBlock" TextWrapping="Wrap" Margin="0,0,0,20"/>
+        <ScrollViewer MaxHeight="220" VerticalScrollBarVisibility="Auto" Margin="0,0,0,20">
+            <TextBlock x:Name="MessageTextBlock" TextWrapping="Wrap"/>
+        </ScrollViewer>
         <StackPanel Grid.Row="1" Orientation="Horizontal" HorizontalAlignment="Right">
-            <Button x:Name="SaveButton" Content="Сохранить" Width="110" Margin="0,0,10,0" IsDefault="True" Click="SaveButton_Click"/>
-            <Button x:Name="DiscardButton" Content="Не сохранять" Width="110" Margin="0,0,10,0" Click="DiscardButton_Click"/>
-            <Button x:Name="CancelButton" Content="Отмена" Width="75" IsCancel="True" Click="CancelButton_Click"/>
+            <Button x:Name="SaveButton" Content="Сохранить" Padding="10,5" MinWidth="110" Margin="0,0,10,0" IsDefault="True" Click="SaveButton_Click"/>
+            <Button x:Name="DiscardButton" Content="Не сохранять" Padding="10,5" MinWidth="110" Margin="0,0,10,0" Click="DiscardButton_Click"/>
+            <Button x:Name="CancelButton" Content="Отмена" Padding="10,5" MinWidth="75" IsCancel="True" Click="CancelButton_Click"/>
         </StackPanel>
     </Grid>
 </Window>

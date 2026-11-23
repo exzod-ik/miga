@@ -49,22 +49,6 @@ class Ipv4PacketTest {
         assertNull(Ipv4Packet.parse(unknown))
     }
 
-    @Test fun serverReplyChecksumRepairKeepsStructuralValidation() {
-        for (protocol in listOf(6, 17)) {
-            val reply = packet(protocol, ihl = 24, payload = 3)
-            reply[12] = 9 // source address and destination port were rewritten by the server
-            Ipv4Packet.put16(reply, 26, 4321)
-            assertNull(Ipv4Packet.parse(reply))
-            val repaired = assertNotNull(ServerReplyPacket.parse(reply))
-            assertEquals(4321, repaired.destinationPort)
-            assertNotNull(Ipv4Packet.parse(repaired.bytes))
-
-            val fragment = reply.copyOf(); fragment[6] = 0x20
-            assertNull(ServerReplyPacket.parse(fragment))
-            assertNull(ServerReplyPacket.parse(reply.copyOf(reply.size - 1)))
-        }
-    }
-
     @Test fun synMssClampRecomputesChecksum() {
         val data = packet(6, 24).copyOf(48)
         Ipv4Packet.put16(data, 2, data.size)

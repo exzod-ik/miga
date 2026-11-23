@@ -13,6 +13,8 @@
   <Project Path="miga_client/miga_client.vcxproj" Id="f112fd91-618c-4eed-8469-02e559413aca">
     <Platform Solution="*|ARM64" Project="x64" />
   </Project>
+  <Project Path="MIGA Admin/MIGA Admin.csproj" />
+  <Project Path="miga_diagnostics/miga_diagnostics.csproj" />
   <Project Path="miga_server/miga_server.vcxproj" Id="e5f82f2d-0300-4a8c-b420-6e1c8135439a">
     <Platform Solution="*|x86" Project="x86" />
     <Deploy />

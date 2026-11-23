@@ -1,163 +1,98 @@
 #!/bin/bash
+set -euo pipefail
 
-# Проверка прав root
-if [ "$EUID" -ne 0 ]; then
-    echo "Пожалуйста, запустите скрипт с правами root (sudo)."
-    exit 1
-fi
-
-# Функция установки iptables без подтверждения
-install_iptables() {
-    if command -v iptables &> /dev/null; then
-        echo "iptables уже установлен."
-        return 0
+configure_rx_ring() {
+    install -d -m 0755 /usr/local/libexec || return 1
+    local helper
+    helper=$(mktemp /usr/local/libexec/miga-rx-ring.XXXXXX) || return 1
+    if ! cat > "$helper" <<'RX_SCRIPT'
+#!/bin/bash
+set -u
+export LC_ALL=C
+status=0
+for device in /sys/class/net/*; do
+    driver=$(readlink -f "$device/device/driver") || continue
+    [ "${driver##*/}" = vmxnet3 ] || continue
+    iface=${device##*/}
+    if ! settings=$(ethtool -g "$iface" 2>&1); then
+        printf 'rx_ring_query_failed interface=%s detail=%s\n' "$iface" "$settings" >&2
+        status=1
+        continue
     fi
-
-    echo "Определение менеджера пакетов..."
-    if command -v apt-get &> /dev/null; then
-        echo "Установка iptables через apt-get..."
-        apt-get update -qq
-        apt-get install -y iptables
-    elif command -v yum &> /dev/null; then
-        echo "Установка iptables через yum..."
-        yum install -y iptables
-    elif command -v dnf &> /dev/null; then
-        echo "Установка iptables через dnf..."
-        dnf install -y iptables
-    elif command -v zypper &> /dev/null; then
-        echo "Установка iptables через zypper..."
-        zypper install -y iptables
-    elif command -v pacman &> /dev/null; then
-        echo "Установка iptables через pacman..."
-        pacman -S --noconfirm iptables
-    else
-        echo "Не удалось определить менеджер пакетов. Установите iptables вручную."
-        exit 1
+    maximum=$(printf '%s\n' "$settings" | awk '/Pre-set maximums:/{section=1;next} /Current hardware settings:/{section=2;next} section==1 && $1=="RX:" {print $2;exit}')
+    current=$(printf '%s\n' "$settings" | awk '/Current hardware settings:/{section=1;next} section==1 && $1=="RX:" {print $2;exit}')
+    if [[ ! "$maximum" =~ ^[0-9]+$ || ! "$current" =~ ^[0-9]+$ ]]; then
+        printf 'rx_ring_invalid_settings interface=%s\n' "$iface" >&2
+        status=1
+        continue
     fi
-
-    if [ $? -eq 0 ]; then
-        echo "iptables успешно установлен."
-    else
-        echo "Ошибка установки iptables."
-        exit 1
+    if [ "$maximum" -lt 4096 ]; then
+        printf 'rx_ring_unsupported interface=%s maximum=%s target=4096\n' "$iface" "$maximum" >&2
+        status=1
+        continue
     fi
-}
-
-# Функция настройки маскарада для всех реальных интерфейсов (кроме lo и tun)
-configure_masquerade() {
-    echo "Настройка маскарада для не-loopback и не-tun интерфейсов..."
-
-    # Получаем список интерфейсов из /sys/class/net/, исключая lo и tun*
-    for iface in $(ls /sys/class/net/ | grep -v -E '^lo$|^tun'); do
-        # Дополнительная проверка, что интерфейс существует и поднят (опционально)
-        if [ -d "/sys/class/net/$iface" ]; then
-            echo "Добавляем правило MASQUERADE для интерфейса $iface"
-            iptables -t nat -A POSTROUTING -o "$iface" -j MASQUERADE
-            if [ $? -eq 0 ]; then
-                echo "Правило для $iface добавлено."
-            else
-                echo "Ошибка добавления правила для $iface."
-            fi
-        fi
-    done
-
-    # Сохраняем правила (если есть служба сохранения iptables)
-    if command -v iptables-save &> /dev/null; then
-        if command -v netfilter-persistent &> /dev/null; then
-            netfilter-persistent save
-        elif command -v service iptables save &> /dev/null; then
-            service iptables save
-        else
-            echo "Не удалось автоматически сохранить правила iptables. Сохраните их вручную."
+    if [ "$current" -ne 4096 ]; then
+        if ! ethtool -G "$iface" rx 4096; then
+            printf 'rx_ring_set_failed interface=%s\n' "$iface" >&2
+            status=1
+            continue
         fi
     fi
-}
-
-# Функция регистрации демона (systemd)
-register_systemd_service() {
-    local SERVICE_FILE="/etc/systemd/system/miga_server.service"
-    local EXEC_PATH="/usr/local/miga_server"
-
-    if [ ! -x "$EXEC_PATH" ]; then
-        echo "Ошибка: $EXEC_PATH не найден или не исполняемый."
+    if ! settings=$(ethtool -g "$iface" 2>&1); then
+        printf 'rx_ring_verify_failed interface=%s\n' "$iface" >&2
+        status=1
+        continue
+    fi
+    actual=$(printf '%s\n' "$settings" | awk '/Current hardware settings:/{section=1;next} section==1 && $1=="RX:" {print $2;exit}')
+    if [ "$actual" != 4096 ]; then
+        printf 'rx_ring_verify_failed interface=%s actual=%s\n' "$iface" "$actual" >&2
+        status=1
+        continue
+    fi
+    printf 'rx_ring_ready interface=%s rx=4096\n' "$iface"
+done
+exit "$status"
+RX_SCRIPT
+    then
+        rm -f -- "$helper"
         return 1
     fi
-
-    echo "Создание systemd-сервиса для miga_server..."
-
-    cat > "$SERVICE_FILE" <<EOF
+    chmod 0755 "$helper" && mv -f -- "$helper" /usr/local/libexec/miga-rx-ring || { rm -f -- "$helper"; return 1; }
+    local unit
+    unit=$(mktemp /etc/systemd/system/miga-rx-ring.service.XXXXXX) || return 1
+    if ! cat > "$unit" <<'RX_UNIT'
 [Unit]
-Description=Miga Server
-After=network.target
+Description=MIGA VMXNET3 receive ring configuration
+Wants=network-online.target
+After=network-online.target
+Before=miga_server.service
 
 [Service]
-Type=simple
-ExecStart=$EXEC_PATH
-Restart=on-failure
-RestartSec=10
-User=root
-Group=root
+Type=oneshot
+ExecStart=/usr/local/libexec/miga-rx-ring
+RemainAfterExit=yes
 
 [Install]
 WantedBy=multi-user.target
-EOF
-
-    if [ $? -ne 0 ]; then
-        echo "Ошибка создания файла сервиса."
+RX_UNIT
+    then
+        rm -f -- "$unit"
         return 1
     fi
-
-    systemctl daemon-reload
-    systemctl enable miga_server
-    if [ $? -eq 0 ]; then
-        echo "Сервис miga_server включен в автозапуск."
-    else
-        echo "Ошибка включения автозапуска."
-        return 1
-    fi
-
-    systemctl start miga_server
-    if [ $? -eq 0 ]; then
-        echo "Сервис miga_server запущен."
-    else
-        echo "Ошибка запуска сервиса. Проверьте журнал: journalctl -u miga_server"
-        return 1
-    fi
-
-    return 0
+    chmod 0644 "$unit" && mv -f -- "$unit" /etc/systemd/system/miga-rx-ring.service || { rm -f -- "$unit"; return 1; }
+    systemctl daemon-reload || return 1
+    systemctl enable miga-rx-ring.service || return 1
+    systemctl restart miga-rx-ring.service
 }
 
-# Основная часть
-install_iptables
-
-# Настройка маскарада
-configure_masquerade
-
-# Генерация ключей (однократная инициализация)
-echo "Генерация ключей через /usr/local/miga_server --generate-keys..."
-if [ -x "/usr/local/miga_server" ]; then
-    /usr/local/miga_server --generate-keys
-    if [ $? -ne 0 ]; then
-        echo "Ошибка при генерации ключей."
-        exit 1
-    fi
-else
-    echo "Ошибка: /usr/local/miga_server не найден или не является исполняемым файлом."
+if [ "${1:-}" = "--configure-rx-ring" ]; then
+    [ "$EUID" -eq 0 ] || exit 1
+    configure_rx_ring
+    exit $?
+fi
+if [ "${1:-}" != "--protocol-v2" ]; then
+    printf '%s\n' 'Usage: install.sh --protocol-v2 HOST OUTGOING_INTERFACE' >&2
     exit 1
 fi
-
-# Регистрация и запуск демона
-if command -v systemctl &> /dev/null; then
-    register_systemd_service
-    if [ $? -eq 0 ]; then
-        echo "Настройка демона завершена успешно."
-    else
-        echo "Не удалось настроить демон."
-        exit 1
-    fi
-else
-    echo "Предупреждение: systemd не обнаружен. Демон не зарегистрирован."
-    echo "Для ручной настройки автозапуска используйте init.d или другой способ."
-fi
-
-echo "Готово. Сервер работает как демон."
+shift
+exec bash "$(cd -- "$(dirname -- "$0")" && pwd)/install-v2.sh" "$@"

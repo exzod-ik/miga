@@ -23,4 +23,5 @@ public:
     static bool Uninstall();
     static bool IsInstalled();
     static bool Run();
+    static bool FlushDnsCache();
 };

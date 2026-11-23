@@ -76,6 +76,7 @@ internal fun MigaApp(model: MigaViewModel, catalog: AppCatalogState, directAvail
     var assignedOnly by rememberSaveable { mutableStateOf(false) }
     val snack = remember { SnackbarHostState() }
     val needServer = stringResource(R.string.need_server)
+    val needInvitation = stringResource(R.string.invitation_required)
     val needRoutes = stringResource(R.string.need_routes)
     val needPublicRules = stringResource(R.string.need_public_rules)
     val startFailed = stringResource(R.string.state_unavailable)
@@ -129,6 +130,7 @@ internal fun MigaApp(model: MigaViewModel, catalog: AppCatalogState, directAvail
                     Header(stringResource(R.string.app_name), onSettings = {
                         settingsReturnPage = Page.TUNNEL.name; pageName = Page.SETTINGS.name
                     })
+                    if (saved?.profiles?.any { it.requiresInvitation } == true) Text(stringResource(R.string.migration_rules_kept))
                     TunnelScreen(status.phase, saved,
                         onStart = {
                             val settings = saved
@@ -139,6 +141,13 @@ internal fun MigaApp(model: MigaViewModel, catalog: AppCatalogState, directAvail
                                     pageName = Page.ROUTES.name
                                     scope.launch { snack.showSnackbar(if (directAvailable)
                                         needPublicRules else needRoutes) }
+                                }
+                                settings.profiles.any { profile -> profile.requiresInvitation &&
+                                    (profile.id in settings.assignments.values || directAvailable &&
+                                        (settings.ipv4Rules.any { it.profileId == profile.id } ||
+                                            settings.domainRules.any { it.profileId == profile.id })) } -> {
+                                    pageName = Page.SERVERS.name
+                                    scope.launch { snack.showSnackbar(needInvitation) }
                                 }
                                 else -> onStart()
                             }
@@ -294,6 +303,7 @@ private val darkColors = darkColorScheme(background = Color.Black, surface = Col
     }
     if (locked) Text(stringResource(R.string.stop_to_edit), color = MaterialTheme.colorScheme.onSurfaceVariant)
     if (saved.profiles.isEmpty()) Text(stringResource(R.string.no_servers))
+    if (saved.profiles.any { it.requiresInvitation }) Text(stringResource(R.string.migration_rules_kept))
     saved.profiles.forEach { profile ->
         val assignmentCount = saved.assignments.values.count { it == profile.id }
         val ruleCount = saved.ipv4Rules.count { it.profileId == profile.id } + saved.domainRules.count { it.profileId == profile.id }
@@ -303,14 +313,16 @@ private val darkColors = darkColorScheme(background = Color.Black, surface = Col
                 Text(profile.name, style = MaterialTheme.typography.titleLarge)
                 Text(profile.address, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Text(stringResource(R.string.server_usage, assignmentCount, ruleCount))
-                Text(status.servers[profile.id]?.let { server ->
+                Text(if (profile.requiresInvitation) stringResource(R.string.invitation_required) else status.servers[profile.id]?.let { server ->
                     when { server.noResponse -> stringResource(R.string.no_server_reply)
                         else -> connectionLabel(server.state) }
                 } ?: if (assignmentCount + ruleCount == 0) stringResource(R.string.not_used)
                     else if (locked) stringResource(R.string.state_connecting)
                     else stringResource(R.string.tunnel_state_off))
                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    TextButton(onClick = { onEdit(profile.id) }, enabled = !locked) { Text(stringResource(R.string.edit)) }
+                    TextButton(onClick = { onEdit(profile.id) }, enabled = !locked) {
+                        Text(stringResource(if (profile.requiresInvitation) R.string.enter_invitation else R.string.edit))
+                    }
                     TextButton(onClick = { deleteConfirm = true }, enabled = !locked) { Text(stringResource(R.string.delete)) }
                     TextButton(onClick = onDiagnostics) { Text(stringResource(R.string.diagnostics)) }
                 }
@@ -334,18 +346,22 @@ private val darkColors = darkColorScheme(background = Color.Black, surface = Col
             modifier = Modifier.weight(1f).heightIn(min = 56.dp)) { Text(stringResource(R.string.add_server_qr)) }
     }
     pendingQr?.let { qr ->
+        val matching = saved.profiles.filter { it.address == qr.address }
+        val migrated = matching.singleOrNull()?.takeIf { it.requiresInvitation }
         AlertDialog(onDismissRequest = { pendingQr = null },
             title = { Text(stringResource(R.string.import_server_qr)) },
-            text = { Text("${qr.address} · UDP ${qr.firstPort}–${qr.lastPort}\n${stringResource(R.string.qr_secret_warning)}") },
+            text = { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("${qr.address} · UDP ${qr.firstPort}–${qr.lastPort}\n${stringResource(R.string.qr_secret_warning)}")
+                if (migrated != null) Text(stringResource(R.string.replace_migrated_invitation, migrated.name))
+            } },
             confirmButton = { TextButton(onClick = {
                 if (locked) { pendingQr = null; return@TextButton }
-                if (saved.profiles.any { it.address == qr.address }) {
+                if (matching.isNotEmpty() && migrated == null) {
                     qrError = "Сервер с этим адресом уже добавлен"
                     pendingQr = null
                     return@TextButton
                 }
-                model.saveProfile(null, qr.address, qr.address, qr.firstPort.toString(),
-                    qr.lastPort.toString(), qr.xor, qr.swap, true,
+                model.importInvitation(migrated?.id, migrated?.name ?: qr.address, qr.invitation,
                     onSuccess = { pendingQr = null }, onFailure = { qrError = it; pendingQr = null })
             }) { Text(stringResource(R.string.add_server)) } },
             dismissButton = { TextButton(onClick = { pendingQr = null }) { Text(stringResource(R.string.cancel)) } })
@@ -367,91 +383,100 @@ private val darkColors = darkColorScheme(background = Color.Black, surface = Col
         }
     }
     Column(modifier, verticalArrangement = Arrangement.spacedBy(12.dp)) {
-    if (locked) Text(stringResource(R.string.stop_to_edit), color = MaterialTheme.colorScheme.onSurfaceVariant)
-    if (!directAvailable) Text(stringResource(R.string.direct_unavailable), color = MaterialTheme.colorScheme.onSurfaceVariant)
-    if (directAvailable)
-        Text(stringResource(R.string.route_priority), color = MaterialTheme.colorScheme.onSurfaceVariant)
-    PrimaryTabRow(selectedTabIndex = tab.ordinal) {
-        RouteTab.entries.forEach { item -> Tab(selected = item == tab, onClick = { onTab(item) },
-            enabled = directAvailable || item == RouteTab.APPS,
-            text = { Text(when (item) { RouteTab.APPS -> stringResource(R.string.applications)
-                RouteTab.IP -> stringResource(R.string.ip_rules); RouteTab.DOMAINS -> stringResource(R.string.domains) },
-                color = if (!directAvailable && item != RouteTab.APPS)
-                    MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f) else Color.Unspecified) }) }
-    }
-    when (tab) {
-        RouteTab.APPS -> {
-            OutlinedTextField(search, onSearch, modifier = Modifier.fillMaxWidth(),
-                label = { Text(stringResource(R.string.search_apps)) }, singleLine = true)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                FilterChip(!assignedOnly, { onAssignedOnly(false) }, label = { Text(stringResource(R.string.available)) })
-                FilterChip(assignedOnly, { onAssignedOnly(true) }, label = { Text(stringResource(R.string.assigned)) })
-            }
-            when {
-                catalog.loading -> {
-                    CircularProgressIndicator()
-                    Text(stringResource(R.string.loading_apps))
-                }
-                catalog.error -> {
-                    Text(stringResource(R.string.apps_load_failed), color = MaterialTheme.colorScheme.error)
-                    TextButton(onClick = onReloadApps) { Text(stringResource(R.string.retry)) }
-                }
-                else -> {
-                    val visible = catalog.apps.map { it.first }.toSet()
-                    val unavailable = (saved.selectedPackages - visible)
-                        .filter { !assignedOnly || it in saved.assignments }
-                    val filtered = catalog.apps.filter { (name, label) ->
-                        (!assignedOnly || name in saved.assignments) &&
-                            (search.isBlank() || name.contains(search, true) || label.contains(search, true))
-                    }
-                    LazyColumn(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                        items(unavailable, key = { "missing:$it" }) { name ->
-                            Text(stringResource(R.string.unavailable_app, name))
-                            TextButton(enabled = !locked, onClick = { model.assignPackage(name, null) }) {
-                                Text(stringResource(R.string.remove_assignment))
-                            }
+        if (locked) Text(stringResource(R.string.stop_to_edit), color = MaterialTheme.colorScheme.onSurfaceVariant)
+        if (!directAvailable) Text(stringResource(R.string.direct_unavailable), color = MaterialTheme.colorScheme.onSurfaceVariant)
+        if (directAvailable)
+            Text(stringResource(R.string.route_priority), color = MaterialTheme.colorScheme.onSurfaceVariant)
+        PrimaryTabRow(selectedTabIndex = tab.ordinal) {
+            RouteTab.entries.forEach { item -> Tab(selected = item == tab, onClick = { onTab(item) },
+                enabled = directAvailable || item == RouteTab.APPS,
+                text = { Text(when (item) { RouteTab.APPS -> stringResource(R.string.applications)
+                    RouteTab.IP -> stringResource(R.string.ip_rules); RouteTab.DOMAINS -> stringResource(R.string.domains) },
+                    color = if (!directAvailable && item != RouteTab.APPS)
+                        MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f) else Color.Unspecified) }) }
+        }
+        Surface(
+            modifier = Modifier.fillMaxWidth().weight(1f),
+            shape = RoundedCornerShape(12.dp),
+            color = MaterialTheme.colorScheme.surface,
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
+        ) {
+            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                when (tab) {
+                    RouteTab.APPS -> {
+                        OutlinedTextField(search, onSearch, modifier = Modifier.fillMaxWidth(),
+                            label = { Text(stringResource(R.string.search_apps)) }, singleLine = true)
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            FilterChip(!assignedOnly, { onAssignedOnly(false) }, label = { Text(stringResource(R.string.available)) })
+                            FilterChip(assignedOnly, { onAssignedOnly(true) }, label = { Text(stringResource(R.string.assigned)) })
                         }
-                        items(filtered, key = { it.first }) { (name, label) ->
-                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                Row(verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                                    AndroidView(factory = { context -> ImageView(context).apply {
-                                        scaleType = ImageView.ScaleType.FIT_CENTER
-                                    } }, update = { view -> view.setImageDrawable(
-                                        runCatching { packageManager.getApplicationIcon(name) }.getOrNull()) },
-                                        modifier = Modifier.size(40.dp))
-                                    Column {
-                                        Text(label, style = MaterialTheme.typography.titleMedium)
-                                        Text(name, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        when {
+                            catalog.loading -> {
+                                CircularProgressIndicator()
+                                Text(stringResource(R.string.loading_apps))
+                            }
+                            catalog.error -> {
+                                Text(stringResource(R.string.apps_load_failed), color = MaterialTheme.colorScheme.error)
+                                TextButton(onClick = onReloadApps) { Text(stringResource(R.string.retry)) }
+                            }
+                            else -> {
+                                val visible = catalog.apps.map { it.first }.toSet()
+                                val unavailable = (saved.selectedPackages - visible)
+                                    .filter { !assignedOnly || it in saved.assignments }
+                                val filtered = catalog.apps.filter { (name, label) ->
+                                    (!assignedOnly || name in saved.assignments) &&
+                                        (search.isBlank() || name.contains(search, true) || label.contains(search, true))
+                                }
+                                LazyColumn(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                                    items(unavailable, key = { "missing:$it" }) { name ->
+                                        Text(stringResource(R.string.unavailable_app, name))
+                                        TextButton(enabled = !locked, onClick = { model.assignPackage(name, null) }) {
+                                            Text(stringResource(R.string.remove_assignment))
+                                        }
+                                    }
+                                    items(filtered, key = { it.first }) { (name, label) ->
+                                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                            Row(verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                                AndroidView(factory = { context -> ImageView(context).apply {
+                                                    scaleType = ImageView.ScaleType.FIT_CENTER
+                                                } }, update = { view -> view.setImageDrawable(
+                                                    runCatching { packageManager.getApplicationIcon(name) }.getOrNull()) },
+                                                    modifier = Modifier.size(40.dp))
+                                                Column {
+                                                    Text(label, style = MaterialTheme.typography.titleMedium)
+                                                    Text(name, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                                }
+                                            }
+                                            if (name in sharedUidConflict) Text(stringResource(R.string.shared_uid_conflict),
+                                                color = MaterialTheme.colorScheme.error)
+                                            ProfileSelector(saved, saved.assignments[name], locked, includeNone = true) {
+                                                model.assignPackage(name, it)
+                                            }
+                                        }
                                     }
                                 }
-                                if (name in sharedUidConflict) Text(stringResource(R.string.shared_uid_conflict),
-                                    color = MaterialTheme.colorScheme.error)
-                                ProfileSelector(saved, saved.assignments[name], locked, includeNone = true) {
-                                    model.assignPackage(name, it)
-                                }
                             }
+                        }
+                    }
+                    RouteTab.IP -> {
+                        Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                            saved.ipv4Rules.forEach { rule -> RuleRow(rule.expression, saved.profiles.firstOrNull { it.id == rule.profileId }?.name.orEmpty(),
+                            locked, { onEdit(Editor.IP, rule.id) }, { model.deleteIpv4Rule(rule.id) }) }
+                            Button(onClick = { onEdit(Editor.IP, null) }, enabled = !locked) { Text(stringResource(R.string.add_rule)) }
+                        }
+                    }
+                    RouteTab.DOMAINS -> {
+                        Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                            Text(stringResource(R.string.domain_note), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            saved.domainRules.forEach { rule -> RuleRow(rule.pattern, saved.profiles.firstOrNull { it.id == rule.profileId }?.name.orEmpty(),
+                            locked, { onEdit(Editor.DOMAIN, rule.id) }, { model.deleteDomainRule(rule.id) }) }
+                            Button(onClick = { onEdit(Editor.DOMAIN, null) }, enabled = !locked) { Text(stringResource(R.string.add_rule)) }
                         }
                     }
                 }
             }
         }
-        RouteTab.IP -> {
-            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            saved.ipv4Rules.forEach { rule -> RuleRow(rule.expression, saved.profiles.firstOrNull { it.id == rule.profileId }?.name.orEmpty(),
-                locked, { onEdit(Editor.IP, rule.id) }, { model.deleteIpv4Rule(rule.id) }) }
-            Button(onClick = { onEdit(Editor.IP, null) }, enabled = !locked) { Text(stringResource(R.string.add_rule)) }
-            }
-        }
-        RouteTab.DOMAINS -> {
-            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text(stringResource(R.string.domain_note), color = MaterialTheme.colorScheme.onSurfaceVariant)
-            saved.domainRules.forEach { rule -> RuleRow(rule.pattern, saved.profiles.firstOrNull { it.id == rule.profileId }?.name.orEmpty(),
-                locked, { onEdit(Editor.DOMAIN, rule.id) }, { model.deleteDomainRule(rule.id) }) }
-            Button(onClick = { onEdit(Editor.DOMAIN, null) }, enabled = !locked) { Text(stringResource(R.string.add_rule)) }
-            }
-        }
-    }
     }
 }
 

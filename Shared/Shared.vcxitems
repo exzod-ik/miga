@@ -14,7 +14,6 @@
     <ProjectCapability Include="SourceItemsFromImports" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="$(MSBuildThisFileDirectory)Encryption.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)Logger.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)LogFormat.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)InternetChecksum.h" />
@@ -23,7 +22,6 @@
     <ClInclude Include="$(MSBuildThisFileDirectory)LogTime.h" />
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="$(MSBuildThisFileDirectory)Encryption.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)Logger.cpp" />
   </ItemGroup>
   <ItemGroup>
